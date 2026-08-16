@@ -203,6 +203,17 @@ export class FakeWidgetHost implements WidgetBridge {
     this.handlers.set(name, cb);
   }
 
+  /** Recorded `every` registrations — the daemon's re-push heartbeat lands here; tests tick manually. */
+  readonly ticks: Array<{ ms: number; fn: () => unknown; stopped: boolean }> = [];
+
+  every(ms: number, fn: () => unknown): () => void {
+    const entry = { ms, fn, stopped: false };
+    this.ticks.push(entry);
+    return () => {
+      entry.stopped = true;
+    };
+  }
+
   async remove(): Promise<void> {
     this.removed += 1;
   }
