@@ -24,7 +24,13 @@ import type {
 } from "@volter-ai-dev/supercode-client";
 import type { DiscoveryQuery, HarnessId, SessionDescriptor } from "@volter-ai-dev/supercode-harness-sdk";
 import { WidgetHost } from "lucarne/widget/host";
-import { project, type ProjectionOptions, type WidgetState } from "./projection.js";
+import {
+  project,
+  toAttachError,
+  type AttachError,
+  type ProjectionOptions,
+  type WidgetState,
+} from "./projection.js";
 import { homedir } from "node:os";
 import {
   MAX_SESSION_ROWS,
@@ -239,6 +245,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   /** The last global scan, held whole — the row keys the panel echoes back resolve through it. */
   let descriptors: readonly SessionDescriptor[] = [];
 
+  /**
+   * Why the last attach did not happen. A logged-only failure is invisible to the person who tapped
+   * the row — the panel would sit on "opening…" forever — so every path that gives up on an attach
+   * sets this and pushes, and every new attempt clears it.
+   */
+  let attachError: AttachError | null = null;
+
   /** The non-owning controller following a foreign session, when the panel is on one. */
   let mirror: AgentController | null = null;
   let unsubscribeMirror: (() => void) | null = null;
@@ -253,6 +266,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       ...project(snapshot, options.projection ?? {}),
       sessions,
       attached: attachmentFor(ref, sessions, snapshot.workspace, home),
+      attachError,
     };
     lastPushed = state;
     // Serialize pushes: two overlapping CDP evaluations could otherwise deliver out of order and
@@ -316,11 +330,30 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   let attachSeq = 0;
   let attachChain: Promise<void> = Promise.resolve();
 
+  /**
+   * Record why an attach did not happen, and PUSH it — the panel's stuck "opening…" row is settled
+   * by this state arriving, never by a timeout it invents. A superseded attempt (the user tapped
+   * another row while this one was failing) records nothing: the newer attach owns the panel now.
+   */
+  const failAttach = async (key: string, seq: number, reason: string, logLine = `attach failed: ${reason}`): Promise<void> => {
+    log(logLine);
+    if (stopped || seq !== attachSeq) return;
+    attachError = toAttachError(key, reason);
+    await pushNow();
+  };
+
   const runAttach = async (key: string, seq: number): Promise<void> => {
     if (stopped || seq !== attachSeq) return;
+    // A new attempt supersedes the previous failure, whatever this one goes on to do.
+    attachError = null;
     const descriptor = descriptors.find((d) => sessionKey(d.locator) === key);
     if (!descriptor) {
-      log(`attach: no discovered session with key ${key}`);
+      await failAttach(
+        key,
+        seq,
+        "that session is no longer in the list",
+        `attach: no discovered session with key ${key}`,
+      );
       return;
     }
     await releaseMirror();
@@ -334,8 +367,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     try {
       candidate = createController({ workspace });
     } catch (e) {
-      log(`attach unavailable: ${message(e)}`);
-      await pushNow();
+      await failAttach(key, seq, message(e), `attach unavailable: ${message(e)}`);
       return;
     }
     try {
@@ -350,9 +382,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if (!target) throw new Error(`that session is not visible in ${workspace}`);
       await candidate.dispatch({ type: "observe", sessionKey: target.key });
     } catch (e) {
-      log(`attach failed: ${message(e)}`);
       await candidate.close().catch(() => undefined);
-      await pushNow();
+      await failAttach(key, seq, message(e));
       return;
     }
     if (stopped || seq !== attachSeq) {

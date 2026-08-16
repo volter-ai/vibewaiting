@@ -18,16 +18,21 @@ export const PANEL_CSS = `
   color: var(--fg); font: inherit; cursor: pointer }
 .vw-srow:hover { background: var(--fill) }
 .vw-srow.vw-active { background: var(--fill) }
+/* the dot is LIVENESS (someone is working in this session now), never "the panel is following it" */
 .vw-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--fill-2); border: 1px solid var(--bd) }
-.vw-dot.vw-on { background: var(--ok); border-color: var(--ok) }
+.vw-dot.vw-live { background: var(--ok); border-color: var(--ok) }
 .vw-scol { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 }
 .vw-sline { display: flex; align-items: baseline; justify-content: space-between; gap: 8px }
-.vw-sname { font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
-.vw-sage { flex: none; color: var(--mut); font-size: 10.5px; font-variant-numeric: tabular-nums }
+.vw-sname { min-width: 0; font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
+.vw-sage { flex: none; margin-left: auto; color: var(--mut); font-size: 10.5px; font-variant-numeric: tabular-nums }
+/* which session the panel is on — said in words next to the name, not by the liveness dot */
+.vw-follow { flex: none; margin-right: auto; color: var(--acc); font-size: 9.5px; text-transform: uppercase; letter-spacing: .04em }
 .vw-ssub { display: flex; align-items: baseline; gap: 6px; min-width: 0; color: var(--mut); font-size: 11px }
 .vw-sharness { flex: none; text-transform: uppercase; letter-spacing: .04em; font-size: 9.5px;
   background: var(--fill-2); border-radius: 5px; padding: 1px 5px }
 .vw-sdetail { white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
+/* why the tap did not open a chat — one line, in place of the subtitle, gone on its own */
+.vw-sfail { display: block; color: var(--block); white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
 
 /* chat header */
 .vw-head { display: flex; align-items: center; gap: 7px; padding: 4px 10px 8px }

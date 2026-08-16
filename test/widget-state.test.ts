@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   EMPTY_STATE,
+  attachOutcome,
   attachSettled,
   isSendKey,
   listRows,
@@ -141,6 +142,7 @@ describe("session rows in a patch", () => {
           updatedAt: 1700,
           messages: 42,
           active: true,
+          live: true,
         },
         { harness: "codex", name: "no key" },
         "not an object",
@@ -149,7 +151,43 @@ describe("session rows in a patch", () => {
     });
     expect(state.sessions.map((s) => s.key)).toEqual(["claude-code-1a2b3c4d"]);
     expect(state.sessions[0]?.active).toBe(true);
+    expect(state.sessions[0]?.live).toBe(true);
     expect(state.attached?.name).toBe("atlas");
+  });
+
+  it("reads liveness as its own fact, never inferred from the followed row", () => {
+    const row = (over: Record<string, unknown>): Record<string, unknown> => ({
+      key: "k",
+      harness: "codex",
+      name: "atlas",
+      cwd: "~/a",
+      title: "t",
+      age: "now",
+      updatedAt: 1,
+      messages: 1,
+      active: false,
+      ...over,
+    });
+    const state = readWidgetState({
+      sessions: [row({ key: "k1", live: true }), row({ key: "k2", active: true }), row({ key: "k3" })],
+    });
+    // The followed row is not automatically live, and a live row is not automatically followed.
+    expect(state.sessions.map((s) => [s.live, s.active])).toEqual([
+      [true, false],
+      [false, true],
+      [false, false],
+    ]);
+  });
+
+  it("carries a failed attach through, and drops a malformed one", () => {
+    expect(readWidgetState({ attachError: { key: "k2", message: "missing parentUuid" } }).attachError).toEqual({
+      key: "k2",
+      message: "missing parentUuid",
+    });
+    expect(readWidgetState({ attachError: { key: "k2", message: "" } }).attachError).toBeNull();
+    expect(readWidgetState({ attachError: { message: "no key" } }).attachError).toBeNull();
+    expect(readWidgetState({ attachError: "boom" }).attachError).toBeNull();
+    expect(readWidgetState({}).attachError).toBeNull();
   });
 
   it("has no sessions and no attachment before the first push", () => {
@@ -167,6 +205,29 @@ describe("attachSettled", () => {
     expect(attachSettled("k2", { ...attached, key: "k1" })).toBe(false);
     expect(attachSettled("k2", null)).toBe(false);
     expect(attachSettled(null, attached)).toBe(false);
+  });
+});
+
+describe("attachOutcome", () => {
+  const attached = { key: "k2", harness: "codex", name: "bridge", cwd: "~/b", title: "" };
+  const failed = { key: "k2", message: "cannot reconstruct lossless Claude continuation" };
+
+  it("ends the wait on a failure, not only on a success", () => {
+    // The black hole: before the host reported failures this row said "opening…" forever.
+    expect(attachOutcome("k2", null, failed)).toBe("failed");
+    expect(attachOutcome("k2", { ...attached, key: "k1" }, failed)).toBe("failed");
+    expect(attachOutcome("k2", attached, null)).toBe("attached");
+    expect(attachOutcome("k2", null, null)).toBe("waiting");
+  });
+
+  it("is not moved by a failure belonging to another row", () => {
+    expect(attachOutcome("k2", null, { ...failed, key: "k9" })).toBe("waiting");
+    // Nothing was asked for, so nothing settles — a stale error must not open or close anything.
+    expect(attachOutcome(null, attached, failed)).toBe("waiting");
+  });
+
+  it("prefers the attach that landed over an error carrying the same key", () => {
+    expect(attachOutcome("k2", attached, failed)).toBe("attached");
   });
 });
 
@@ -189,6 +250,7 @@ describe("pillFor", () => {
       updatedAt: 1,
       messages: 1,
       active: false,
+      live: true,
     };
     expect(pillFor({ ...base, sessions: [row] })).toEqual({ tone: "live", label: "1 session" });
     expect(pillFor({ ...base, sessions: [row, { ...row, key: "k2" }] })).toEqual({ tone: "live", label: "2 sessions" });
@@ -208,6 +270,7 @@ describe("listRows", () => {
     updatedAt: 1,
     messages: 3,
     active: false,
+    live: false,
   };
 
   it("is just what discovery found, once the attached session is among it", () => {
@@ -224,6 +287,8 @@ describe("listRows", () => {
     };
     const rows = listRows(state);
     expect(rows.length).toBe(2);
-    expect(rows[0]).toMatchObject({ key: "", name: "atlas", harness: "claude-code", active: true, age: "" });
+    // It is the session the panel is attached to right now — live by definition, with no descriptor
+    // timestamp to read it from.
+    expect(rows[0]).toMatchObject({ key: "", name: "atlas", harness: "claude-code", active: true, age: "", live: true });
   });
 });

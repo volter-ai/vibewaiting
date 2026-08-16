@@ -4,10 +4,10 @@
 // accumulating `state` object typed `unknown` — so the FIRST thing the panel does is re-establish
 // the shape defensively (a page reload re-mounts the widget before any push has landed, and the
 // runtime hands that empty accumulator straight to `render`).
-import type { TranscriptEntry, TranscriptRole, WidgetState } from "../src/projection.js";
+import type { AttachError, TranscriptEntry, TranscriptRole, WidgetState } from "../src/projection.js";
 import type { AttachedSession, SessionRow } from "../src/sessions.js";
 
-export type { AttachedSession, SessionRow, TranscriptEntry, TranscriptRole, WidgetState };
+export type { AttachError, AttachedSession, SessionRow, TranscriptEntry, TranscriptRole, WidgetState };
 
 export const EMPTY_STATE: WidgetState = {
   pill: { tone: "off", label: "connecting…" },
@@ -18,6 +18,7 @@ export const EMPTY_STATE: WidgetState = {
   error: null,
   sessions: [],
   attached: null,
+  attachError: null,
 };
 
 /** The messenger's two views: the session list (root) and one session's transcript. */
@@ -46,7 +47,7 @@ function readEntry(raw: unknown): TranscriptEntry | null {
 
 function readSessionRow(raw: unknown): SessionRow | null {
   if (!isRecord(raw)) return null;
-  const { key, harness, name, cwd, title, age, updatedAt, messages, active } = raw;
+  const { key, harness, name, cwd, title, age, updatedAt, messages, active, live } = raw;
   if (typeof key !== "string" || key === "") return null;
   if (typeof harness !== "string") return null;
   return {
@@ -59,7 +60,16 @@ function readSessionRow(raw: unknown): SessionRow | null {
     updatedAt: typeof updatedAt === "number" ? updatedAt : null,
     messages: typeof messages === "number" ? messages : null,
     active: active === true,
+    live: live === true,
   };
+}
+
+/** The host's report of a failed attach, or `null` — a patch without one leaves no stale error behind. */
+function readAttachError(raw: unknown): AttachError | null {
+  if (!isRecord(raw)) return null;
+  const { key, message } = raw;
+  if (typeof key !== "string" || typeof message !== "string" || message === "") return null;
+  return { key, message };
 }
 
 function readAttached(raw: unknown): AttachedSession | null {
@@ -98,6 +108,7 @@ export function readWidgetState(raw: unknown): WidgetState {
       ? raw["sessions"].map(readSessionRow).filter((s): s is SessionRow => s !== null)
       : [],
     attached: readAttached(raw["attached"]),
+    attachError: readAttachError(raw["attachError"]),
   };
 }
 
@@ -123,6 +134,9 @@ export function listRows(state: WidgetState): SessionRow[] {
       updatedAt: null,
       messages: null,
       active: true,
+      // The panel is attached to it right now — nothing is more live than that, and there is no
+      // descriptor to read a timestamp from.
+      live: true,
     },
     ...state.sessions,
   ];
@@ -137,6 +151,35 @@ export function attachSettled(awaitingKey: string | null, attached: AttachedSess
   if (awaitingKey === null || attached === null) return false;
   return attached.key === awaitingKey;
 }
+
+/** What happened to the attach the list is waiting on. `"waiting"` covers "nothing asked for" too. */
+export type AttachOutcome = "waiting" | "attached" | "failed";
+
+/**
+ * The awaited attach, settled — the ONE place "opening…" is allowed to end.
+ *
+ * It ends two ways, and a row that can only end the happy way is the black hole this exists to
+ * close: before the host reported failures, a session that could not be reconstructed left its row
+ * saying "opening…" for as long as the panel was open. Success wins over a failure carrying the
+ * same key (the host clears the error on the attempt that succeeds, so that pairing is stale), and
+ * a failure about a DIFFERENT row is not this row's news.
+ */
+export function attachOutcome(
+  awaitingKey: string | null,
+  attached: AttachedSession | null,
+  attachError: AttachError | null,
+): AttachOutcome {
+  if (awaitingKey === null) return "waiting";
+  if (attachSettled(awaitingKey, attached)) return "attached";
+  if (attachError !== null && attachError.key === awaitingKey) return "failed";
+  return "waiting";
+}
+
+/**
+ * How long a failed attach stays under its row before the list goes quiet again. Long enough to
+ * read a two-line reason, short enough that it is gone by the time you come back to the panel.
+ */
+export const ATTACH_ERROR_LINGER_MS = 8000;
 
 /**
  * The shell pill — the one thing visible while the widget is closed. It reports the attached

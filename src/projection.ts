@@ -52,6 +52,20 @@ export interface TranscriptEntry {
   truncated: boolean;
 }
 
+/**
+ * The last attach that FAILED, named by the row key the panel echoed in.
+ *
+ * An attach can fail for reasons that belong to the session, not to us — the real one that started
+ * this: `cannot reconstruct lossless Claude continuation: … missing parentUuid`. The daemon used to
+ * log that and push nothing, which left the tapped row saying "opening…" forever. The key is what
+ * lets the panel decide the failure is about the row it is waiting on, rather than showing a stale
+ * error against some other session.
+ */
+export interface AttachError {
+  key: string;
+  message: string;
+}
+
 export interface WidgetState {
   pill: WidgetPill;
   transcript: TranscriptEntry[];
@@ -72,6 +86,11 @@ export interface WidgetState {
   sessions: SessionRow[];
   /** Which session the Agent panel is showing, for its header. Merged in by the daemon, same as `sessions`. */
   attached: AttachedSession | null;
+  /**
+   * Why the last attach did not happen, or `null`. Merged in by the daemon (it owns attaching);
+   * cleared the moment another attach is attempted and on any attach that succeeds.
+   */
+  attachError: AttachError | null;
 }
 
 export interface ProjectionOptions {
@@ -85,6 +104,8 @@ export const DEFAULT_MAX_ENTRIES = 50;
 export const DEFAULT_MAX_ENTRY_CHARS = 2000;
 /** The pill is one line of chrome — a long error message is cut here, not in the shell. */
 export const MAX_PILL_LABEL_CHARS = 72;
+/** An attach failure is one line under a 300px-wide row — a stack-trace-length message is cut here. */
+export const MAX_ATTACH_ERROR_CHARS = 200;
 
 /** The metadata keys a harness may record an entry's time under, in the order we trust them. */
 const TIMESTAMP_KEYS = ["timestamp", "ts", "time", "created_at", "createdAt", "date"] as const;
@@ -114,6 +135,11 @@ export function timestampFromMetadata(metadata: Record<string, string> | undefin
     if (Number.isFinite(parsed)) return parsed;
   }
   return null;
+}
+
+/** Build the pushed attach failure, cut to one row's worth of text. The daemon's one door to it. */
+export function toAttachError(key: string, message: string): AttachError {
+  return { key, message: truncate(message.trim(), MAX_ATTACH_ERROR_CHARS).text };
 }
 
 function toolText(entry: Extract<ConversationEntry, { kind: "tool" }>): string {
@@ -228,9 +254,9 @@ export function derivePill(snapshot: SupercodeClientSnapshot): WidgetPill {
 /**
  * Controller snapshot → the exact object pushed to the widget. Pure; safe to call on every revision.
  *
- * `sessions`/`attached` come out EMPTY: they are machine-wide facts the daemon holds (global
- * discovery, which controller is active), not snapshot facts, and this function has no business
- * inventing them. `src/daemon.ts` merges them over this result.
+ * `sessions`/`attached`/`attachError` come out EMPTY: they are machine-wide facts the daemon holds
+ * (global discovery, which controller is active, how the last attach went), not snapshot facts, and
+ * this function has no business inventing them. `src/daemon.ts` merges them over this result.
  */
 export function project(snapshot: SupercodeClientSnapshot, options: ProjectionOptions = {}): WidgetState {
   return {
@@ -242,5 +268,6 @@ export function project(snapshot: SupercodeClientSnapshot, options: ProjectionOp
     error: snapshot.error?.message ?? null,
     sessions: [],
     attached: null,
+    attachError: null,
   };
 }
