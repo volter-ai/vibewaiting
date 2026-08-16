@@ -1,0 +1,37 @@
+{
+  "name": "vibewaiting",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Vibe code without leaving your browser: a lucarne glass widget wired to your CLI coding agent via supercode.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "vibewaiting": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "widget"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node widget/build.mjs",
+    "build:widget": "node widget/build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.widget.json && tsc -p tsconfig.test.json",
+    "test": "vitest run",
+    "smoke": "node scripts/smoke-harness.mjs"
+  },
+  "dependencies": {
+    "@volter-ai-dev/supercode-client": "latest",
+    "@volter-ai-dev/supercode-harness-sdk": "latest",
+    "esbuild": "^0.24.0",
+    "lucarne": "^1.7.0",
+    "preact": "^10.19.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
+  }
+}
