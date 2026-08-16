@@ -24,6 +24,8 @@ export const WIDGET_NS = "vibewaiting";
 export const INTENT_QUEUE = "agent";
 /** Controller revisions arrive in bursts (one per streamed delta); coalesce them into one push. */
 export const DEFAULT_PUSH_DEBOUNCE_MS = 150;
+/** Steady re-push so a shell mounted on a NEWLY NAVIGATED page populates without an agent event. */
+export const DEFAULT_REPUSH_INTERVAL_MS = 2000;
 /** Harnesses tried, in order, when the caller named none — first one that can actually start wins. */
 export const HARNESS_PREFERENCE: readonly string[] = ["claude-code", "codex", "opencode", "pi", "grok"];
 
@@ -31,6 +33,8 @@ export const HARNESS_PREFERENCE: readonly string[] = ["claude-code", "codex", "o
 export interface WidgetBridge {
   push(patch: unknown): Promise<void>;
   onIntent(name: string, cb: (intent: { id: string | number; payload: unknown }) => void | Promise<void>): void;
+  /** Crash-safe repeating tick (`WidgetHost.every`) — returns a stop function. */
+  every(ms: number, fn: () => unknown): () => void;
   remove(): Promise<void>;
 }
 
@@ -67,6 +71,14 @@ export interface DaemonOptions {
   /** Replace the widget mount (tests). Default: `WidgetHost.attach`. */
   attachHost?: (opts: { sessionId: string; ns: string; html: string; engine?: DaemonOptions["engine"] }) => Promise<WidgetBridge>;
   pushDebounceMs?: number | undefined;
+  /**
+   * Re-push heartbeat. A shell mounted AFTER the last revision-driven push (the user navigated to a
+   * new page while the agent was idle) starts EMPTY and would stay empty until the next agent event
+   * — the injector never tells the host about fresh mounts, so a steady re-push is the platform
+   * idiom (see the widget README's `host.every` usage). State is small (projection-capped), so the
+   * default is cheap. `0` disables (tests).
+   */
+  repushIntervalMs?: number | undefined;
   projection?: ProjectionOptions | undefined;
   log?: ((message: string) => void) | undefined;
 }
@@ -178,6 +190,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   const unsubscribe = controller.subscribe(schedulePush);
 
+  const repushMs = options.repushIntervalMs ?? DEFAULT_REPUSH_INTERVAL_MS;
+  const stopRepush = repushMs > 0 ? host.every(repushMs, () => pushNow()) : (): void => undefined;
+
   host.onIntent(INTENT_QUEUE, async (intent) => {
     const text = parseSendIntent(intent.payload);
     if (text === null) {
@@ -220,6 +235,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       stopped = true;
       if (timer) clearTimeout(timer);
       timer = null;
+      stopRepush();
       unsubscribe();
       await inFlight.catch(() => undefined);
       await host.remove().catch((e: unknown) => log(`widget removal failed: ${(e as Error)?.message ?? String(e)}`));

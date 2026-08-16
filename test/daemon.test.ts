@@ -238,6 +238,7 @@ describe("startDaemon", () => {
         await host.push(patch);
       },
       onIntent: host.onIntent.bind(host),
+      every: host.every.bind(host),
       remove: host.remove.bind(host),
     };
     const daemon = await startDaemon({
@@ -269,5 +270,37 @@ describe("startDaemon", () => {
     expect(host.pushes.length).toBe(pushes);
     await daemon.stop(); // idempotent
     expect(host.removed).toBe(1);
+  });
+});
+
+describe("re-push heartbeat", () => {
+  // The bug this guards: a shell mounted on a page navigated AFTER the last revision-driven push
+  // (agent idle) starts empty and stays empty. The heartbeat re-pushes current state on a steady
+  // tick so a fresh mount populates without an agent event.
+  it("registers a heartbeat that re-pushes the current state, and stop() ends it", async () => {
+    const { daemon, host } = await rig();
+    expect(host.ticks.length).toBe(1);
+    const before = host.pushes.length;
+    await host.ticks[0]!.fn();
+    expect(host.pushes.length).toBe(before + 1);
+    expect(host.pushes.at(-1)).toEqual(host.pushes.at(-2)); // same state, re-delivered for fresh mounts
+    await daemon.stop();
+    expect(host.ticks[0]!.stopped).toBe(true);
+  });
+
+  it("repushIntervalMs: 0 disables the heartbeat", async () => {
+    const client = new FakeHarnessClient();
+    const host = new FakeWidgetHost();
+    const daemon = await startDaemon({
+      sessionId: "s",
+      html: "<html></html>",
+      workspace: "/tmp/p",
+      client,
+      pushDebounceMs: 5,
+      repushIntervalMs: 0,
+      attachHost: async () => host,
+    });
+    expect(host.ticks.length).toBe(0);
+    await daemon.stop();
   });
 });
