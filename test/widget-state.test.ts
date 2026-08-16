@@ -3,6 +3,7 @@ import {
   EMPTY_STATE,
   attachSettled,
   isSendKey,
+  listRows,
   nearBottom,
   pendingResolved,
   pillFor,
@@ -193,5 +194,36 @@ describe("pillFor", () => {
     expect(pillFor({ ...base, sessions: [row, { ...row, key: "k2" }] })).toEqual({ tone: "live", label: "2 sessions" });
     // Nothing attached and nothing found: the host's own words stand.
     expect(pillFor(base)).toEqual({ tone: "live", label: "claude-code ready" });
+  });
+});
+
+describe("listRows", () => {
+  const row = {
+    key: "k1",
+    harness: "codex",
+    name: "bridge",
+    cwd: "~/b",
+    title: "t",
+    age: "now",
+    updatedAt: 1,
+    messages: 3,
+    active: false,
+  };
+
+  it("is just what discovery found, once the attached session is among it", () => {
+    const state = { ...EMPTY_STATE, sessions: [row], attached: { key: "k1", harness: "codex", name: "bridge", cwd: "~/b", title: "t" } };
+    expect(listRows(state)).toEqual([row]);
+    expect(listRows({ ...EMPTY_STATE, sessions: [row] })).toEqual([row]);
+  });
+
+  it("still lists a just-started session discovery has not persisted yet", () => {
+    const state = {
+      ...EMPTY_STATE,
+      sessions: [row],
+      attached: { key: "", harness: "claude-code", name: "atlas", cwd: "~/volter/atlas", title: "" },
+    };
+    const rows = listRows(state);
+    expect(rows.length).toBe(2);
+    expect(rows[0]).toMatchObject({ key: "", name: "atlas", harness: "claude-code", active: true, age: "" });
   });
 });

@@ -102,6 +102,33 @@ export function readWidgetState(raw: unknown): WidgetState {
 }
 
 /**
+ * The rows the list shows.
+ *
+ * Discovery's rows, plus one for the session the panel is ALREADY on when discovery has not seen it
+ * yet — a session the daemon just started has no persisted file until its first turn, and without
+ * this its own chat would be unreachable from the list that is supposed to contain everything. Its
+ * key is `""`, which is how the view knows to open it locally instead of asking the host to attach.
+ */
+export function listRows(state: WidgetState): SessionRow[] {
+  const attached = state.attached;
+  if (attached === null || attached.key !== "") return state.sessions;
+  return [
+    {
+      key: "",
+      harness: attached.harness,
+      name: attached.name,
+      cwd: attached.cwd,
+      title: attached.title,
+      age: "",
+      updatedAt: null,
+      messages: null,
+      active: true,
+    },
+    ...state.sessions,
+  ];
+}
+
+/**
  * Has the host confirmed the attach this panel asked for? The list marks the tapped row as opening
  * until it has, and only then does the messenger slide to the chat view — a view that switched on
  * the click would show the PREVIOUS session's transcript under the new session's name.

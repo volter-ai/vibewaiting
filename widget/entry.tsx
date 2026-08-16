@@ -19,6 +19,7 @@ import type { JSX } from "preact";
 import {
   attachSettled,
   isSendKey,
+  listRows,
   nearBottom,
   pendingResolved,
   pillFor,
@@ -107,12 +108,13 @@ function SessionList({
   awaiting: string | null;
   onOpen: (row: SessionRow) => void;
 }): JSX.Element {
+  const rows = listRows(state);
   return (
     <div class="vw-list">
-      {state.sessions.length === 0 ? (
+      {rows.length === 0 ? (
         <div class="vw-empty">{state.error ?? "Looking for coding sessions…"}</div>
       ) : null}
-      {state.sessions.map((row) => (
+      {rows.map((row) => (
         <SessionListRow
           key={row.key}
           row={row}
@@ -237,6 +239,11 @@ function MessengerPanel({ state }: { state: unknown }): JSX.Element {
   });
 
   const open = (row: SessionRow): void => {
+    // The keyless row IS the attached session (see `listRows`) — nothing to ask the host for.
+    if (row.key === "") {
+      setView("chat");
+      return;
+    }
     widget.sendIntent(INTENT_QUEUE, { action: "attach", key: row.key });
     setAwaiting(row.key);
   };

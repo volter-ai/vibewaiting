@@ -20,7 +20,8 @@
     "build:widget": "node widget/build.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.widget.json && tsc -p tsconfig.test.json",
     "test": "vitest run",
-    "smoke": "node scripts/smoke-harness.mjs"
+    "smoke": "node scripts/smoke-harness.mjs",
+    "smoke:sessions": "npm run build && node scripts/smoke-sessions.mjs"
   },
   "dependencies": {
     "@volter-ai-dev/supercode-client": "latest",
