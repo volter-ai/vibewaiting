@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  LIVENESS_WINDOW_MS,
   MAX_SESSION_ROWS,
   attachmentFor,
+  isLive,
   matchesActive,
   projectSession,
   projectSessions,
@@ -53,6 +55,38 @@ describe("relativeAge", () => {
   });
 });
 
+describe("isLive", () => {
+  it("reads recency of the store against the injected now", () => {
+    expect(LIVENESS_WINDOW_MS).toBe(5 * 60_000);
+    expect(isLive(NOW - 1_000, NOW)).toBe(true);
+    // Just inside, exactly on, and just outside the window.
+    expect(isLive(NOW - (LIVENESS_WINDOW_MS - 1), NOW)).toBe(true);
+    expect(isLive(NOW - LIVENESS_WINDOW_MS, NOW)).toBe(true);
+    expect(isLive(NOW - (LIVENESS_WINDOW_MS + 1), NOW)).toBe(false);
+    expect(isLive(NOW - 86_400_000, NOW)).toBe(false);
+    // The same descriptor read later goes quiet without anything being re-fetched.
+    expect(isLive(NOW, NOW + LIVENESS_WINDOW_MS + 1)).toBe(false);
+    // Clock skew between two stores reads as live, the way `relativeAge` reads it as "now".
+    expect(isLive(NOW + 60_000, NOW)).toBe(true);
+  });
+
+  it("is not live when the store recorded no time at all", () => {
+    expect(isLive(null, NOW)).toBe(false);
+    expect(isLive(undefined, NOW)).toBe(false);
+    expect(isLive(0, NOW)).toBe(false);
+    expect(isLive(Number.NaN, NOW)).toBe(false);
+  });
+
+  it("is what the row carries, so the panel never re-derives it", () => {
+    const fresh = projectSession(descriptor({ updated_at_ms: NOW - 60_000 }), { now: NOW, home: HOME });
+    const stale = projectSession(descriptor({ updated_at_ms: NOW - 86_400_000 }), { now: NOW, home: HOME });
+    const timeless = projectSession(descriptor({ updated_at_ms: null }), { now: NOW, home: HOME });
+    expect([fresh.live, stale.live, timeless.live]).toEqual([true, false, false]);
+    // Liveness is independent of which session the panel happens to be following.
+    expect([fresh.active, stale.active]).toEqual([false, false]);
+  });
+});
+
 describe("shortCwd / workspaceName", () => {
   it("folds the home directory and nothing else", () => {
     expect(shortCwd("/home/dev/volter/atlas", HOME)).toBe("~/volter/atlas");
@@ -100,6 +134,7 @@ describe("projectSession", () => {
       updatedAt: NOW - 3 * 60_000,
       messages: 42,
       active: false,
+      live: true,
     });
   });
 

@@ -6,12 +6,14 @@ import type {
 import {
   DEFAULT_MAX_ENTRIES,
   DEFAULT_MAX_ENTRY_CHARS,
+  MAX_ATTACH_ERROR_CHARS,
   MAX_PILL_LABEL_CHARS,
   derivePill,
   project,
   projectEntry,
   projectTranscript,
   timestampFromMetadata,
+  toAttachError,
 } from "../src/projection.js";
 
 // ── fixtures ────────────────────────────────────────────────────────────────────────────────────
@@ -302,6 +304,17 @@ describe("derivePill", () => {
   });
 });
 
+describe("toAttachError", () => {
+  it("keeps the harness's own words, cut to one row's worth", () => {
+    const real =
+      "SDK execution failed for Load: cannot reconstruct lossless Claude continuation: missing parentUuid";
+    expect(toAttachError("k1", `  ${real}  `)).toEqual({ key: "k1", message: real });
+    const long = toAttachError("k1", "x".repeat(5000));
+    expect(long.message.length).toBe(MAX_ATTACH_ERROR_CHARS + 1); // + the ellipsis that marks the cut
+    expect(long.message.endsWith("…")).toBe(true);
+  });
+});
+
 // ── the whole projection ────────────────────────────────────────────────────────────────────────
 
 describe("project", () => {
@@ -327,6 +340,7 @@ describe("project", () => {
       // Machine-wide facts the snapshot cannot know: the daemon merges them over this result.
       sessions: [],
       attached: null,
+      attachError: null,
     });
   });
 

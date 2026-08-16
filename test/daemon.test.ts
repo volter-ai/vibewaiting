@@ -9,13 +9,14 @@ import {
   parseAttachIntent,
   parseSendIntent,
   startDaemon,
+  type AgentController,
   type Daemon,
 } from "../src/daemon.js";
-import { DEFAULT_MAX_ENTRIES } from "../src/projection.js";
+import { DEFAULT_MAX_ENTRIES, MAX_ATTACH_ERROR_CHARS } from "../src/projection.js";
 import type { WidgetState } from "../src/projection.js";
 import { sessionKey } from "../src/sessions.js";
 import { FakeHarnessClient, FakeWidgetHost, descriptor, localHarness, waitFor } from "./fakes.js";
-import type { SupercodeClientSnapshot } from "@volter-ai-dev/supercode-client";
+import { SupercodeController, type SupercodeClientSnapshot } from "@volter-ai-dev/supercode-client";
 
 const running: Daemon[] = [];
 
@@ -167,6 +168,7 @@ describe("startDaemon", () => {
     await waitFor(() => (host.pushes.at(-1) as WidgetState).transcript.length === 1);
     const push = host.pushes.at(-1) as Record<string, unknown>;
     expect(Object.keys(push).sort()).toEqual([
+      "attachError",
       "attached",
       "busy",
       "canSend",
@@ -460,5 +462,137 @@ describe("attaching", () => {
     await daemon.flush();
     expect(logs.some((l) => l.includes("no discovered session"))).toBe(true);
     expect(lastPush().attached).toMatchObject({ name: "project" });
+  });
+
+  it("tells the panel about a key it could not resolve, rather than only the log", async () => {
+    const { daemon, host, lastPush } = await sessionRig();
+    await host.fireIntent(INTENT_QUEUE, { action: "attach", key: "claude-code-deadbeef" });
+    await daemon.flush();
+    expect(lastPush().attachError).toEqual({
+      key: "claude-code-deadbeef",
+      message: "that session is no longer in the list",
+    });
+  });
+});
+
+// ── an attach that FAILS ────────────────────────────────────────────────────────────────────────
+// The defect this closes: the daemon logged `attach failed: … cannot reconstruct lossless Claude
+// continuation … missing parentUuid` and pushed nothing, so the tapped row said "opening…" for as
+// long as the panel stayed open. The failure is state now, and it crosses the wire.
+
+const REAL_FAILURE =
+  "SDK execution failed for Load: cannot reconstruct lossless Claude continuation: missing parentUuid";
+
+/** A controller that cannot come up — the shape every real attach failure reaches the daemon as. */
+function brokenController(reason: string): AgentController {
+  return {
+    getSnapshot: () => ({}) as SupercodeClientSnapshot,
+    subscribe: () => (): void => undefined,
+    initialize: async () => {
+      throw new Error(reason);
+    },
+    dispatch: async () => {
+      throw new Error(reason);
+    },
+    close: async (): Promise<void> => undefined,
+  };
+}
+
+/** Like `sessionRig`, but attaching to ONE named workspace fails; every other attach is the real thing. */
+async function failingAttachRig(
+  reason: string,
+  failWorkspace = "/home/dev/volter/atlas",
+): Promise<Rig & { logs: string[] }> {
+  const client = new FakeHarnessClient({ sessions: [OWN, ATLAS, BRIDGE] });
+  const logs: string[] = [];
+  const host = new FakeWidgetHost();
+  const daemon = await startDaemon({
+    sessionId: "session-abc",
+    html: "<html></html>",
+    workspace: "/tmp/project",
+    client,
+    pushDebounceMs: 5,
+    home: "/home/dev",
+    now: () => 2_000_000,
+    attachHost: async () => host,
+    log: (m) => logs.push(m),
+    createController: ({ workspace }) =>
+      workspace === failWorkspace
+        ? brokenController(reason)
+        : (new SupercodeController({ client, workspace, ownsClient: false }) as unknown as AgentController),
+  });
+  running.push(daemon);
+  return { daemon, host, client, logs, attached: [], lastPush: () => host.pushes.at(-1) as WidgetState };
+}
+
+describe("an attach that fails", () => {
+  it("pushes the reason, keyed to the row that was tapped", async () => {
+    const { daemon, host, logs, lastPush } = await failingAttachRig(REAL_FAILURE);
+    await host.fireIntent(INTENT_QUEUE, { action: "attach", key: sessionKey(ATLAS.locator) });
+    await daemon.flush();
+    expect(lastPush().attachError).toEqual({ key: sessionKey(ATLAS.locator), message: REAL_FAILURE });
+    expect(logs.some((l) => l.startsWith("attach failed"))).toBe(true);
+    // The panel is still on the session it was on — a failed attach moves nothing.
+    expect(lastPush().attached).toMatchObject({ name: "project" });
+    expect(lastPush().canSend).toBe(true);
+  });
+
+  it("cuts a stack-trace-length message to one row's worth", async () => {
+    const { daemon, host, lastPush } = await failingAttachRig("z".repeat(5000));
+    await host.fireIntent(INTENT_QUEUE, { action: "attach", key: sessionKey(ATLAS.locator) });
+    await daemon.flush();
+    expect(lastPush().attachError?.message.length).toBe(MAX_ATTACH_ERROR_CHARS + 1);
+  });
+
+  it("clears on the next attempt, and that attempt still lands cleanly", async () => {
+    const { daemon, client, host, lastPush } = await failingAttachRig(REAL_FAILURE);
+    await host.fireIntent(INTENT_QUEUE, { action: "attach", key: sessionKey(ATLAS.locator) });
+    expect(lastPush().attachError).not.toBeNull();
+    await host.fireIntent(INTENT_QUEUE, { action: "attach", key: sessionKey(BRIDGE.locator) });
+    await daemon.flush();
+    expect(lastPush().attachError).toBeNull();
+    expect(lastPush().attached).toMatchObject({ name: "bridge", harness: "codex" });
+    // The failed candidate left nothing streaming behind it.
+    expect(client.activeFollows).toBe(1);
+  });
+
+  it("leaves no follower and no stale error when two rows are tapped after a failure", async () => {
+    const { daemon, client, lastPush } = await failingAttachRig(REAL_FAILURE);
+    await daemon.attach(sessionKey(ATLAS.locator));
+    expect(lastPush().attachError).not.toBeNull();
+    await Promise.all([daemon.attach(sessionKey(ATLAS.locator)), daemon.attach(sessionKey(BRIDGE.locator))]);
+    await daemon.flush();
+    expect(client.activeFollows).toBe(1);
+    expect(lastPush().attached).toMatchObject({ name: "bridge" });
+    expect(lastPush().attachError).toBeNull();
+  });
+
+  it("clears when the panel goes back to the session this daemon started", async () => {
+    const { daemon, host, lastPush } = await failingAttachRig(REAL_FAILURE);
+    await host.fireIntent(INTENT_QUEUE, { action: "attach", key: sessionKey(ATLAS.locator) });
+    expect(lastPush().attachError).not.toBeNull();
+    await host.fireIntent(INTENT_QUEUE, { action: "attach", key: sessionKey(OWN.locator) });
+    await daemon.flush();
+    expect(lastPush().attachError).toBeNull();
+    expect(lastPush()).toMatchObject({ canSend: true, attached: { name: "project" } });
+  });
+});
+
+describe("liveness on the pushed rows", () => {
+  it("is recency of each session's own store, not which one the panel follows", async () => {
+    // `sessionRig` pins now to 2_000_000: ATLAS's store was written at that instant, BRIDGE's 500s
+    // earlier and OWN's 1000s earlier — both outside the five-minute liveness window.
+    const { lastPush } = await sessionRig();
+    const rows = lastPush().sessions;
+    expect(rows.map((r) => [r.name, r.live])).toEqual([
+      ["atlas", true],
+      ["bridge", false],
+      ["project", false],
+    ]);
+    // The two facts are independent in both directions: the live row is not the followed one, and
+    // the followed one is not live. That is the whole point — the dot was reading as "everything is
+    // dead" precisely because it was drawing attachment instead of liveness.
+    expect(rows.filter((r) => r.active).map((r) => r.name)).toEqual(["project"]);
+    expect(rows.find((r) => r.name === "atlas")?.active).toBe(false);
   });
 });

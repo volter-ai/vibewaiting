@@ -17,7 +17,8 @@ import { mountPanel } from "lucarne/widget/preact";
 import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import type { JSX } from "preact";
 import {
-  attachSettled,
+  ATTACH_ERROR_LINGER_MS,
+  attachOutcome,
   isSendKey,
   listRows,
   nearBottom,
@@ -71,29 +72,46 @@ function subtitle(row: SessionRow): string {
 function SessionListRow({
   row,
   opening,
+  error,
   onOpen,
 }: {
   row: SessionRow;
   opening: boolean;
+  /** The last attach failure for THIS row, shown in place of its subtitle until it clears. */
+  error: string | null;
   onOpen: () => void;
 }): JSX.Element {
+  // The dot is LIVENESS — is anyone working in this session right now — and nothing else. Which
+  // session the panel is following is said by the row highlight and the chevron, because a dot that
+  // lit for exactly one row read as "every other session is dead" (which is what it was saying).
   return (
     <button
       class={`vw-srow${row.active ? " vw-active" : ""}`}
       type="button"
       onClick={onOpen}
-      title={`${row.harness} · ${row.cwd}`}
+      title={`${row.harness} · ${row.cwd}${row.live ? " · active now" : ""}`}
     >
-      <span class={`vw-dot${row.active ? " vw-on" : ""}`} />
+      <span class={`vw-dot${row.live ? " vw-live" : ""}`} title={row.live ? "active now" : "idle"} />
       <span class="vw-scol">
         <span class="vw-sline">
           <span class="vw-sname">{row.name || row.title}</span>
+          {row.active ? (
+            <span class="vw-follow" title="the panel is following this session">
+              › following
+            </span>
+          ) : null}
           <span class="vw-sage">{opening ? "opening…" : row.age}</span>
         </span>
-        <span class="vw-ssub">
-          <span class="vw-sharness">{row.harness}</span>
-          {subtitle(row) !== "" ? <span class="vw-sdetail">{subtitle(row)}</span> : null}
-        </span>
+        {error !== null ? (
+          <span class="vw-ssub vw-sfail" title={error}>
+            {error}
+          </span>
+        ) : (
+          <span class="vw-ssub">
+            <span class="vw-sharness">{row.harness}</span>
+            {subtitle(row) !== "" ? <span class="vw-sdetail">{subtitle(row)}</span> : null}
+          </span>
+        )}
       </span>
     </button>
   );
@@ -102,10 +120,13 @@ function SessionListRow({
 function SessionList({
   state,
   awaiting,
+  failure,
   onOpen,
 }: {
   state: WidgetState;
   awaiting: string | null;
+  /** The attach that failed, still worth showing under its row. */
+  failure: { key: string; message: string } | null;
   onOpen: (row: SessionRow) => void;
 }): JSX.Element {
   const rows = listRows(state);
@@ -119,6 +140,7 @@ function SessionList({
           key={row.key}
           row={row}
           opening={awaiting === row.key}
+          error={failure !== null && failure.key === row.key ? failure.message : null}
           onOpen={(): void => onOpen(row)}
         />
       ))}
@@ -229,16 +251,33 @@ function MessengerPanel({ state }: { state: unknown }): JSX.Element {
   const s = readWidgetState(state);
   const [view, setView] = useState<View>("list");
   const [awaiting, setAwaiting] = useState<string | null>(null);
+  // The failure is copied into local state on arrival so the row can stop showing it without the
+  // host having to retract anything — the host's `attachError` is a fact about the last attach and
+  // stays true until the next one.
+  const [failure, setFailure] = useState<{ key: string; message: string } | null>(null);
 
-  // The host confirmed the attach we asked for → slide to that session's chat.
+  // The awaited attach settled — either into that session's chat, or into a reason under its row.
   useEffect(() => {
-    if (attachSettled(awaiting, s.attached)) {
+    const outcome = attachOutcome(awaiting, s.attached, s.attachError);
+    if (outcome === "attached") {
       setAwaiting(null);
+      setFailure(null);
       setView("chat");
+    } else if (outcome === "failed" && s.attachError !== null) {
+      setAwaiting(null);
+      setFailure(s.attachError);
     }
   });
 
+  // …and the reason fades on its own, so a stale failure never becomes permanent furniture.
+  useEffect(() => {
+    if (failure === null) return undefined;
+    const timer = setTimeout(() => setFailure(null), ATTACH_ERROR_LINGER_MS);
+    return () => clearTimeout(timer);
+  }, [failure]);
+
   const open = (row: SessionRow): void => {
+    setFailure(null);
     // The keyless row IS the attached session (see `listRows`) — nothing to ask the host for.
     if (row.key === "") {
       setView("chat");
@@ -258,7 +297,7 @@ function MessengerPanel({ state }: { state: unknown }): JSX.Element {
       />
     );
   }
-  return <SessionList state={s} awaiting={awaiting} onOpen={open} />;
+  return <SessionList state={s} awaiting={awaiting} failure={failure} onOpen={open} />;
 }
 
 // The last tone the host reported — the shell asks for it whenever it redraws the pill's dot.
