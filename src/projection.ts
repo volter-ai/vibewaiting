@@ -11,6 +11,7 @@ import type {
   ConversationEntry,
   SupercodeClientSnapshot,
 } from "@volter-ai-dev/supercode-client";
+import type { AttachedSession, SessionRow } from "./sessions.js";
 
 /** The four tones `lucarne/widget/runtime`'s shell renders on the pill (`Tone` in runtime.ts). */
 export type PillTone = "live" | "warn" | "dead" | "off";
@@ -62,6 +63,15 @@ export interface WidgetState {
   canSend: boolean;
   /** The controller's last structured error message, or `null`. */
   error: string | null;
+  /**
+   * Every live/recent coding session on this machine, freshest first — the Sessions panel's whole
+   * content. It does NOT come from the snapshot (which only knows the active controller's own
+   * workspace): the daemon discovers globally and merges it in, so `project` fills an empty list and
+   * never a guessed one.
+   */
+  sessions: SessionRow[];
+  /** Which session the Agent panel is showing, for its header. Merged in by the daemon, same as `sessions`. */
+  attached: AttachedSession | null;
 }
 
 export interface ProjectionOptions {
@@ -215,7 +225,13 @@ export function derivePill(snapshot: SupercodeClientSnapshot): WidgetPill {
   return { tone: "live", label: label(`${harness} ready`) };
 }
 
-/** Controller snapshot → the exact object pushed to the widget. Pure; safe to call on every revision. */
+/**
+ * Controller snapshot → the exact object pushed to the widget. Pure; safe to call on every revision.
+ *
+ * `sessions`/`attached` come out EMPTY: they are machine-wide facts the daemon holds (global
+ * discovery, which controller is active), not snapshot facts, and this function has no business
+ * inventing them. `src/daemon.ts` merges them over this result.
+ */
 export function project(snapshot: SupercodeClientSnapshot, options: ProjectionOptions = {}): WidgetState {
   return {
     pill: derivePill(snapshot),
@@ -224,5 +240,7 @@ export function project(snapshot: SupercodeClientSnapshot, options: ProjectionOp
     harness: snapshot.activeHarness ?? "",
     canSend: snapshot.availableActions.send,
     error: snapshot.error?.message ?? null,
+    sessions: [],
+    attached: null,
   };
 }

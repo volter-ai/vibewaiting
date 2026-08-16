@@ -324,6 +324,9 @@ describe("project", () => {
       harness: "codex",
       canSend: true,
       error: null,
+      // Machine-wide facts the snapshot cannot know: the daemon merges them over this result.
+      sessions: [],
+      attached: null,
     });
   });
 

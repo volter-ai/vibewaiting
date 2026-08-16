@@ -5,7 +5,38 @@
 // skin when the host probes a light page, so the panel follows the page's theme for free. Adding a
 // literal colour here is what would break that.
 export const PANEL_CSS = `
-.vw { display: flex; flex-direction: column; max-height: 420px }
+.vw-chat { display: flex; flex-direction: column; max-height: 420px }
+
+/* session list (the messenger's root view) */
+.vw-list { display: flex; flex-direction: column; overflow-y: auto; overscroll-behavior: contain;
+  max-height: 380px; min-height: 90px; padding: 2px 6px 8px }
+.vw-list::-webkit-scrollbar { width: 8px }
+.vw-list::-webkit-scrollbar-thumb { background: var(--fill-2); border-radius: 4px }
+
+.vw-srow { display: flex; align-items: center; gap: 9px; width: 100%; box-sizing: border-box;
+  background: transparent; border: 0; border-radius: 9px; padding: 8px 8px; text-align: left;
+  color: var(--fg); font: inherit; cursor: pointer }
+.vw-srow:hover { background: var(--fill) }
+.vw-srow.vw-active { background: var(--fill) }
+.vw-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--fill-2); border: 1px solid var(--bd) }
+.vw-dot.vw-on { background: var(--ok); border-color: var(--ok) }
+.vw-scol { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 }
+.vw-sline { display: flex; align-items: baseline; justify-content: space-between; gap: 8px }
+.vw-sname { font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
+.vw-sage { flex: none; color: var(--mut); font-size: 10.5px; font-variant-numeric: tabular-nums }
+.vw-ssub { display: flex; align-items: baseline; gap: 6px; min-width: 0; color: var(--mut); font-size: 11px }
+.vw-sharness { flex: none; text-transform: uppercase; letter-spacing: .04em; font-size: 9.5px;
+  background: var(--fill-2); border-radius: 5px; padding: 1px 5px }
+.vw-sdetail { white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
+
+/* chat header */
+.vw-head { display: flex; align-items: center; gap: 7px; padding: 4px 10px 8px }
+.vw-back { flex: none; background: var(--fill); color: var(--fg); border: 1px solid var(--bd); border-radius: 7px;
+  width: 22px; height: 22px; line-height: 1; font: inherit; font-size: 15px; cursor: pointer; padding: 0 }
+.vw-back:hover { background: var(--fill-2); border-color: var(--acc) }
+.vw-hname { font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
+.vw-hsub { flex: none; color: var(--mut); font-size: 10px; text-transform: uppercase; letter-spacing: .04em }
+.vw-ro { flex: none; margin-left: auto; color: var(--ask); font-size: 10px; text-transform: uppercase; letter-spacing: .04em }
 
 /* transcript */
 .vw-scroll { overflow-y: auto; overscroll-behavior: contain; padding: 2px 12px 8px; display: flex; flex-direction: column; gap: 10px; min-height: 90px; max-height: 300px }

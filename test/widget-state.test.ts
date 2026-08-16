@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   EMPTY_STATE,
+  attachSettled,
   isSendKey,
   nearBottom,
   pendingResolved,
+  pillFor,
   readWidgetState,
   roleLabel,
 } from "../widget/state.js";
@@ -119,5 +121,77 @@ describe("roleLabel", () => {
     expect(roleLabel("request")).toBe("asks");
     expect(roleLabel("user")).toBe("user");
     expect(roleLabel("tool")).toBe("tool");
+  });
+});
+
+// ── the messenger: which view, and what the pill says ───────────────────────────────────────────
+
+describe("session rows in a patch", () => {
+  it("keeps the rows the host pushed and drops malformed ones", () => {
+    const state = readWidgetState({
+      sessions: [
+        {
+          key: "claude-code-1a2b3c4d",
+          harness: "claude-code",
+          name: "atlas",
+          cwd: "~/volter/atlas",
+          title: "Rewrite the parser",
+          age: "3m ago",
+          updatedAt: 1700,
+          messages: 42,
+          active: true,
+        },
+        { harness: "codex", name: "no key" },
+        "not an object",
+      ],
+      attached: { key: "claude-code-1a2b3c4d", harness: "claude-code", name: "atlas", cwd: "~/volter/atlas", title: "" },
+    });
+    expect(state.sessions.map((s) => s.key)).toEqual(["claude-code-1a2b3c4d"]);
+    expect(state.sessions[0]?.active).toBe(true);
+    expect(state.attached?.name).toBe("atlas");
+  });
+
+  it("has no sessions and no attachment before the first push", () => {
+    expect(readWidgetState(undefined).sessions).toEqual([]);
+    expect(readWidgetState({ attached: { name: "atlas" } }).attached).toBeNull();
+  });
+});
+
+describe("attachSettled", () => {
+  const attached = { key: "k2", harness: "codex", name: "bridge", cwd: "~/b", title: "" };
+
+  it("opens the chat only once the host confirms the session the row asked for", () => {
+    expect(attachSettled("k2", attached)).toBe(true);
+    // Still showing the previous session — switching now would put the old transcript under the new name.
+    expect(attachSettled("k2", { ...attached, key: "k1" })).toBe(false);
+    expect(attachSettled("k2", null)).toBe(false);
+    expect(attachSettled(null, attached)).toBe(false);
+  });
+});
+
+describe("pillFor", () => {
+  const base = { ...EMPTY_STATE, pill: { tone: "live" as const, label: "claude-code ready" } };
+
+  it("reports the attached session's own status", () => {
+    const state = { ...base, attached: { key: "k", harness: "claude-code", name: "atlas", cwd: "~/a", title: "" } };
+    expect(pillFor(state)).toEqual({ tone: "live", label: "claude-code ready" });
+  });
+
+  it("counts what is waiting when nothing is attached", () => {
+    const row = {
+      key: "k",
+      harness: "codex",
+      name: "atlas",
+      cwd: "~/a",
+      title: "t",
+      age: "now",
+      updatedAt: 1,
+      messages: 1,
+      active: false,
+    };
+    expect(pillFor({ ...base, sessions: [row] })).toEqual({ tone: "live", label: "1 session" });
+    expect(pillFor({ ...base, sessions: [row, { ...row, key: "k2" }] })).toEqual({ tone: "live", label: "2 sessions" });
+    // Nothing attached and nothing found: the host's own words stand.
+    expect(pillFor(base)).toEqual({ tone: "live", label: "claude-code ready" });
   });
 });

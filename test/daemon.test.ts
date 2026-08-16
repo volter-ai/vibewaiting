@@ -1,16 +1,20 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  DEFAULT_DISCOVER_INTERVAL_MS,
   DEFAULT_PUSH_DEBOUNCE_MS,
+  DEFAULT_REPUSH_INTERVAL_MS,
   INTENT_QUEUE,
   WIDGET_NS,
   chooseHarness,
+  parseAttachIntent,
   parseSendIntent,
   startDaemon,
   type Daemon,
 } from "../src/daemon.js";
 import { DEFAULT_MAX_ENTRIES } from "../src/projection.js";
 import type { WidgetState } from "../src/projection.js";
-import { FakeHarnessClient, FakeWidgetHost, localHarness, waitFor } from "./fakes.js";
+import { sessionKey } from "../src/sessions.js";
+import { FakeHarnessClient, FakeWidgetHost, descriptor, localHarness, waitFor } from "./fakes.js";
 import type { SupercodeClientSnapshot } from "@volter-ai-dev/supercode-client";
 
 const running: Daemon[] = [];
@@ -74,6 +78,19 @@ describe("chooseHarness", () => {
     expect(chooseHarness(snap([frontend("grok", true), frontend("codex", true)]))).toBe("codex");
     expect(chooseHarness(snap([frontend("mystery", true)]))).toBe("mystery");
     expect(chooseHarness(snap([frontend("codex", false)]))).toBeNull();
+  });
+});
+
+describe("parseAttachIntent", () => {
+  it("accepts the Sessions list's payload", () => {
+    expect(parseAttachIntent({ action: "attach", key: " claude-code-1a2b3c4d " })).toBe("claude-code-1a2b3c4d");
+  });
+
+  it("rejects everything else rather than guessing", () => {
+    expect(parseAttachIntent({ action: "attach", key: "" })).toBeNull();
+    expect(parseAttachIntent({ action: "attach" })).toBeNull();
+    expect(parseAttachIntent({ action: "send", text: "hi" })).toBeNull();
+    expect(parseAttachIntent(null)).toBeNull();
   });
 });
 
@@ -149,7 +166,16 @@ describe("startDaemon", () => {
     client.runtime.assistantMessage("x");
     await waitFor(() => (host.pushes.at(-1) as WidgetState).transcript.length === 1);
     const push = host.pushes.at(-1) as Record<string, unknown>;
-    expect(Object.keys(push).sort()).toEqual(["busy", "canSend", "error", "harness", "pill", "transcript"]);
+    expect(Object.keys(push).sort()).toEqual([
+      "attached",
+      "busy",
+      "canSend",
+      "error",
+      "harness",
+      "pill",
+      "sessions",
+      "transcript",
+    ]);
     expect(push["conversation"]).toBeUndefined();
     expect(push["harnesses"]).toBeUndefined();
   });
@@ -253,7 +279,7 @@ describe("startDaemon", () => {
     running.push(daemon);
     expect(logs.some((l) => l.includes("push failed"))).toBe(true);
     client.runtime.assistantMessage("still here");
-    await waitFor(() => host.pushes.length > 0);
+    await waitFor(() => ((host.pushes.at(-1) as WidgetState | undefined)?.transcript.length ?? 0) > 0);
     expect((host.pushes.at(-1) as WidgetState).transcript.at(-1)?.text).toBe("still here");
   });
 
@@ -279,16 +305,17 @@ describe("re-push heartbeat", () => {
   // tick so a fresh mount populates without an agent event.
   it("registers a heartbeat that re-pushes the current state, and stop() ends it", async () => {
     const { daemon, host } = await rig();
-    expect(host.ticks.length).toBe(1);
+    // Two timers: the re-push heartbeat, then the session-discovery scan.
+    expect(host.ticks.map((t) => t.ms)).toEqual([DEFAULT_REPUSH_INTERVAL_MS, DEFAULT_DISCOVER_INTERVAL_MS]);
     const before = host.pushes.length;
     await host.ticks[0]!.fn();
     expect(host.pushes.length).toBe(before + 1);
     expect(host.pushes.at(-1)).toEqual(host.pushes.at(-2)); // same state, re-delivered for fresh mounts
     await daemon.stop();
-    expect(host.ticks[0]!.stopped).toBe(true);
+    expect(host.ticks.every((t) => t.stopped)).toBe(true);
   });
 
-  it("repushIntervalMs: 0 disables the heartbeat", async () => {
+  it("repushIntervalMs: 0 / discoverIntervalMs: 0 disable their ticks", async () => {
     const client = new FakeHarnessClient();
     const host = new FakeWidgetHost();
     const daemon = await startDaemon({
@@ -298,9 +325,140 @@ describe("re-push heartbeat", () => {
       client,
       pushDebounceMs: 5,
       repushIntervalMs: 0,
+      discoverIntervalMs: 0,
       attachHost: async () => host,
     });
     expect(host.ticks.length).toBe(0);
     await daemon.stop();
+  });
+});
+
+// ── the Sessions list, and attaching to one ─────────────────────────────────────────────────────
+
+const OWN = descriptor({ sessionId: "runtime-1", cwd: "/tmp/project", title: "This window" });
+const ATLAS = descriptor({
+  sessionId: "atlas-1",
+  cwd: "/home/dev/volter/atlas",
+  title: "Rewrite the parser",
+  text: "another window said this",
+  updatedAtMs: 2_000_000,
+});
+const BRIDGE = descriptor({
+  harness: "codex",
+  sessionId: "bridge-1",
+  cwd: "/home/dev/volter/bridge",
+  title: "Bridge deploy",
+  text: "codex over here",
+  updatedAtMs: 1_500_000,
+});
+
+async function sessionRig(sessions = [OWN, ATLAS, BRIDGE]): Promise<Rig & { logs: string[] }> {
+  const client = new FakeHarnessClient({ sessions });
+  const logs: string[] = [];
+  const host = new FakeWidgetHost();
+  const daemon = await startDaemon({
+    sessionId: "session-abc",
+    html: "<html></html>",
+    workspace: "/tmp/project",
+    client,
+    pushDebounceMs: 5,
+    home: "/home/dev",
+    now: () => 2_000_000,
+    attachHost: async () => host,
+    log: (m) => logs.push(m),
+  });
+  running.push(daemon);
+  return { daemon, host, client, logs, attached: [], lastPush: () => host.pushes.at(-1) as WidgetState };
+}
+
+describe("the Sessions list", () => {
+  it("shows every session on the machine, not just this workspace's", async () => {
+    const { client, lastPush } = await sessionRig();
+    // The scan that fills the panel carries NO workspace — that is what makes it global.
+    expect(client.discoverQueries.some((q) => q.workspace === undefined && q.limit === 30)).toBe(true);
+    expect(lastPush().sessions.map((s) => s.name)).toEqual(["atlas", "bridge", "project"]);
+    expect(lastPush().sessions.map((s) => s.harness)).toEqual(["claude-code", "codex", "claude-code"]);
+  });
+
+  it("marks the session this daemon started, and names it in the header", async () => {
+    const { lastPush } = await sessionRig();
+    const own = lastPush().sessions.find((s) => s.name === "project");
+    expect(own?.active).toBe(true);
+    expect(lastPush().sessions.filter((s) => s.active).length).toBe(1);
+    expect(lastPush().attached).toMatchObject({ harness: "claude-code", name: "project" });
+  });
+
+  it("re-scans on the discovery tick", async () => {
+    const { client, host, lastPush } = await sessionRig([OWN]);
+    expect(lastPush().sessions.length).toBe(1);
+    client.sessions = [OWN, ATLAS];
+    const discoveryTick = host.ticks.find((t) => t.ms === DEFAULT_DISCOVER_INTERVAL_MS);
+    await discoveryTick?.fn();
+    expect(lastPush().sessions.map((s) => s.name)).toEqual(["atlas", "project"]);
+  });
+
+  it("keeps the last list when a scan fails", async () => {
+    const { client, host, lastPush, logs } = await sessionRig();
+    const before = lastPush().sessions.length;
+    client.discover = async (): Promise<never> => {
+      throw new Error("harness went away");
+    };
+    await host.ticks.find((t) => t.ms === DEFAULT_DISCOVER_INTERVAL_MS)?.fn();
+    expect(lastPush().sessions.length).toBe(before);
+    expect(logs.some((l) => l.includes("session discovery failed"))).toBe(true);
+  });
+});
+
+describe("attaching", () => {
+  it("follows another workspace's session without touching the one it started", async () => {
+    const { daemon, client, lastPush, host } = await sessionRig();
+    await host.fireIntent(INTENT_QUEUE, { action: "attach", key: sessionKey(ATLAS.locator) });
+    await daemon.flush();
+
+    // The panel is now showing THAT session's transcript…
+    expect(lastPush().transcript.map((e) => e.text)).toEqual(["another window said this"]);
+    expect(lastPush().attached).toMatchObject({ name: "atlas", harness: "claude-code" });
+    expect(lastPush().sessions.find((s) => s.name === "atlas")?.active).toBe(true);
+    expect(lastPush().sessions.find((s) => s.name === "project")?.active).toBe(false);
+    // …read-only, because a persisted mirror is not a control channel and we do not pretend it is.
+    expect(lastPush().canSend).toBe(false);
+    expect(lastPush().pill).toEqual({ tone: "warn", label: "claude-code (read-only)" });
+    // …and the runtime this daemon started is untouched.
+    expect(client.runtime.closed).toBe(false);
+    expect(client.activeFollows).toBe(1);
+  });
+
+  it("returns to the daemon's own session, which can still send", async () => {
+    const { daemon, client, host, lastPush } = await sessionRig();
+    await host.fireIntent(INTENT_QUEUE, { action: "attach", key: sessionKey(ATLAS.locator) });
+    await host.fireIntent(INTENT_QUEUE, { action: "attach", key: sessionKey(OWN.locator) });
+    await daemon.flush();
+
+    expect(client.activeFollows).toBe(0);
+    expect(daemon.activeController()).toBe(daemon.controller);
+    expect(lastPush()).toMatchObject({ canSend: true, attached: { name: "project" } });
+    await host.fireIntent(INTENT_QUEUE, { action: "send", text: "carry on" });
+    expect(client.runtime.sent).toEqual(["carry on"]);
+  });
+
+  it("never leaves a follower behind when two rows are tapped in a row", async () => {
+    const { daemon, client, lastPush } = await sessionRig();
+    await Promise.all([daemon.attach(sessionKey(ATLAS.locator)), daemon.attach(sessionKey(BRIDGE.locator))]);
+    await daemon.flush();
+    expect(client.activeFollows).toBe(1);
+    expect(lastPush().attached).toMatchObject({ name: "bridge", harness: "codex" });
+    expect(lastPush().transcript.map((e) => e.text)).toEqual(["codex over here"]);
+    // And teardown ends the survivor too.
+    await daemon.stop();
+    running.length = 0;
+    expect(client.activeFollows).toBe(0);
+  });
+
+  it("says so instead of guessing when the key names nothing", async () => {
+    const { daemon, host, logs, lastPush } = await sessionRig();
+    await host.fireIntent(INTENT_QUEUE, { action: "attach", key: "claude-code-deadbeef" });
+    await daemon.flush();
+    expect(logs.some((l) => l.includes("no discovered session"))).toBe(true);
+    expect(lastPush().attached).toMatchObject({ name: "project" });
   });
 });
