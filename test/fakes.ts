@@ -12,10 +12,15 @@ import type {
 import type {
   HarnessId,
   LocalHarness,
+  ManagedSession,
   NormalizedRuntimeEvent,
+  NormalizedSession,
   ObservedRuntimeEvent,
   RuntimeCapabilities,
   RuntimeStartParams,
+  SessionDescriptor,
+  SessionLocator,
+  SessionWatchEvent,
 } from "@volter-ai-dev/supercode-harness-sdk";
 import type { WidgetBridge } from "../src/daemon.js";
 
@@ -112,11 +117,41 @@ export class FakeRuntime extends EventEmitter {
   }
 }
 
+/** A persisted session the fake box has on disk, in the shape global discovery returns. */
+export function descriptor(over: {
+  harness?: HarnessId;
+  sessionId?: string;
+  cwd?: string | null;
+  title?: string | null;
+  model?: string | null;
+  updatedAtMs?: number | null;
+  messageCount?: number | null;
+  text?: string;
+} = {}): SessionDescriptor & { text: string } {
+  const harness = over.harness ?? "claude-code";
+  const sessionId = over.sessionId ?? "sess-1";
+  return {
+    locator: {
+      harness,
+      session_id: sessionId,
+      storage: { kind: "file", path: `/home/dev/.${harness}/${sessionId}.jsonl` },
+    },
+    cwd: over.cwd === undefined ? "/home/dev/projects/atlas" : over.cwd,
+    title: over.title === undefined ? "Atlas refactor" : over.title,
+    updated_at_ms: over.updatedAtMs === undefined ? 1_000_000 : over.updatedAtMs,
+    message_count: over.messageCount === undefined ? 12 : over.messageCount,
+    model: over.model === undefined ? "claude-opus-5" : over.model,
+    text: over.text ?? "hello from another window",
+  };
+}
+
 export interface FakeHarnessClientOptions {
   harnesses?: LocalHarness[];
   runtime?: FakeRuntime;
   /** Make `startManagedRuntime` reject, to exercise the daemon's "could not start" path. */
   failStart?: string;
+  /** What global discovery finds on this fake box. */
+  sessions?: Array<SessionDescriptor & { text?: string }>;
 }
 
 /** The `HarnessClientAdapter` surface, with everything this milestone does not use refusing loudly. */
@@ -124,6 +159,12 @@ export class FakeHarnessClient implements HarnessClientAdapter {
   readonly runtime: FakeRuntime;
   readonly harnesses: LocalHarness[];
   readonly startedWith: RuntimeStartParams[] = [];
+  /** Persisted sessions on this fake box — what `discover` returns and `session()` can load/follow. */
+  sessions: Array<SessionDescriptor & { text?: string }>;
+  /** Every discovery query seen, so a test can prove the GLOBAL scan carries no workspace. */
+  readonly discoverQueries: Array<{ workspace?: string; limit?: number }> = [];
+  /** Followers currently streaming. The leak check: this must settle back to one attachment's worth. */
+  activeFollows = 0;
   closeCalls = 0;
   #failStart: string | undefined;
 
@@ -131,18 +172,29 @@ export class FakeHarnessClient implements HarnessClientAdapter {
     this.harnesses = options.harnesses ?? [localHarness("claude-code"), localHarness("codex")];
     this.runtime = options.runtime ?? new FakeRuntime();
     this.#failStart = options.failStart;
+    this.sessions = options.sessions ?? [];
   }
 
   async listHarnesses(): Promise<{ harnesses: LocalHarness[] }> {
     return { harnesses: this.harnesses };
   }
 
-  async discover(): Promise<{ sessions: DiscoverableSessionDescriptor[] }> {
-    return { sessions: [] };
+  /** Global when `workspace` is absent (the Sessions panel), workspace-scoped when a controller asks. */
+  async discover(query: { workspace?: string; limit?: number } = {}): Promise<{
+    sessions: DiscoverableSessionDescriptor[];
+  }> {
+    this.discoverQueries.push(query);
+    const scoped =
+      query.workspace === undefined ? this.sessions : this.sessions.filter((s) => s.cwd === query.workspace);
+    return { sessions: scoped.slice(0, query.limit ?? scoped.length).map(({ text: _text, ...rest }) => rest) };
   }
 
-  session(): never {
-    throw new Error("FakeHarnessClient.session is not part of this test");
+  session(locator: SessionLocator): ManagedSession {
+    const found = this.sessions.find(
+      (s) => s.locator.harness === locator.harness && s.locator.session_id === locator.session_id,
+    );
+    if (!found) throw new Error(`no such session: ${locator.harness}/${locator.session_id}`);
+    return new FakeManagedSession(this, found) as unknown as ManagedSession;
   }
 
   async startManagedRuntime(params: RuntimeStartParams): Promise<never> {
@@ -185,6 +237,63 @@ export class FakeHarnessClient implements HarnessClientAdapter {
 
   async close(): Promise<void> {
     this.closeCalls += 1;
+  }
+}
+
+/**
+ * The passive half of the transport: load a persisted transcript, then stream it until the follower
+ * is aborted. The daemon's mirror is a real `SupercodeController` driving exactly this, so the
+ * "does a second attach leak a follower?" question is answered by `activeFollows`, not by a comment.
+ */
+class FakeManagedSession {
+  readonly #client: FakeHarnessClient;
+  readonly #record: SessionDescriptor & { text?: string };
+
+  constructor(client: FakeHarnessClient, record: SessionDescriptor & { text?: string }) {
+    this.#client = client;
+    this.#record = record;
+  }
+
+  get locator(): SessionLocator {
+    return this.#record.locator;
+  }
+
+  async load(): Promise<NormalizedSession> {
+    return this.#session();
+  }
+
+  async *follow(options: { signal?: AbortSignal } = {}): AsyncGenerator<SessionWatchEvent> {
+    this.#client.activeFollows += 1;
+    try {
+      yield { type: "session_snapshot", sequence: 1, reason: "initial", session: this.#session() };
+      const { signal } = options;
+      await new Promise<void>((resolve) => {
+        if (!signal || signal.aborted) {
+          resolve();
+          return;
+        }
+        signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+    } finally {
+      this.#client.activeFollows -= 1;
+    }
+  }
+
+  #session(): NormalizedSession {
+    return {
+      source: "claude_code",
+      session_id: this.#record.locator.session_id,
+      model: this.#record.model,
+      cwd: this.#record.cwd,
+      system_prompt: null,
+      agent_id: null,
+      parent_tool_use_id: null,
+      lineage: {},
+      messages: [{ role: "assistant", content: this.#record.text ?? "…", metadata: {} }],
+      subagents: [],
+      raw_record_count: 1,
+      parse_error_lines: 0,
+    };
   }
 }
 

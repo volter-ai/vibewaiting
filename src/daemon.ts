@@ -1,22 +1,39 @@
-// The bridge: one lucarne widget on one browser session ⟷ one Supercode controller on one workspace.
+// The bridge: one lucarne widget on one browser session ⟷ the coding sessions on this machine.
 //
-// Two directions, and only two:
+// Three directions, and only three:
 //   controller revision → debounced `project(snapshot)` → `host.push(patch)`
-//   widget intent ("agent" queue) → `controller.dispatch({ type: "send", text })`
+//   global discovery tick → `projectSessions(descriptors)` → the same push
+//   widget intent ("agent" queue) → `send` on the active controller, or `attach` to another session
 //
 // Both ends are INJECTABLE (`attachHost`, `client`, `controller`) because the honest test of this
 // module is a scripted snapshot sequence, not a browser: the widget half is proven by the fake host
 // recording pushes, the agent half by the real `SupercodeController` driven through a fake harness
 // client. Nothing here reaches for a global.
+//
+// TWO controllers, deliberately. The one the daemon starts OWNS a runtime, and the client package
+// refuses to point an owning controller at someone else's session (`runtime_owned`) — while
+// `setWorkspace` would silently close that runtime to go looking. So a foreign session is followed
+// by a SECOND, non-owning controller scoped to that session's own workspace, sharing this process's
+// one harness transport (`ownsClient: false`). Attaching therefore never touches the session the
+// daemon started, and detaching is just closing the second controller.
 import { SupercodeController } from "@volter-ai-dev/supercode-client";
 import type {
   HarnessClientAdapter,
   SupercodeClientAction,
   SupercodeClientSnapshot,
 } from "@volter-ai-dev/supercode-client";
-import type { HarnessId } from "@volter-ai-dev/supercode-harness-sdk";
+import type { DiscoveryQuery, HarnessId, SessionDescriptor } from "@volter-ai-dev/supercode-harness-sdk";
 import { WidgetHost } from "lucarne/widget/host";
 import { project, type ProjectionOptions, type WidgetState } from "./projection.js";
+import { homedir } from "node:os";
+import {
+  MAX_SESSION_ROWS,
+  attachmentFor,
+  matchesActive,
+  projectSessions,
+  sessionKey,
+  type ActiveSessionRef,
+} from "./sessions.js";
 
 /** Namespaces every page global / element id / sticky-injection id the widget mints (see `lucarne/widget/ns`). */
 export const WIDGET_NS = "vibewaiting";
@@ -26,6 +43,8 @@ export const INTENT_QUEUE = "agent";
 export const DEFAULT_PUSH_DEBOUNCE_MS = 150;
 /** Steady re-push so a shell mounted on a NEWLY NAVIGATED page populates without an agent event. */
 export const DEFAULT_REPUSH_INTERVAL_MS = 2000;
+/** How often the machine is re-scanned for coding sessions. Cheap: one RPC, capped result. */
+export const DEFAULT_DISCOVER_INTERVAL_MS = 5000;
 /** Harnesses tried, in order, when the caller named none — first one that can actually start wins. */
 export const HARNESS_PREFERENCE: readonly string[] = ["claude-code", "codex", "opencode", "pi", "grok"];
 
@@ -45,6 +64,17 @@ export interface AgentController {
   initialize(): Promise<SupercodeClientSnapshot>;
   dispatch(action: SupercodeClientAction): Promise<SupercodeClientSnapshot>;
   close(): Promise<void>;
+}
+
+/**
+ * The discovery slice of the harness transport, widened where the controller's adapter narrows it.
+ *
+ * `HarnessClientAdapter.discover` demands a `workspace` because the controller is workspace-scoped;
+ * the SDK's own `discover` does not, and calling it with no workspace is exactly the GLOBAL scan
+ * this panel exists to show. A real `SupercodeHarnessClient` satisfies both shapes.
+ */
+export interface SessionDiscoveryClient {
+  discover(query: DiscoveryQuery): Promise<{ sessions: SessionDescriptor[] }>;
 }
 
 export interface DaemonOptions {
@@ -79,17 +109,38 @@ export interface DaemonOptions {
    * default is cheap. `0` disables (tests).
    */
   repushIntervalMs?: number | undefined;
+  /**
+   * How often to re-run GLOBAL session discovery (no workspace → every harness, every project).
+   * `0` disables the Sessions panel's refresh entirely (tests). Default `DEFAULT_DISCOVER_INTERVAL_MS`.
+   */
+  discoverIntervalMs?: number | undefined;
+  /** Home directory folded to `~` in the session list. Default: the process's own. */
+  home?: string | undefined;
+  /** Clock for relative ages. Default `Date.now` — injected so a test can pin "3m ago". */
+  now?: (() => number) | undefined;
+  /**
+   * How a FOREIGN session gets its (non-owning) controller. Default: a second `SupercodeController`
+   * on this daemon's client with `ownsClient: false`, so closing it leaves the transport alone.
+   */
+  createController?: ((opts: { workspace: string }) => AgentController) | undefined;
   projection?: ProjectionOptions | undefined;
   log?: ((message: string) => void) | undefined;
 }
 
 export interface Daemon {
   readonly host: WidgetBridge;
+  /** The controller this daemon STARTED. It keeps its runtime for the daemon's whole life. */
   readonly controller: AgentController;
+  /** Whichever controller the Agent panel is currently showing — the owned one, or a foreign mirror. */
+  activeController(): AgentController;
   /** The state of the last push (`null` before the first one) — the daemon's own observable output. */
   lastPushed(): WidgetState | null;
   /** Push the current snapshot NOW, bypassing the debounce. Used after start and by tests. */
   flush(): Promise<void>;
+  /** Re-run global discovery and push. The discovery tick calls exactly this. */
+  refreshSessions(): Promise<void>;
+  /** Point the Agent panel at a discovered session (the `attach` intent's implementation). */
+  attach(key: string): Promise<void>;
   /** Unsubscribe, remove the widget from every page, and close the controller (and its client if we own it). */
   stop(): Promise<void>;
 }
@@ -113,13 +164,28 @@ export function chooseHarness(snapshot: SupercodeClientSnapshot, preferred?: Har
   return startable[0]?.id ?? null;
 }
 
-/** The one intent shape the panel sends. Anything else is ignored (and logged) rather than guessed at. */
+/** The composer's intent shape. Anything else is ignored (and logged) rather than guessed at. */
 export function parseSendIntent(payload: unknown): string | null {
   if (!payload || typeof payload !== "object") return null;
   const { action, text } = payload as { action?: unknown; text?: unknown };
   if (action !== "send" || typeof text !== "string") return null;
   const trimmed = text.trim();
   return trimmed === "" ? null : trimmed;
+}
+
+/** The Sessions panel's intent shape: a row key minted by `sessionKey`, echoed back on click. */
+export function parseAttachIntent(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object") return null;
+  const { action, key } = payload as { action?: unknown; key?: unknown };
+  if (action !== "attach" || typeof key !== "string") return null;
+  const trimmed = key.trim();
+  return trimmed === "" ? null : trimmed;
+}
+
+/** The active session in the only terms a descriptor also carries — `null` when nothing is selected. */
+export function activeRef(snapshot: SupercodeClientSnapshot): ActiveSessionRef | null {
+  if (!snapshot.activeHarness) return null;
+  return { harness: snapshot.activeHarness, sessionId: snapshot.activeSessionId };
 }
 
 async function defaultAttachHost(opts: {
@@ -166,9 +232,28 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let inFlight: Promise<void> = Promise.resolve();
 
+  const home = options.home ?? homedir();
+  const now = options.now ?? Date.now;
+  // The GLOBAL discovery door: the same transport, called with no workspace.
+  const discovery: SessionDiscoveryClient | undefined = options.client;
+  /** The last global scan, held whole — the row keys the panel echoes back resolve through it. */
+  let descriptors: readonly SessionDescriptor[] = [];
+
+  /** The non-owning controller following a foreign session, when the panel is on one. */
+  let mirror: AgentController | null = null;
+  let unsubscribeMirror: (() => void) | null = null;
+  const activeController = (): AgentController => mirror ?? controller;
+
   const pushNow = (): Promise<void> => {
     if (stopped) return Promise.resolve();
-    const state = project(controller.getSnapshot(), options.projection ?? {});
+    const snapshot = activeController().getSnapshot();
+    const ref = activeRef(snapshot);
+    const sessions = projectSessions(descriptors, { now: now(), home, active: ref, max: MAX_SESSION_ROWS });
+    const state: WidgetState = {
+      ...project(snapshot, options.projection ?? {}),
+      sessions,
+      attached: attachmentFor(ref, sessions, snapshot.workspace, home),
+    };
     lastPushed = state;
     // Serialize pushes: two overlapping CDP evaluations could otherwise deliver out of order and
     // leave the panel showing an older transcript than the one already drawn.
@@ -193,18 +278,118 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const repushMs = options.repushIntervalMs ?? DEFAULT_REPUSH_INTERVAL_MS;
   const stopRepush = repushMs > 0 ? host.every(repushMs, () => pushNow()) : (): void => undefined;
 
-  host.onIntent(INTENT_QUEUE, async (intent) => {
-    const text = parseSendIntent(intent.payload);
-    if (text === null) {
-      log(`ignoring unrecognized intent payload: ${JSON.stringify(intent.payload)}`);
+  /** Re-scan the whole machine for coding sessions. Failure is logged and the old list is kept. */
+  const refreshSessions = async (): Promise<void> => {
+    if (stopped || !discovery) return;
+    try {
+      const result = await discovery.discover({ limit: MAX_SESSION_ROWS });
+      descriptors = result.sessions;
+    } catch (e) {
+      log(`session discovery failed (continuing): ${message(e)}`);
+      return;
+    }
+    await pushNow();
+  };
+
+  const discoverMs = options.discoverIntervalMs ?? DEFAULT_DISCOVER_INTERVAL_MS;
+  const stopDiscovery =
+    discoverMs > 0 && discovery ? host.every(discoverMs, () => refreshSessions()) : (): void => undefined;
+
+  const createController =
+    options.createController ??
+    ((opts: { workspace: string }): AgentController =>
+      // `ownsClient: false`: this daemon's ONE transport outlives every mirror that borrows it.
+      new SupercodeController({ client: requireClient(options), workspace: opts.workspace, ownsClient: false }));
+
+  /** Close the current mirror (which aborts its follower) and fall back to the owned controller. */
+  const releaseMirror = async (): Promise<void> => {
+    const previous = mirror;
+    const unsub = unsubscribeMirror;
+    mirror = null;
+    unsubscribeMirror = null;
+    unsub?.();
+    if (previous) await previous.close().catch((e: unknown) => log(`detach failed: ${message(e)}`));
+  };
+
+  // Attaches are SERIALIZED and generation-checked: a double click must not leave two followers
+  // running against two sessions, and the loser must be closed rather than merely forgotten.
+  let attachSeq = 0;
+  let attachChain: Promise<void> = Promise.resolve();
+
+  const runAttach = async (key: string, seq: number): Promise<void> => {
+    if (stopped || seq !== attachSeq) return;
+    const descriptor = descriptors.find((d) => sessionKey(d.locator) === key);
+    if (!descriptor) {
+      log(`attach: no discovered session with key ${key}`);
+      return;
+    }
+    await releaseMirror();
+    if (matchesActive(descriptor, activeRef(controller.getSnapshot()))) {
+      log(`following this daemon's own ${descriptor.locator.harness} session again`);
+      await pushNow();
+      return;
+    }
+    const workspace = descriptor.cwd ?? options.workspace;
+    let candidate: AgentController;
+    try {
+      candidate = createController({ workspace });
+    } catch (e) {
+      log(`attach unavailable: ${message(e)}`);
+      await pushNow();
       return;
     }
     try {
-      await controller.dispatch({ type: "send", text });
+      await candidate.initialize();
+      // The controller mints its own workspace-scoped keys; ours is a hash of the locator, so the
+      // two are matched on the pair every representation carries.
+      const target = candidate
+        .getSnapshot()
+        .sessions.find(
+          (s) => s.harness === descriptor.locator.harness && s.sessionId === descriptor.locator.session_id,
+        );
+      if (!target) throw new Error(`that session is not visible in ${workspace}`);
+      await candidate.dispatch({ type: "observe", sessionKey: target.key });
     } catch (e) {
-      log(`send failed: ${(e as Error)?.message ?? String(e)}`);
+      log(`attach failed: ${message(e)}`);
+      await candidate.close().catch(() => undefined);
+      await pushNow();
+      return;
     }
+    if (stopped || seq !== attachSeq) {
+      await candidate.close().catch(() => undefined);
+      return;
+    }
+    mirror = candidate;
+    unsubscribeMirror = candidate.subscribe(schedulePush);
+    log(`following ${descriptor.locator.harness} in ${workspace} (read-only mirror)`);
     await pushNow();
+  };
+
+  const attachSession = (key: string): Promise<void> => {
+    const seq = (attachSeq += 1);
+    attachChain = attachChain.catch(() => undefined).then(() => runAttach(key, seq));
+    return attachChain;
+  };
+
+  host.onIntent(INTENT_QUEUE, async (intent) => {
+    const text = parseSendIntent(intent.payload);
+    if (text !== null) {
+      try {
+        // The ACTIVE controller: a mirror will refuse (`send` is not among its available actions),
+        // and that refusal is the honest answer — the panel never fabricates a send path.
+        await activeController().dispatch({ type: "send", text });
+      } catch (e) {
+        log(`send failed: ${message(e)}`);
+      }
+      await pushNow();
+      return;
+    }
+    const key = parseAttachIntent(intent.payload);
+    if (key !== null) {
+      await attachSession(key);
+      return;
+    }
+    log(`ignoring unrecognized intent payload: ${JSON.stringify(intent.payload)}`);
   });
 
   await controller.initialize();
@@ -223,20 +408,27 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     log("no startable harness found — the panel will mirror instead");
   }
 
+  await refreshSessions();
   await pushNow();
 
   return {
     host,
     controller,
+    activeController,
     lastPushed: () => lastPushed,
     flush: pushNow,
+    refreshSessions,
+    attach: attachSession,
     async stop(): Promise<void> {
       if (stopped) return;
       stopped = true;
       if (timer) clearTimeout(timer);
       timer = null;
       stopRepush();
+      stopDiscovery();
       unsubscribe();
+      await attachChain.catch(() => undefined);
+      await releaseMirror();
       await inFlight.catch(() => undefined);
       await host.remove().catch((e: unknown) => log(`widget removal failed: ${(e as Error)?.message ?? String(e)}`));
       // `ownsClient: true` (above) makes this close the harness transport too — the caller that
@@ -244,6 +436,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       await controller.close().catch((e: unknown) => log(`controller close failed: ${(e as Error)?.message ?? String(e)}`));
     },
   };
+}
+
+/** One place that turns a thrown unknown into a line a human can read. */
+function message(e: unknown): string {
+  return (e as Error)?.message ?? String(e);
 }
 
 function requireClient(options: DaemonOptions): HarnessClientAdapter {
