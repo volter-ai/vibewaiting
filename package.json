@@ -28,9 +28,11 @@
     "@volter-ai-dev/supercode-harness-sdk": "latest",
     "esbuild": "^0.24.0",
     "lucarne": "^1.7.2",
+    "markdown-it": "^14.3.0",
     "preact": "^10.19.0"
   },
   "devDependencies": {
+    "@types/markdown-it": "^14.1.2",
     "@types/node": "^22.10.0",
     "typescript": "^5.7.0",
     "vitest": "^2.1.0"

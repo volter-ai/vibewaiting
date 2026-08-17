@@ -4,7 +4,15 @@
 // accumulating `state` object typed `unknown` — so the FIRST thing the panel does is re-establish
 // the shape defensively (a page reload re-mounts the widget before any push has landed, and the
 // runtime hands that empty accumulator straight to `render`).
-import type { AttachError, TranscriptEntry, TranscriptRole, WidgetState } from "../src/projection.js";
+import type {
+  AttachError,
+  TranscriptContext,
+  TranscriptEntry,
+  TranscriptRequest,
+  TranscriptRole,
+  TranscriptTaskPlan,
+  WidgetState,
+} from "../src/projection.js";
 import type { AttachedSession, SessionRow } from "../src/sessions.js";
 
 export type { AttachError, AttachedSession, SessionRow, TranscriptEntry, TranscriptRole, WidgetState };
@@ -14,11 +22,16 @@ export const EMPTY_STATE: WidgetState = {
   transcript: [],
   busy: false,
   harness: "",
+  mode: "none",
   canSend: false,
   canInterrupt: false,
+  canRespond: false,
+  workspace: "",
+  taskPlan: { source: "none", items: [], residueCount: 0, observedAt: null },
   error: null,
   sessions: [],
   attached: null,
+  owned: null,
   attachError: null,
 };
 
@@ -27,14 +40,70 @@ export type View = "list" | "chat";
 
 const TONES = new Set(["live", "warn", "dead", "off"]);
 const ROLES = new Set<string>(["system", "user", "assistant", "tool", "reasoning", "request", "notice"]);
+const REQUEST_OPTION_KINDS = new Set(["allow_once", "allow_always", "reject_once", "reject_always", "other"]);
+const TASK_PLAN_SOURCES = new Set(["codex-update-plan", "claude-tasks", "opencode-todos", "none"]);
+const TASK_PLAN_STATUSES = new Set(["pending", "in_progress", "completed", "cancelled", "unknown"]);
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return !!v && typeof v === "object" && !Array.isArray(v);
 }
 
+function isJsonValue(value: unknown): value is TranscriptRequest["requestId"] {
+  if (value === null || typeof value === "string" || typeof value === "boolean") {
+    return true;
+  }
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value)) return value.every(isJsonValue);
+  return isRecord(value) && Object.values(value).every(isJsonValue);
+}
+
+function readContext(raw: unknown): TranscriptContext[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const context: TranscriptContext[] = [];
+  for (const candidate of raw) {
+    if (!isRecord(candidate)) continue;
+    const { id, kind, label, detail } = candidate;
+    if (typeof label !== "string" || typeof detail !== "string") continue;
+    context.push({ ...(typeof id === "string" ? { id } : {}), ...(typeof kind === "string" ? { kind } : {}), label, detail });
+  }
+  return context.length ? context : undefined;
+}
+
+function readRequest(raw: unknown): TranscriptRequest | undefined {
+  if (!isRecord(raw)) return undefined;
+  const { requestId, requestKind, payloadText, options, cancellable, status, resolution } = raw;
+  if (!isJsonValue(requestId) || typeof requestKind !== "string" || typeof payloadText !== "string") return undefined;
+  if (!Array.isArray(options) || (status !== "pending" && status !== "responded")) return undefined;
+  const parsedOptions: TranscriptRequest["options"] = [];
+  for (const candidate of options) {
+    if (!isRecord(candidate)) continue;
+    const { optionId, name, kind } = candidate;
+    if (typeof optionId !== "string" || typeof name !== "string") continue;
+    if (!REQUEST_OPTION_KINDS.has(String(kind))) continue;
+    parsedOptions.push({ optionId, name, kind: kind as TranscriptRequest["options"][number]["kind"] });
+  }
+  let parsedResolution: TranscriptRequest["resolution"] = null;
+  if (isRecord(resolution) && typeof resolution.name === "string" && typeof resolution.kind === "string") {
+    parsedResolution = {
+      optionId: typeof resolution.optionId === "string" ? resolution.optionId : null,
+      name: resolution.name,
+      kind: resolution.kind,
+    };
+  }
+  return {
+    requestId,
+    requestKind,
+    payloadText,
+    options: parsedOptions,
+    cancellable: cancellable === true,
+    status,
+    resolution: parsedResolution,
+  };
+}
+
 function readEntry(raw: unknown): TranscriptEntry | null {
   if (!isRecord(raw)) return null;
-  const { id, role, text, ts, truncated, label, status, streaming } = raw;
+  const { id, role, text, ts, truncated, label, arguments: argumentsText, resultText, status, streaming, request, code, context } = raw;
   if (typeof id !== "string" || typeof text !== "string") return null;
   if (typeof role !== "string" || !ROLES.has(role)) return null;
   const entry: TranscriptEntry = {
@@ -46,10 +115,52 @@ function readEntry(raw: unknown): TranscriptEntry | null {
   };
   if (role === "tool") {
     if (typeof label === "string" && label !== "") entry.label = label;
+    if (typeof argumentsText === "string") entry.arguments = argumentsText;
+    if (typeof resultText === "string") entry.resultText = resultText;
     if (status === "pending" || status === "completed" || status === "error") entry.status = status;
   }
   if (role === "reasoning" && typeof streaming === "boolean") entry.streaming = streaming;
+  if (role === "request") {
+    const parsed = readRequest(request);
+    if (parsed) entry.request = parsed;
+  }
+  if (role === "notice" && typeof code === "string") entry.code = code;
+  if (role === "user" || role === "assistant" || role === "system") {
+    const parsed = readContext(context);
+    if (parsed) entry.context = parsed;
+  }
   return entry;
+}
+
+function readTaskPlan(raw: unknown): TranscriptTaskPlan {
+  if (!isRecord(raw)) return EMPTY_STATE.taskPlan;
+  const source = raw["source"];
+  const items: TranscriptTaskPlan["items"] = [];
+  if (Array.isArray(raw["items"])) {
+    for (const candidate of raw["items"]) {
+      if (!isRecord(candidate)) continue;
+      const { id, title, status, nativeStatus, blockedBy } = candidate;
+      if (typeof id !== "string" || typeof title !== "string") continue;
+      if (!TASK_PLAN_STATUSES.has(String(status))) continue;
+      items.push({
+        id,
+        title,
+        status: status as TranscriptTaskPlan["items"][number]["status"],
+        ...(typeof nativeStatus === "string" ? { nativeStatus } : {}),
+        ...(Array.isArray(blockedBy) && blockedBy.every((item) => typeof item === "string")
+          ? { blockedBy: blockedBy as string[] }
+          : {}),
+      });
+    }
+  }
+  return {
+    source: typeof source === "string" && TASK_PLAN_SOURCES.has(source)
+      ? (source as TranscriptTaskPlan["source"])
+      : "none",
+    items,
+    residueCount: typeof raw["residueCount"] === "number" ? raw["residueCount"] : 0,
+    observedAt: typeof raw["observedAt"] === "number" ? raw["observedAt"] : null,
+  };
 }
 
 function readSessionRow(raw: unknown): SessionRow | null {
@@ -109,13 +220,18 @@ export function readWidgetState(raw: unknown): WidgetState {
     transcript,
     busy: raw["busy"] === true,
     harness: typeof raw["harness"] === "string" ? raw["harness"] : "",
+    mode: raw["mode"] === "control" || raw["mode"] === "mirror" ? raw["mode"] : "none",
     canSend: raw["canSend"] === true,
     canInterrupt: raw["canInterrupt"] === true,
+    canRespond: raw["canRespond"] === true,
+    workspace: typeof raw["workspace"] === "string" ? raw["workspace"] : "",
+    taskPlan: readTaskPlan(raw["taskPlan"]),
     error: typeof raw["error"] === "string" ? raw["error"] : null,
     sessions: Array.isArray(raw["sessions"])
       ? raw["sessions"].map(readSessionRow).filter((s): s is SessionRow => s !== null)
       : [],
     attached: readAttached(raw["attached"]),
+    owned: readAttached(raw["owned"]),
     attachError: readAttachError(raw["attachError"]),
   };
 }
@@ -123,25 +239,25 @@ export function readWidgetState(raw: unknown): WidgetState {
 /**
  * The rows the list shows.
  *
- * Discovery's rows, plus one for the session the panel is ALREADY on when discovery has not seen it
- * yet — a session the daemon just started has no persisted file until its first turn, and without
- * this its own chat would be unreachable from the list that is supposed to contain everything. Its
- * key is `""`, which is how the view knows to open it locally instead of asking the host to attach.
+ * Discovery's rows, plus the daemon-owned runtime when discovery has not seen it yet. A brand-new
+ * runtime has no persisted file until its first turn; keeping it here even while a foreign mirror
+ * is open is what makes "return to my chat" possible. Its key is `""`, which the view turns into a
+ * target-free `release` intent when a mirror currently owns the panel.
  */
 export function listRows(state: WidgetState): SessionRow[] {
-  const attached = state.attached;
-  if (attached === null || attached.key !== "") return state.sessions;
+  const owned = state.owned;
+  if (owned === null || owned.key !== "") return state.sessions;
   return [
     {
       key: "",
-      harness: attached.harness,
-      name: attached.name,
-      cwd: attached.cwd,
-      title: attached.title,
+      harness: owned.harness,
+      name: owned.name,
+      cwd: owned.cwd,
+      title: owned.title,
       age: "",
       updatedAt: null,
       messages: null,
-      active: true,
+      active: state.attached?.key === "",
       // The panel is attached to it right now — nothing is more live than that, and there is no
       // descriptor to read a timestamp from.
       live: true,

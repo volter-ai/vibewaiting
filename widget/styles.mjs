@@ -1,101 +1,132 @@
-// The panel's own CSS, concatenated AFTER `lucarne/widget`'s `SHELL_CSS` at build time (see
-// `build.mjs`). Plain JS so the build script can import it without a TypeScript step.
-//
-// Every colour is one of the shell's own custom properties — the shell flips them for the light
-// skin when the host probes a light page, so the panel follows the page's theme for free. Adding a
-// literal colour here is what would break that.
+// App-specific layout and presentation. All color comes from Lucarne's adaptive shell tokens, so
+// this keeps VGAI's information architecture without inheriting VGAI's editor backdrop/theme.
 export const PANEL_CSS = `
-.vw-chat { display: flex; flex-direction: column; max-height: 420px }
+.vw-chat { display:flex; flex-direction:column; height:min(76vh,720px); min-height:360px }
 
-/* session list (the messenger's root view) */
-.vw-list { display: flex; flex-direction: column; overflow-y: auto; overscroll-behavior: contain;
-  max-height: 380px; min-height: 90px; padding: 2px 6px 8px }
-.vw-list::-webkit-scrollbar { width: 8px }
-.vw-list::-webkit-scrollbar-thumb { background: var(--fill-2); border-radius: 4px }
+/* session list */
+.vw-list { display:flex; flex-direction:column; overflow-y:auto; overscroll-behavior:contain;
+  max-height:520px; min-height:90px; padding:2px 6px 8px }
+.vw-list::-webkit-scrollbar,.vw-scroll::-webkit-scrollbar { width:8px }
+.vw-list::-webkit-scrollbar-thumb,.vw-scroll::-webkit-scrollbar-thumb { background:var(--fill-2); border-radius:4px }
+.vw-srow { display:flex; align-items:center; gap:9px; width:100%; background:transparent; border:0; border-radius:9px;
+  padding:8px; text-align:left; color:var(--fg); font:inherit; cursor:pointer }
+.vw-srow:hover,.vw-srow.vw-active { background:var(--fill) }
+.vw-dot { flex:none; width:7px; height:7px; border-radius:50%; background:var(--fill-2); border:1px solid var(--bd) }
+.vw-dot.vw-live { background:var(--ok); border-color:var(--ok) }
+.vw-scol { display:flex; flex-direction:column; gap:2px; min-width:0; flex:1 }
+.vw-sline { display:flex; align-items:baseline; justify-content:space-between; gap:8px }
+.vw-sname { min-width:0; font-size:12.5px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
+.vw-sage { flex:none; margin-left:auto; color:var(--mut); font-size:10.5px; font-variant-numeric:tabular-nums }
+.vw-follow { flex:none; margin-right:auto; color:var(--acc); font-size:9.5px; text-transform:uppercase; letter-spacing:.04em }
+.vw-ssub { display:flex; align-items:baseline; gap:6px; min-width:0; color:var(--mut); font-size:11px }
+.vw-sharness { flex:none; text-transform:uppercase; letter-spacing:.04em; font-size:9.5px; background:var(--fill-2); border-radius:5px; padding:1px 5px }
+.vw-sdetail { white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
+.vw-sfail { display:block; color:var(--block); white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
 
-.vw-srow { display: flex; align-items: center; gap: 9px; width: 100%; box-sizing: border-box;
-  background: transparent; border: 0; border-radius: 9px; padding: 8px 8px; text-align: left;
-  color: var(--fg); font: inherit; cursor: pointer }
-.vw-srow:hover { background: var(--fill) }
-.vw-srow.vw-active { background: var(--fill) }
-/* the dot is LIVENESS (someone is working in this session now), never "the panel is following it" */
-.vw-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--fill-2); border: 1px solid var(--bd) }
-.vw-dot.vw-live { background: var(--ok); border-color: var(--ok) }
-.vw-scol { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 }
-.vw-sline { display: flex; align-items: baseline; justify-content: space-between; gap: 8px }
-.vw-sname { min-width: 0; font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
-.vw-sage { flex: none; margin-left: auto; color: var(--mut); font-size: 10.5px; font-variant-numeric: tabular-nums }
-/* which session the panel is on — said in words next to the name, not by the liveness dot */
-.vw-follow { flex: none; margin-right: auto; color: var(--acc); font-size: 9.5px; text-transform: uppercase; letter-spacing: .04em }
-.vw-ssub { display: flex; align-items: baseline; gap: 6px; min-width: 0; color: var(--mut); font-size: 11px }
-.vw-sharness { flex: none; text-transform: uppercase; letter-spacing: .04em; font-size: 9.5px;
-  background: var(--fill-2); border-radius: 5px; padding: 1px 5px }
-.vw-sdetail { white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
-/* why the tap did not open a chat — one line, in place of the subtitle, gone on its own */
-.vw-sfail { display: block; color: var(--block); white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
-
-/* chat header */
-.vw-head { display: flex; align-items: center; gap: 7px; padding: 4px 10px 8px }
-.vw-back { flex: none; background: var(--fill); color: var(--fg); border: 1px solid var(--bd); border-radius: 7px;
-  width: 22px; height: 22px; line-height: 1; font: inherit; font-size: 15px; cursor: pointer; padding: 0 }
-.vw-back:hover { background: var(--fill-2); border-color: var(--acc) }
-.vw-hname { font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
-.vw-hsub { flex: none; color: var(--mut); font-size: 10px; text-transform: uppercase; letter-spacing: .04em }
-.vw-ro { flex: none; margin-left: auto; color: var(--ask); font-size: 10px; text-transform: uppercase; letter-spacing: .04em }
+/* chat header + normalized work plan */
+.vw-head { display:flex; align-items:center; gap:7px; padding:4px 10px 8px }
+.vw-back { flex:none; background:var(--fill); color:var(--fg); border:1px solid var(--bd); border-radius:7px;
+  width:22px; height:22px; line-height:1; font:inherit; font-size:15px; cursor:pointer; padding:0 }
+.vw-back:hover { background:var(--fill-2); border-color:var(--acc) }
+.vw-hname { font-size:12.5px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
+.vw-hsub { flex:none; color:var(--mut); font-size:10px; text-transform:uppercase; letter-spacing:.04em }
+.vw-ro { flex:none; margin-left:auto; color:var(--ask); font-size:10px; text-transform:uppercase; letter-spacing:.04em }
+.vw-work-plan { display:grid; gap:6px; padding:7px 12px 8px; border-bottom:1px solid var(--hair); font-size:11px }
+.vw-working-on { display:flex; gap:6px; min-width:0; color:var(--mut) }
+.vw-working-on strong { color:var(--fg); overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+.vw-plan-items { display:grid; gap:2px }
+.vw-plan-item { display:grid; grid-template-columns:14px minmax(0,1fr); gap:5px; color:var(--mut) }
+.vw-plan-in_progress { color:var(--acc) }
+.vw-plan-completed span:last-child { text-decoration:line-through; opacity:.72 }
 
 /* transcript */
-.vw-scroll { overflow-y: auto; overscroll-behavior: contain; padding: 2px 12px 8px; display: flex; flex-direction: column; gap: 10px; min-height: 90px; max-height: 300px }
-.vw-scroll::-webkit-scrollbar { width: 8px }
-.vw-scroll::-webkit-scrollbar-thumb { background: var(--fill-2); border-radius: 4px }
-.vw-empty { color: var(--mut); padding: 18px 2px; text-align: center }
+.vw-scroll { flex:1; min-height:0; overflow-y:auto; overscroll-behavior:contain; padding:4px 12px 14px;
+  display:flex; flex-direction:column; gap:10px }
+.vw-empty { color:var(--mut); padding:18px 2px; text-align:center }
+.vw-cut { color:var(--mut); font-style:italic }
+.vw-message { position:relative; margin:2px 0 8px; overflow-wrap:anywhere }
+.vw-user { padding:8px 9px; border:1px solid var(--bd); border-radius:9px; background:var(--fill) }
+.vw-assistant { padding-bottom:3px }
+.vw-pending { opacity:.55 }
+.vw-sending { display:block; color:var(--mut); font-size:10px; margin-top:3px }
 
-.vw-row { display: flex; flex-direction: column; gap: 3px }
-.vw-meta { display: flex; align-items: baseline; gap: 6px; font-size: 10px; letter-spacing: .04em; text-transform: uppercase; color: var(--mut) }
-.vw-role { font-weight: 600 }
-.vw-time { font-variant-numeric: tabular-nums; opacity: .75 }
-.vw-text { white-space: pre-wrap; word-break: break-word; font-size: 12.5px; line-height: 1.5 }
-.vw-cut { color: var(--mut); font-style: italic }
+/* GFM-rich Markdown. markdown-it has raw HTML disabled. */
+.vw-markdown { color:var(--fg); font-size:12.5px; line-height:1.55 }
+.vw-markdown > :first-child { margin-top:0 }
+.vw-markdown > :last-child { margin-bottom:0 }
+.vw-markdown p { margin:0 0 8px }
+.vw-markdown h1,.vw-markdown h2,.vw-markdown h3,.vw-markdown h4 { margin:13px 0 6px; line-height:1.25; color:var(--fg) }
+.vw-markdown h1 { font-size:17px }.vw-markdown h2 { font-size:15px }.vw-markdown h3,.vw-markdown h4 { font-size:13px }
+.vw-markdown ul,.vw-markdown ol { margin:5px 0 9px; padding-left:20px }
+.vw-markdown li { margin:2px 0 }
+.vw-markdown blockquote { margin:8px 0; padding:2px 0 2px 9px; border-left:2px solid var(--bd2); color:var(--mut) }
+.vw-markdown a { color:var(--acc); text-decoration:none }.vw-markdown a:hover { text-decoration:underline }
+.vw-markdown code { padding:1px 4px; border-radius:4px; background:var(--fill-2); font:.92em ui-monospace,SFMono-Regular,Menlo,monospace }
+.vw-markdown pre { margin:8px 0; padding:8px 9px; overflow:auto; border:1px solid var(--hair); border-radius:7px; background:var(--fill) }
+.vw-markdown pre code { padding:0; background:transparent; font-size:11px; white-space:pre }
+.vw-markdown table { display:block; width:100%; margin:8px 0; overflow-x:auto; border-collapse:collapse; font-size:11px }
+.vw-markdown th,.vw-markdown td { padding:4px 5px; border:1px solid var(--bd); text-align:left; vertical-align:top }
+.vw-markdown th { background:var(--fill); font-weight:600 }
+.vw-markdown hr { border:0; border-top:1px solid var(--hair); margin:12px 0 }
+.vw-copy { margin-top:3px; padding:2px 5px; border:0; border-radius:5px; background:transparent; color:var(--mut); font:inherit; font-size:10px; cursor:pointer }
+.vw-copy:hover { color:var(--fg); background:var(--fill) }
 
-.vw-user .vw-role { color: var(--acc) }
-.vw-user .vw-text { background: var(--fill); border-left: 2px solid var(--acc); border-radius: 0 8px 8px 0; padding: 5px 8px }
-.vw-assistant .vw-role { color: var(--ok) }
-.vw-fold { border: 1px solid var(--hair); border-radius: 8px; background: var(--fill); overflow: hidden }
-.vw-fold-head { display: flex; align-items: center; gap: 6px; padding: 5px 7px; color: var(--mut);
-  font-size: 10px; letter-spacing: .04em; text-transform: uppercase; cursor: pointer; list-style: none }
-.vw-fold-head::-webkit-details-marker { display: none }
-.vw-fold-mark { flex: none; font-size: 15px; line-height: 10px; transition: transform 120ms ease }
-.vw-fold[open] .vw-fold-mark { transform: rotate(90deg) }
-.vw-tool-name { min-width: 0; color: var(--fg); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px; font-weight: 600; text-transform: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
-.vw-tool-status { margin-left: auto; font-size: 9px }
-.vw-tool-pending .vw-tool-status { color: var(--ask) }
-.vw-tool-error { border-color: var(--block) }
-.vw-tool-error .vw-tool-status { color: var(--block) }
-.vw-tool-body { margin: 0; border-top: 1px solid var(--hair); padding: 7px 8px; color: var(--mut);
-  font: 11.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word;
-  max-height: 9em; overflow: auto }
-.vw-reasoning .vw-role { color: var(--mut) }
-.vw-thinking-live { color: var(--ask); font-size: 9px }
-.vw-reasoning-body { border-top: 1px solid var(--hair); padding: 6px 8px; color: var(--mut);
-  font-size: 12px; line-height: 1.45; font-style: italic; white-space: pre-wrap; word-break: break-word }
-.vw-request .vw-role { color: var(--ask) }
-.vw-notice .vw-text { color: var(--ask) }
-.vw-pending { opacity: .55 }
+/* Consecutive tools become VGAI-style activity groups with independently expandable rows. */
+.vw-tool-group { margin:2px 0 8px; overflow:hidden; border:1px solid var(--bd); border-radius:9px; background:var(--fill) }
+.vw-tool-group-head,.vw-tool-row-head { display:flex; align-items:center; gap:6px; min-height:32px; padding:0 8px;
+  list-style:none; cursor:pointer; color:var(--mut); font-size:11px }
+.vw-tool-group-head::-webkit-details-marker,.vw-tool-row-head::-webkit-details-marker,.vw-reasoning summary::-webkit-details-marker { display:none }
+.vw-tool-group-head strong { color:var(--fg); font-weight:600 }
+.vw-fold-mark { flex:none; font-size:15px; line-height:10px; transition:transform 120ms ease }
+.vw-open,details[open] > summary .vw-fold-mark { transform:rotate(90deg) }
+.vw-spacer { flex:1 }
+.vw-tool-row { border-top:1px solid var(--hair) }
+.vw-tool-glyph { width:15px; color:var(--mut); font:10px ui-monospace,SFMono-Regular,Menlo,monospace; text-align:center }
+.vw-tool-name { flex:none; max-width:115px; color:var(--fg); font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
+.vw-tool-target { min-width:0; color:var(--mut); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font:10.5px ui-monospace,SFMono-Regular,Menlo,monospace }
+.vw-tool-state { font-weight:700; color:var(--ok) }
+.vw-tool-pending .vw-tool-state { color:var(--ask) }
+.vw-tool-error .vw-tool-state,.vw-danger { color:var(--block)!important }
+.vw-tool-detail { max-height:240px; overflow:auto; padding:7px 8px 8px; border-top:1px solid var(--hair) }
+.vw-tool-code { margin:0; color:var(--mut); font:10.5px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; white-space:pre-wrap; overflow-wrap:anywhere }
+.vw-tool-code + .vw-tool-code { margin-top:8px }
+.vw-tool-code b { color:var(--fg); font:600 9px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; text-transform:uppercase; letter-spacing:.05em }
 
-.vw-error { margin: 0 12px 6px; padding: 6px 8px; border-radius: 8px; background: var(--fill); color: var(--block); font-size: 11.5px }
+/* reasoning, requests, notices, live status */
+.vw-reasoning { margin:2px 0 7px; color:var(--mut); font-size:11.5px }
+.vw-reasoning summary { display:flex; align-items:center; gap:5px; cursor:pointer; list-style:none }
+.vw-reasoning-body { padding:6px 0 0 13px; white-space:pre-wrap; overflow-wrap:anywhere; font-style:italic }
+.vw-notice,.vw-request-done { margin:5px 0; color:var(--mut); font-size:11px; text-align:center }
+.vw-request-card { display:grid; gap:5px; margin:4px 0 9px; padding:9px; border:1px solid var(--ask); border-radius:9px }
+.vw-request-kind { color:var(--mut); font-size:11px }
+.vw-request-card pre { max-height:120px; margin:0; overflow:auto; color:var(--mut); font:10px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; white-space:pre-wrap }
+.vw-request-actions { display:flex; flex-wrap:wrap; gap:5px }
+.vw-request-actions button,.vw-mirror-card button { padding:4px 7px; border:1px solid var(--bd2); border-radius:6px; background:var(--fill); color:var(--fg); font:inherit; font-size:11px; cursor:pointer }
+.vw-request-actions button:disabled { opacity:.45; cursor:default }
+.vw-request-actions .vw-request-reject { color:var(--block); border-color:var(--block) }
+.vw-working { display:flex; align-items:center; gap:6px; color:var(--mut); font-size:11px }
+.vw-spinner { width:8px; height:8px; border:1px solid var(--bd2); border-top-color:var(--acc); border-radius:50%; animation:vw-spin .75s linear infinite }
+@keyframes vw-spin { to { transform:rotate(360deg) } }
+.vw-error { margin:0 12px 6px; padding:6px 8px; border-radius:8px; background:var(--fill); color:var(--block); font-size:11.5px }
 
-/* composer */
-.vw-composer { border-top: 1px solid var(--hair); padding: 8px 12px 12px; display: flex; flex-direction: column; gap: 6px }
-.vw-input { width: 100%; resize: none; box-sizing: border-box; background: var(--fill); color: var(--fg);
-  border: 1px solid var(--bd); border-radius: 9px; padding: 7px 9px; font: inherit; font-size: 12.5px; outline: none }
-.vw-input:focus { border-color: var(--acc); background: var(--fill-2) }
-.vw-input::placeholder { color: var(--mut) }
-.vw-composer-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px }
-.vw-hint { color: var(--mut); font-size: 10.5px }
-.vw-actions { display: flex; align-items: center; gap: 6px }
-.vw-stop { background: transparent; color: var(--block); border: 1px solid var(--block); border-radius: 8px;
-  padding: 4px 10px; font: inherit; font-size: 12px; font-weight: 600; cursor: pointer }
-.vw-send { background: var(--acc); color: var(--on-acc); border: 0; border-radius: 8px; padding: 5px 12px;
-  font: inherit; font-size: 12px; font-weight: 600; cursor: pointer }
-.vw-send:disabled { background: var(--fill-2); color: var(--mut); cursor: default }
+/* composer + mirror explanation */
+.vw-composer { border-top:1px solid var(--hair); padding:8px 12px 12px; display:flex; flex-direction:column; gap:6px }
+.vw-envelope { overflow:hidden; border:1px solid var(--bd2); border-radius:10px; background:var(--fill) }
+.vw-input { display:block; width:100%; min-height:58px; max-height:150px; resize:none; background:transparent; color:var(--fg);
+  border:0; padding:8px 9px 4px; font:inherit; font-size:12.5px; outline:none }
+.vw-input::placeholder { color:var(--mut) }
+.vw-composer-foot { min-height:30px; display:flex; align-items:center; justify-content:space-between; gap:8px; padding:2px 5px 5px 8px }
+.vw-agent-id { min-width:0; color:var(--mut); font-size:10px; text-transform:uppercase; letter-spacing:.04em; overflow:hidden; text-overflow:ellipsis }
+.vw-actions { display:flex; align-items:center; gap:6px }
+.vw-stop,.vw-send { display:inline-flex; align-items:center; justify-content:center; width:27px; height:27px; border-radius:8px;
+  font:inherit; font-size:14px; font-weight:600; line-height:1; cursor:pointer }
+.vw-stop { background:transparent; color:var(--block); border:1px solid var(--block) }
+.vw-send { background:var(--acc); color:var(--on-acc); border:0 }
+.vw-stop:disabled { opacity:.4; cursor:default }
+.vw-send:disabled { background:var(--fill-2); color:var(--mut); cursor:default }
+.vw-queue { display:grid; gap:3px; color:var(--mut); font-size:10.5px }
+.vw-queue > div { display:flex; gap:5px; align-items:center }.vw-queue > div span { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+.vw-queue button { border:0; background:transparent; color:var(--mut); cursor:pointer }
+.vw-mirror-card { display:grid; gap:7px; padding:9px; border:1px solid var(--bd); border-radius:9px; color:var(--mut); font-size:11.5px; line-height:1.45 }
+.vw-mirror-card strong { color:var(--fg) }.vw-mirror-card button { justify-self:start }
 `;
