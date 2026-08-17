@@ -105,6 +105,55 @@ describe("transcript scrolling", () => {
   });
 });
 
+describe("rich transcript details", () => {
+  it("keeps only role-appropriate tool and reasoning presentation fields", () => {
+    const state = readWidgetState({
+      transcript: [
+        {
+          id: "tool",
+          role: "tool",
+          text: "42 lines",
+          ts: null,
+          truncated: false,
+          label: "Read",
+          status: "completed",
+          streaming: true,
+        },
+        {
+          id: "thought",
+          role: "reasoning",
+          text: "checking",
+          ts: null,
+          truncated: false,
+          label: "not a tool",
+          status: "error",
+          streaming: true,
+        },
+      ],
+    });
+
+    expect(state.transcript).toEqual([
+      {
+        id: "tool",
+        role: "tool",
+        text: "42 lines",
+        ts: null,
+        truncated: false,
+        label: "Read",
+        status: "completed",
+      },
+      {
+        id: "thought",
+        role: "reasoning",
+        text: "checking",
+        ts: null,
+        truncated: false,
+        streaming: true,
+      },
+    ]);
+  });
+});
+
 describe("pending prompt echo", () => {
   const row = (role: "user" | "assistant", text: string) =>
     ({ id: text, role, text, ts: null, truncated: false }) as const;

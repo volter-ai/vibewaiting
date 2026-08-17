@@ -45,6 +45,42 @@ function timeLabel(ts: number | null): string {
 }
 
 function Row({ entry, pending }: { entry: TranscriptEntry; pending?: boolean }): JSX.Element {
+  if (entry.role === "tool") {
+    const status = entry.status ?? "completed";
+    return (
+      <details class={`vw-fold vw-tool vw-tool-${status}`} open={status !== "completed" || undefined}>
+        <summary class="vw-fold-head">
+          <span class="vw-fold-mark">›</span>
+          <span class="vw-tool-name">{entry.label ?? "tool"}</span>
+          <span class="vw-tool-status">{status === "pending" ? "running" : status}</span>
+          {entry.ts !== null ? <span class="vw-time">{timeLabel(entry.ts)}</span> : null}
+        </summary>
+        {entry.text !== "" ? (
+          <pre class="vw-tool-body">
+            {entry.text}
+            {entry.truncated ? <span class="vw-cut"> [truncated]</span> : null}
+          </pre>
+        ) : null}
+      </details>
+    );
+  }
+
+  if (entry.role === "reasoning") {
+    return (
+      <details class="vw-fold vw-reasoning" open={entry.streaming === true || undefined}>
+        <summary class="vw-fold-head">
+          <span class="vw-fold-mark">›</span>
+          <span class="vw-role">thinking</span>
+          {entry.streaming ? <span class="vw-thinking-live">streaming…</span> : null}
+        </summary>
+        <div class="vw-reasoning-body">
+          {entry.text}
+          {entry.truncated ? <span class="vw-cut"> [truncated]</span> : null}
+        </div>
+      </details>
+    );
+  }
+
   return (
     <div class={`vw-row vw-${entry.role}${pending ? " vw-pending" : ""}`}>
       <div class="vw-meta">
