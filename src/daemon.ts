@@ -29,6 +29,7 @@ import {
   toAttachError,
   type AttachError,
   type ProjectionOptions,
+  type StartupPhase,
   type WidgetState,
 } from "./projection.js";
 import { homedir } from "node:os";
@@ -277,6 +278,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   let lastPushed: WidgetState | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let inFlight: Promise<void> = Promise.resolve();
+  let startup: StartupPhase = "connecting";
+  let startupHarness = options.harness ?? "";
 
   const home = options.home ?? homedir();
   const now = options.now ?? Date.now;
@@ -305,8 +308,16 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     const ownSnapshot = controller.getSnapshot();
     const ownRef = activeRef(ownSnapshot);
     const ownRows = projectSessions(descriptors, { now: now(), home, active: ownRef, max: MAX_SESSION_ROWS });
+    const projected = project(snapshot, options.projection ?? {});
+    const startupLabel = startup === "connecting"
+      ? "Connecting to coding agents…"
+      : startup === "starting"
+        ? `Starting ${startupHarness || "coding agent"}…`
+        : "Loading recent sessions…";
     const state: WidgetState = {
-      ...project(snapshot, options.projection ?? {}),
+      ...projected,
+      pill: startup === "ready" ? projected.pill : { tone: "off", label: startupLabel },
+      startup,
       sessions,
       attached: attachmentFor(ref, sessions, snapshot.workspace, home),
       owned: attachmentFor(ownRef, ownRows, ownSnapshot.workspace, home),
@@ -492,10 +503,17 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     log(`ignoring unrecognized intent payload: ${JSON.stringify(intent.payload)}`);
   });
 
+  // Push before the first potentially slow RPC. Without this, the iframe mounts but receives no
+  // state until initialization, harness startup, and discovery have all finished — indistinguishable
+  // from a frozen panel on a cold machine.
+  await pushNow();
   await controller.initialize();
 
   const harness = chooseHarness(controller.getSnapshot(), options.harness);
+  startupHarness = harness ?? options.harness ?? "";
   if (harness) {
+    startup = "starting";
+    await pushNow();
     try {
       await controller.dispatch({ type: "start", harness });
       log(`started ${harness} in ${options.workspace}`);
@@ -508,7 +526,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     log("no startable harness found — the panel will mirror instead");
   }
 
+  startup = "discovering";
+  await pushNow();
   await refreshSessions();
+  startup = "ready";
   await pushNow();
 
   return {

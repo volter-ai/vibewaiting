@@ -16,12 +16,33 @@ export const PANEL_CSS = `
 .vw-scol { display:flex; flex-direction:column; gap:2px; min-width:0; flex:1 }
 .vw-sline { display:flex; align-items:baseline; justify-content:space-between; gap:8px }
 .vw-sname { min-width:0; font-size:12.5px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
-.vw-sage { flex:none; margin-left:auto; color:var(--mut); font-size:10.5px; font-variant-numeric:tabular-nums }
+.vw-sage { flex:none; display:inline-flex; align-items:center; gap:4px; margin-left:auto; color:var(--mut); font-size:10.5px; font-variant-numeric:tabular-nums }
 .vw-follow { flex:none; margin-right:auto; color:var(--acc); font-size:9.5px; text-transform:uppercase; letter-spacing:.04em }
 .vw-ssub { display:flex; align-items:baseline; gap:6px; min-width:0; color:var(--mut); font-size:11px }
 .vw-sharness { flex:none; text-transform:uppercase; letter-spacing:.04em; font-size:9.5px; background:var(--fill-2); border-radius:5px; padding:1px 5px }
 .vw-sdetail { white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
 .vw-sfail { display:block; color:var(--block); white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
+.vw-srow-opening { background:var(--fill) }
+
+/* Bootstrap has real milestones and continuous motion, so cold-start latency reads as progress. */
+.vw-startup { display:grid; grid-template-columns:30px minmax(0,1fr); gap:4px 10px; align-items:center;
+  margin:auto 2px; padding:18px 10px; color:var(--mut); text-align:left }
+.vw-startup-compact { margin:2px 0 6px; padding:8px; border:1px solid var(--hair); border-radius:9px; background:var(--fill) }
+.vw-startup-orbit { grid-row:1 / span 2; position:relative; width:26px; height:26px; border:1px solid var(--bd); border-radius:50% }
+.vw-startup-orbit::before { content:""; position:absolute; inset:5px; border-radius:50%; background:var(--fill-2); animation:vw-breathe 1.5s ease-in-out infinite }
+.vw-startup-orbit span { position:absolute; inset:-1px; border:2px solid transparent; border-top-color:var(--acc); border-radius:50%; animation:vw-spin 1s linear infinite }
+.vw-startup-copy { display:grid; gap:2px; min-width:0 }
+.vw-startup-copy strong { color:var(--fg); font-size:12px; font-weight:600 }
+.vw-startup-copy > span { font-size:10.5px; line-height:1.35 }
+.vw-startup-track { grid-column:2; display:grid; grid-template-columns:repeat(3,minmax(18px,38px)); gap:4px; margin-top:4px }
+.vw-startup-track > span { height:2px; overflow:hidden; border-radius:2px; background:var(--fill-2) }
+.vw-startup-track .vw-step-done { background:var(--acc) }
+.vw-startup-track .vw-step-current::after { content:""; display:block; width:55%; height:100%; background:var(--acc); animation:vw-progress 1s ease-in-out infinite alternate }
+@keyframes vw-breathe { 50% { transform:scale(.72); opacity:.5 } }
+@keyframes vw-progress { from { transform:translateX(-100%) } to { transform:translateX(180%) } }
+@media (prefers-reduced-motion:reduce) {
+  .vw-startup-orbit::before,.vw-startup-orbit span,.vw-startup-track .vw-step-current::after,.vw-spinner { animation:none }
+}
 
 /* chat header + normalized work plan */
 .vw-head { display:flex; align-items:center; gap:7px; padding:4px 10px 8px }
@@ -106,6 +127,7 @@ export const PANEL_CSS = `
 .vw-request-actions .vw-request-reject { color:var(--block); border-color:var(--block) }
 .vw-working { display:flex; align-items:center; gap:6px; color:var(--mut); font-size:11px }
 .vw-spinner { width:8px; height:8px; border:1px solid var(--bd2); border-top-color:var(--acc); border-radius:50%; animation:vw-spin .75s linear infinite }
+.vw-spinner-small { display:inline-block; flex:none; width:7px; height:7px }
 @keyframes vw-spin { to { transform:rotate(360deg) } }
 .vw-error { margin:0 12px 6px; padding:6px 8px; border-radius:8px; background:var(--fill); color:var(--block); font-size:11.5px }
 

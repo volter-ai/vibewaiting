@@ -27,6 +27,7 @@ import {
   pillFor,
   readWidgetState,
   roleLabel,
+  startupMessage,
   type SessionRow,
   type TranscriptEntry,
   type View,
@@ -218,9 +219,10 @@ function SessionListRow({
   // lit for exactly one row read as "every other session is dead" (which is what it was saying).
   return (
     <button
-      class={`vw-srow${row.active ? " vw-active" : ""}`}
+      class={`vw-srow${row.active ? " vw-active" : ""}${opening ? " vw-srow-opening" : ""}`}
       type="button"
       onClick={onOpen}
+      aria-busy={opening}
       title={`${row.harness} · ${row.cwd}${row.live ? " · active now" : ""}`}
     >
       <span class={`vw-dot${row.live ? " vw-live" : ""}`} title={row.live ? "active now" : "idle"} />
@@ -232,7 +234,9 @@ function SessionListRow({
               › following
             </span>
           ) : null}
-          <span class="vw-sage">{opening ? "opening…" : row.age}</span>
+          <span class="vw-sage">
+            {opening ? <><span class="vw-spinner vw-spinner-small" aria-hidden="true" />Opening</> : row.age}
+          </span>
         </span>
         {error !== null ? (
           <span class="vw-ssub vw-sfail" title={error}>
@@ -249,6 +253,24 @@ function SessionListRow({
   );
 }
 
+function StartupStatus({ state, compact = false }: { state: WidgetState; compact?: boolean }): JSX.Element {
+  const copy = startupMessage(state.startup, state.harness);
+  return (
+    <section class={`vw-startup${compact ? " vw-startup-compact" : ""}`} role="status" aria-live="polite" aria-busy="true">
+      <span class="vw-startup-orbit" aria-hidden="true"><span /></span>
+      <span class="vw-startup-copy">
+        <strong>{copy.title}</strong>
+        <span>{copy.detail}</span>
+      </span>
+      <span class="vw-startup-track" aria-hidden="true">
+        {[0, 1, 2].map((step) => (
+          <span key={step} class={step < copy.step ? "vw-step-done" : step === copy.step ? "vw-step-current" : ""} />
+        ))}
+      </span>
+    </section>
+  );
+}
+
 function SessionList({
   state,
   awaiting,
@@ -262,11 +284,11 @@ function SessionList({
   onOpen: (row: SessionRow) => void;
 }): JSX.Element {
   const rows = listRows(state);
+  const loading = state.startup !== "ready";
   return (
     <div class="vw-list">
-      {rows.length === 0 ? (
-        <div class="vw-empty">{state.error ?? "Looking for coding sessions…"}</div>
-      ) : null}
+      {loading ? <StartupStatus state={state} compact={rows.length > 0} /> : null}
+      {!loading && rows.length === 0 ? <div class="vw-empty">{state.error ?? "No coding sessions found."}</div> : null}
       {rows.map((row) => (
         <SessionListRow
           key={row.key}
@@ -383,10 +405,9 @@ function Chat({ state, onBack }: { state: WidgetState; onBack: () => void }): JS
       </div>
       <WorkPlan state={state} />
       <div class="vw-scroll" ref={scroller} onScroll={onScroll}>
-        {empty ? (
-          <div class="vw-empty">
-            {state.error ?? (state.harness ? `${state.harness} is listening. Say something.` : "No transcript yet.")}
-          </div>
+        {empty && state.startup !== "ready" ? <StartupStatus state={state} /> : null}
+        {empty && state.startup === "ready" ? (
+          <div class="vw-empty">{state.error ?? (state.harness ? `${state.harness} is listening. Say something.` : "No transcript yet.")}</div>
         ) : null}
         {blocks.map((block) =>
           block.kind === "tool-group"
@@ -424,7 +445,7 @@ function Chat({ state, onBack }: { state: WidgetState; onBack: () => void }): JS
               class="vw-input"
               rows={2}
               aria-label={`Message ${attached?.harness ?? state.harness ?? "agent"}`}
-              placeholder={state.busy ? "Queue a follow-up…" : "Ask your agent…"}
+              placeholder={state.startup !== "ready" ? "Connecting…" : state.busy ? "Queue a follow-up…" : "Ask your agent…"}
               value={draft}
               disabled={state.mode !== "control" && !state.canSend}
               onInput={(e): void => setDraft((e.currentTarget as HTMLTextAreaElement).value)}
