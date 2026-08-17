@@ -20,6 +20,7 @@ import type {
   RuntimeStartParams,
   SessionDescriptor,
   SessionLocator,
+  SessionMessageResult,
   SessionWatchEvent,
 } from "@volter-ai-dev/supercode-harness-sdk";
 import type { WidgetBridge } from "../src/daemon.js";
@@ -64,6 +65,7 @@ export class FakeRuntime extends EventEmitter {
   };
   closed = false;
   readonly sent: string[] = [];
+  interrupts = 0;
   #sequence = 0;
 
   async sendInput(text: string): Promise<{ turn_id: string | null }> {
@@ -73,6 +75,7 @@ export class FakeRuntime extends EventEmitter {
   }
 
   async interrupt(): Promise<Record<string, never>> {
+    this.interrupts += 1;
     return {};
   }
 
@@ -127,6 +130,8 @@ export function descriptor(over: {
   updatedAtMs?: number | null;
   messageCount?: number | null;
   text?: string;
+  liveEndpoint?: string | null;
+  liveStatus?: "busy" | "idle" | null;
 } = {}): SessionDescriptor & { text: string } {
   const harness = over.harness ?? "claude-code";
   const sessionId = over.sessionId ?? "sess-1";
@@ -141,6 +146,8 @@ export function descriptor(over: {
     updated_at_ms: over.updatedAtMs === undefined ? 1_000_000 : over.updatedAtMs,
     message_count: over.messageCount === undefined ? 12 : over.messageCount,
     model: over.model === undefined ? "claude-opus-5" : over.model,
+    ...(over.liveEndpoint !== undefined ? { live_endpoint: over.liveEndpoint } : {}),
+    ...(over.liveStatus !== undefined ? { live_status: over.liveStatus } : {}),
     text: over.text ?? "hello from another window",
   };
 }
@@ -166,6 +173,7 @@ export class FakeHarnessClient implements HarnessClientAdapter {
   /** Followers currently streaming. The leak check: this must settle back to one attachment's worth. */
   activeFollows = 0;
   closeCalls = 0;
+  readonly messages: Array<{ locator: SessionLocator; text: string }> = [];
   #failStart: string | undefined;
 
   constructor(options: FakeHarnessClientOptions = {}) {
@@ -195,6 +203,21 @@ export class FakeHarnessClient implements HarnessClientAdapter {
     );
     if (!found) throw new Error(`no such session: ${locator.harness}/${locator.session_id}`);
     return new FakeManagedSession(this, found) as unknown as ManagedSession;
+  }
+
+  async messageSession(locator: SessionLocator, text: string): Promise<SessionMessageResult> {
+    this.messages.push({ locator, text });
+    return {
+      delivered_to_bus: true,
+      target: {
+        session_id: locator.session_id,
+        name: "fake-live-peer",
+        pid: 4242,
+        cwd: "/home/dev/projects/atlas",
+        status: "busy",
+      },
+      courier: { model: "haiku", report: "SENT" },
+    };
   }
 
   async startManagedRuntime(params: RuntimeStartParams): Promise<never> {
@@ -293,6 +316,8 @@ class FakeManagedSession {
       subagents: [],
       raw_record_count: 1,
       parse_error_lines: 0,
+      fidelity: "semantic",
+      residue: [],
     };
   }
 }

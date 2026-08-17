@@ -48,7 +48,7 @@ function snapshot(over: Partial<SupercodeClientSnapshot> = {}): SupercodeClientS
     activeSessionId: null,
     activeSession: null,
     taskPlan: { source: "none", items: [], residue: [], observedAt: null },
-    connection: { mode: "none", strategy: null, follow: "inactive", ownsRuntime: false },
+    connection: { mode: "none", strategy: null, follow: "inactive", ownsRuntime: false, messaging: null },
     turn: { state: "idle", id: null, startedAt: null },
     conversation: [],
     requests: [],
@@ -67,6 +67,7 @@ function snapshot(over: Partial<SupercodeClientSnapshot> = {}): SupercodeClientS
     },
     error: null,
     terminalLaunch: null,
+    delivery: null,
     ...over,
   };
 }
@@ -76,6 +77,7 @@ const control = {
   strategy: "start",
   follow: "inactive",
   ownsRuntime: true,
+  messaging: null,
 } satisfies SupercodeClientSnapshot["connection"];
 
 // ── transcript ──────────────────────────────────────────────────────────────────────────────────
@@ -276,11 +278,28 @@ describe("derivePill", () => {
       derivePill(
         snapshot({
           activeHarness: "grok",
-          connection: { mode: "mirror", strategy: null, follow: "following", ownsRuntime: false },
+          connection: { mode: "mirror", strategy: null, follow: "following", ownsRuntime: false, messaging: null },
         }),
       ),
     ).toEqual({ tone: "warn", label: "grok (read-only)" });
     expect(derivePill(snapshot())).toEqual({ tone: "off", label: "no session" });
+  });
+
+  it("reports a messageable live peer without calling it read-only", () => {
+    expect(
+      derivePill(
+        snapshot({
+          activeHarness: "claude-code",
+          connection: {
+            mode: "mirror",
+            strategy: null,
+            follow: "following",
+            ownsRuntime: false,
+            messaging: "live_peer",
+          },
+        }),
+      ),
+    ).toEqual({ tone: "live", label: "claude-code live" });
   });
 
   it("marks an interrupt and a reconcile distinctly", () => {
@@ -336,6 +355,7 @@ describe("project", () => {
       busy: false,
       harness: "codex",
       canSend: true,
+      canInterrupt: false,
       error: null,
       // Machine-wide facts the snapshot cannot know: the daemon merges them over this result.
       sessions: [],

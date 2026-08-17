@@ -34,7 +34,7 @@ describe("readWidgetState", () => {
       activeSessionId: null,
       activeSession: null,
       taskPlan: { source: "none", items: [], residue: [], observedAt: null },
-      connection: { mode: "control", strategy: "start", follow: "inactive", ownsRuntime: true },
+      connection: { mode: "control", strategy: "start", follow: "inactive", ownsRuntime: true, messaging: null },
       turn: { state: "idle", id: null, startedAt: null },
       conversation: [
         {
@@ -63,6 +63,7 @@ describe("readWidgetState", () => {
       },
       error: null,
       terminalLaunch: null,
+      delivery: null,
     } as SupercodeClientSnapshot;
     const pushed = JSON.parse(JSON.stringify(project(snapshot))) as unknown;
     expect(readWidgetState(pushed)).toEqual(project(snapshot));

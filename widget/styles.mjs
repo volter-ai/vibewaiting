@@ -76,6 +76,9 @@ export const PANEL_CSS = `
 .vw-input::placeholder { color: var(--mut) }
 .vw-composer-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px }
 .vw-hint { color: var(--mut); font-size: 10.5px }
+.vw-actions { display: flex; align-items: center; gap: 6px }
+.vw-stop { background: transparent; color: var(--block); border: 1px solid var(--block); border-radius: 8px;
+  padding: 4px 10px; font: inherit; font-size: 12px; font-weight: 600; cursor: pointer }
 .vw-send { background: var(--acc); color: var(--on-acc); border: 0; border-radius: 8px; padding: 5px 12px;
   font: inherit; font-size: 12px; font-weight: 600; cursor: pointer }
 .vw-send:disabled { background: var(--fill-2); color: var(--mut); cursor: default }

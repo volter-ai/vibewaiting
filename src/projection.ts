@@ -73,8 +73,10 @@ export interface WidgetState {
   busy: boolean;
   /** The active harness id (`claude-code`, `codex`, …), or `""` when nothing is selected yet. */
   harness: string;
-  /** The controller's own honest capability, mirrored for display only — the composer never gates on it. */
+  /** The controller's own honest capability; the composer uses it to prevent guaranteed refusals. */
   canSend: boolean;
+  /** True only while the active controlled runtime can accept a native interrupt. */
+  canInterrupt: boolean;
   /** The controller's last structured error message, or `null`. */
   error: string | null;
   /**
@@ -247,7 +249,10 @@ export function derivePill(snapshot: SupercodeClientSnapshot): WidgetPill {
   }
 
   if (snapshot.connection.mode === "none") return { tone: "off", label: label("no session") };
-  if (snapshot.connection.mode === "mirror") return { tone: "warn", label: label(`${harness} (read-only)`) };
+  if (snapshot.connection.mode === "mirror") {
+    if (snapshot.connection.messaging === "live_peer") return { tone: "live", label: label(`${harness} live`) };
+    return { tone: "warn", label: label(`${harness} (read-only)`) };
+  }
   return { tone: "live", label: label(`${harness} ready`) };
 }
 
@@ -265,6 +270,7 @@ export function project(snapshot: SupercodeClientSnapshot, options: ProjectionOp
     busy: isBusy(snapshot),
     harness: snapshot.activeHarness ?? "",
     canSend: snapshot.availableActions.send,
+    canInterrupt: snapshot.availableActions.interrupt,
     error: snapshot.error?.message ?? null,
     sessions: [],
     attached: null,
