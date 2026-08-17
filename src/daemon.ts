@@ -3,7 +3,7 @@
 // Three directions, and only three:
 //   controller revision → debounced `project(snapshot)` → `host.push(patch)`
 //   global discovery tick → `projectSessions(descriptors)` → the same push
-//   widget intent ("agent" queue) → `send` on the active controller, or `attach` to another session
+//   widget intent ("agent" queue) → `send`/`interrupt` on the active controller, or `attach` elsewhere
 //
 // Both ends are INJECTABLE (`attachHost`, `client`, `controller`) because the honest test of this
 // module is a scripted snapshot sequence, not a browser: the widget half is proven by the fake host
@@ -177,6 +177,12 @@ export function parseSendIntent(payload: unknown): string | null {
   if (action !== "send" || typeof text !== "string") return null;
   const trimmed = text.trim();
   return trimmed === "" ? null : trimmed;
+}
+
+/** The Stop button's entire payload. No target is accepted from the page. */
+export function parseInterruptIntent(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object") return false;
+  return (payload as { action?: unknown }).action === "interrupt";
 }
 
 /** The Sessions panel's intent shape: a row key minted by `sessionKey`, echoed back on click. */
@@ -411,6 +417,15 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         await activeController().dispatch({ type: "send", text });
       } catch (e) {
         log(`send failed: ${message(e)}`);
+      }
+      await pushNow();
+      return;
+    }
+    if (parseInterruptIntent(intent.payload)) {
+      try {
+        await activeController().dispatch({ type: "interrupt" });
+      } catch (e) {
+        log(`interrupt failed: ${message(e)}`);
       }
       await pushNow();
       return;

@@ -7,6 +7,7 @@ import {
   WIDGET_NS,
   chooseHarness,
   parseAttachIntent,
+  parseInterruptIntent,
   parseSendIntent,
   startDaemon,
   type AgentController,
@@ -109,6 +110,16 @@ describe("parseSendIntent", () => {
   });
 });
 
+describe("parseInterruptIntent", () => {
+  it("accepts only the Stop button payload", () => {
+    expect(parseInterruptIntent({ action: "interrupt" })).toBe(true);
+    expect(parseInterruptIntent({ action: "interrupt", target: "somebody-else" })).toBe(true);
+    expect(parseInterruptIntent({ action: "send", text: "stop" })).toBe(false);
+    expect(parseInterruptIntent("interrupt")).toBe(false);
+    expect(parseInterruptIntent(null)).toBe(false);
+  });
+});
+
 describe("startDaemon", () => {
   it("mounts the widget under the shared namespace and starts a session", async () => {
     const { attached, client, lastPush } = await rig();
@@ -171,6 +182,7 @@ describe("startDaemon", () => {
       "attachError",
       "attached",
       "busy",
+      "canInterrupt",
       "canSend",
       "error",
       "harness",
@@ -209,6 +221,20 @@ describe("startDaemon", () => {
     client.runtime.turnCompleted();
     await waitFor(() => lastPush().busy === false, 2000);
     expect(lastPush().transcript.at(-1)).toMatchObject({ role: "assistant", text: "done" });
+  });
+
+  it("routes Stop through the active controller native interrupt action", async () => {
+    const { host, client, lastPush } = await rig();
+    await host.fireIntent(INTENT_QUEUE, { action: "send", text: "take your time" });
+    expect(lastPush()).toMatchObject({ busy: true, canInterrupt: true });
+
+    await host.fireIntent(INTENT_QUEUE, { action: "interrupt" });
+    expect(client.runtime.interrupts).toBe(1);
+    expect(lastPush()).toMatchObject({ busy: true, pill: { tone: "warn", label: "interrupting…" } });
+
+    client.runtime.turnCompleted();
+    await waitFor(() => lastPush().busy === false, 2000);
+    expect(lastPush().canInterrupt).toBe(false);
   });
 
   it("ignores an unrecognized intent payload instead of dispatching it", async () => {
@@ -345,6 +371,15 @@ const ATLAS = descriptor({
   text: "another window said this",
   updatedAtMs: 2_000_000,
 });
+const LIVE_ATLAS = descriptor({
+  sessionId: "atlas-live",
+  cwd: "/home/dev/volter/atlas",
+  title: "Rewrite the parser live",
+  text: "another window is working",
+  updatedAtMs: 2_000_000,
+  liveEndpoint: "cc-peer:v1:4242:atlas-live:%2Ftmp%2Fcc-socks%2F4242.sock",
+  liveStatus: "busy",
+});
 const BRIDGE = descriptor({
   harness: "codex",
   sessionId: "bridge-1",
@@ -441,6 +476,28 @@ describe("attaching", () => {
     expect(lastPush()).toMatchObject({ canSend: true, attached: { name: "project" } });
     await host.fireIntent(INTENT_QUEUE, { action: "send", text: "carry on" });
     expect(client.runtime.sent).toEqual(["carry on"]);
+  });
+
+  it("makes a discovered live Claude row sendable without taking over its runtime", async () => {
+    const { daemon, client, host, lastPush } = await sessionRig([OWN, LIVE_ATLAS]);
+    await host.fireIntent(INTENT_QUEUE, { action: "attach", key: sessionKey(LIVE_ATLAS.locator) });
+    await daemon.flush();
+
+    expect(lastPush()).toMatchObject({
+      canSend: true,
+      canInterrupt: false,
+      attached: { name: "atlas", harness: "claude-code" },
+      pill: { tone: "live", label: "claude-code live" },
+    });
+    expect(daemon.activeController().getSnapshot().connection).toMatchObject({
+      mode: "mirror",
+      messaging: "live_peer",
+    });
+
+    await host.fireIntent(INTENT_QUEUE, { action: "send", text: "  please wrap up  " });
+    expect(client.messages).toEqual([{ locator: LIVE_ATLAS.locator, text: "please wrap up" }]);
+    // The follower, not the sender, owns the real transcript entry.
+    expect(lastPush().transcript.some((entry) => entry.text === "please wrap up")).toBe(false);
   });
 
   it("never leaves a follower behind when two rows are tapped in a row", async () => {

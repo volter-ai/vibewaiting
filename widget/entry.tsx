@@ -172,11 +172,15 @@ function Chat({ state, onBack }: { state: WidgetState; onBack: () => void }): JS
 
   const send = (): void => {
     const text = draft.trim();
-    if (text === "") return;
+    if (text === "" || !state.canSend) return;
     widget.sendIntent(INTENT_QUEUE, { action: "send", text });
     setPending(text);
     setDraft("");
     stick.current = true;
+  };
+
+  const interrupt = (): void => {
+    widget.sendIntent(INTENT_QUEUE, { action: "interrupt" });
   };
 
   const onKeyDown = (e: JSX.TargetedKeyboardEvent<HTMLTextAreaElement>): void => {
@@ -238,9 +242,16 @@ function Chat({ state, onBack }: { state: WidgetState; onBack: () => void }): JS
           <span class="vw-hint">
             <kbd>Enter</kbd> send · <kbd>Shift</kbd>+<kbd>Enter</kbd> newline
           </span>
-          <button class="vw-send" onClick={send} disabled={draft.trim() === ""}>
-            Send
-          </button>
+          <span class="vw-actions">
+            {state.busy && state.canInterrupt ? (
+              <button class="vw-stop" type="button" onClick={interrupt}>
+                Stop
+              </button>
+            ) : null}
+            <button class="vw-send" type="button" onClick={send} disabled={draft.trim() === "" || !state.canSend}>
+              Send
+            </button>
+          </span>
         </div>
       </div>
     </div>

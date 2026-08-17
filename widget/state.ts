@@ -15,6 +15,7 @@ export const EMPTY_STATE: WidgetState = {
   busy: false,
   harness: "",
   canSend: false,
+  canInterrupt: false,
   error: null,
   sessions: [],
   attached: null,
@@ -103,6 +104,7 @@ export function readWidgetState(raw: unknown): WidgetState {
     busy: raw["busy"] === true,
     harness: typeof raw["harness"] === "string" ? raw["harness"] : "",
     canSend: raw["canSend"] === true,
+    canInterrupt: raw["canInterrupt"] === true,
     error: typeof raw["error"] === "string" ? raw["error"] : null,
     sessions: Array.isArray(raw["sessions"])
       ? raw["sessions"].map(readSessionRow).filter((s): s is SessionRow => s !== null)
