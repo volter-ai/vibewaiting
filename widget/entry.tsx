@@ -27,6 +27,7 @@ import {
   pillFor,
   readWidgetState,
   roleLabel,
+  openingMessage,
   startupMessage,
   type SessionRow,
   type TranscriptEntry,
@@ -34,7 +35,6 @@ import {
   type WidgetState,
 } from "./state.js";
 import {
-  activeWorkContext,
   compactToolTarget,
   conversationBlocks,
   toolCategory,
@@ -204,16 +204,17 @@ function subtitle(row: SessionRow): string {
 
 function SessionListRow({
   row,
-  opening,
+  openingLabel,
   error,
   onOpen,
 }: {
   row: SessionRow;
-  opening: boolean;
+  openingLabel: string | null;
   /** The last attach failure for THIS row, shown in place of its subtitle until it clears. */
   error: string | null;
   onOpen: () => void;
 }): JSX.Element {
+  const opening = openingLabel !== null;
   // The dot is LIVENESS — is anyone working in this session right now — and nothing else. Which
   // session the panel is following is said by the row highlight and the chevron, because a dot that
   // lit for exactly one row read as "every other session is dead" (which is what it was saying).
@@ -235,7 +236,7 @@ function SessionListRow({
             </span>
           ) : null}
           <span class="vw-sage">
-            {opening ? <><span class="vw-spinner vw-spinner-small" aria-hidden="true" />Opening</> : row.age}
+            {opening ? <><span class="vw-spinner vw-spinner-small" aria-hidden="true" />{openingLabel}</> : row.age}
           </span>
         </span>
         {error !== null ? (
@@ -274,11 +275,13 @@ function StartupStatus({ state, compact = false }: { state: WidgetState; compact
 function SessionList({
   state,
   awaiting,
+  now,
   failure,
   onOpen,
 }: {
   state: WidgetState;
-  awaiting: string | null;
+  awaiting: { key: string; startedAt: number } | null;
+  now: number;
   /** The attach that failed, still worth showing under its row. */
   failure: { key: string; message: string } | null;
   onOpen: (row: SessionRow) => void;
@@ -293,30 +296,12 @@ function SessionList({
         <SessionListRow
           key={row.key}
           row={row}
-          opening={awaiting === row.key}
+          openingLabel={awaiting?.key === row.key ? openingMessage(now - awaiting.startedAt) : null}
           error={failure !== null && failure.key === row.key ? failure.message : null}
           onOpen={(): void => onOpen(row)}
         />
       ))}
     </div>
-  );
-}
-
-function WorkPlan({ state }: { state: WidgetState }): JSX.Element | null {
-  const work = activeWorkContext(state.transcript);
-  if (!work && state.taskPlan.source === "none") return null;
-  return (
-    <section class="vw-work-plan" aria-label="Work plan">
-      {work ? <div class="vw-working-on"><span>Working on</span><strong>{work.label}</strong></div> : null}
-      {state.taskPlan.items.length ? (
-        <div class="vw-plan-items">
-          {state.taskPlan.items.map((item) => {
-            const glyph = item.status === "completed" ? "✓" : item.status === "in_progress" ? "●" : item.status === "cancelled" ? "×" : "○";
-            return <div key={item.id} class={`vw-plan-item vw-plan-${item.status}`}><span aria-hidden="true">{glyph}</span><span>{item.title}</span></div>;
-          })}
-        </div>
-      ) : null}
-    </section>
   );
 }
 
@@ -403,7 +388,6 @@ function Chat({ state, onBack }: { state: WidgetState; onBack: () => void }): JS
         <span class="vw-hsub">{attached?.harness ?? ""}</span>
         {readOnly ? <span class="vw-ro">read-only</span> : null}
       </div>
-      <WorkPlan state={state} />
       <div class="vw-scroll" ref={scroller} onScroll={onScroll}>
         {empty && state.startup !== "ready" ? <StartupStatus state={state} /> : null}
         {empty && state.startup === "ready" ? (
@@ -470,7 +454,8 @@ function Chat({ state, onBack }: { state: WidgetState; onBack: () => void }): JS
 function MessengerPanel({ state }: { state: unknown }): JSX.Element {
   const s = readWidgetState(state);
   const [view, setView] = useState<View>("list");
-  const [awaiting, setAwaiting] = useState<string | null>(null);
+  const [awaiting, setAwaiting] = useState<{ key: string; startedAt: number } | null>(null);
+  const [openingNow, setOpeningNow] = useState(() => Date.now());
   // The failure is copied into local state on arrival so the row can stop showing it without the
   // host having to retract anything — the host's `attachError` is a fact about the last attach and
   // stays true until the next one.
@@ -478,7 +463,7 @@ function MessengerPanel({ state }: { state: unknown }): JSX.Element {
 
   // The awaited attach settled — either into that session's chat, or into a reason under its row.
   useEffect(() => {
-    const outcome = attachOutcome(awaiting, s.attached, s.attachError);
+    const outcome = attachOutcome(awaiting?.key ?? null, s.attached, s.attachError);
     if (outcome === "attached") {
       setAwaiting(null);
       setFailure(null);
@@ -488,6 +473,13 @@ function MessengerPanel({ state }: { state: unknown }): JSX.Element {
       setFailure(s.attachError);
     }
   });
+
+  useEffect(() => {
+    if (awaiting === null) return undefined;
+    setOpeningNow(Date.now());
+    const timer = setInterval(() => setOpeningNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [awaiting]);
 
   // …and the reason fades on its own, so a stale failure never becomes permanent furniture.
   useEffect(() => {
@@ -505,12 +497,12 @@ function MessengerPanel({ state }: { state: unknown }): JSX.Element {
         setView("chat");
       } else {
         widget.sendIntent(INTENT_QUEUE, { action: "release" });
-        setAwaiting("");
+        setAwaiting({ key: "", startedAt: Date.now() });
       }
       return;
     }
     widget.sendIntent(INTENT_QUEUE, { action: "attach", key: row.key });
-    setAwaiting(row.key);
+    setAwaiting({ key: row.key, startedAt: Date.now() });
   };
 
   if (view === "chat") {
@@ -523,7 +515,7 @@ function MessengerPanel({ state }: { state: unknown }): JSX.Element {
       />
     );
   }
-  return <SessionList state={s} awaiting={awaiting} failure={failure} onOpen={open} />;
+  return <SessionList state={s} awaiting={awaiting} now={openingNow} failure={failure} onOpen={open} />;
 }
 
 // The last tone the host reported — the shell asks for it whenever it redraws the pill's dot.

@@ -44,7 +44,7 @@ export const PANEL_CSS = `
   .vw-startup-orbit::before,.vw-startup-orbit span,.vw-startup-track .vw-step-current::after,.vw-spinner { animation:none }
 }
 
-/* chat header + normalized work plan */
+/* chat header */
 .vw-head { display:flex; align-items:center; gap:7px; padding:4px 10px 8px }
 .vw-back { flex:none; background:var(--fill); color:var(--fg); border:1px solid var(--bd); border-radius:7px;
   width:22px; height:22px; line-height:1; font:inherit; font-size:15px; cursor:pointer; padding:0 }
@@ -52,14 +52,6 @@ export const PANEL_CSS = `
 .vw-hname { font-size:12.5px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
 .vw-hsub { flex:none; color:var(--mut); font-size:10px; text-transform:uppercase; letter-spacing:.04em }
 .vw-ro { flex:none; margin-left:auto; color:var(--ask); font-size:10px; text-transform:uppercase; letter-spacing:.04em }
-.vw-work-plan { display:grid; gap:6px; padding:7px 12px 8px; border-bottom:1px solid var(--hair); font-size:11px }
-.vw-working-on { display:flex; gap:6px; min-width:0; color:var(--mut) }
-.vw-working-on strong { color:var(--fg); overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
-.vw-plan-items { display:grid; gap:2px }
-.vw-plan-item { display:grid; grid-template-columns:14px minmax(0,1fr); gap:5px; color:var(--mut) }
-.vw-plan-in_progress { color:var(--acc) }
-.vw-plan-completed span:last-child { text-decoration:line-through; opacity:.72 }
-
 /* transcript */
 .vw-scroll { flex:1; min-height:0; overflow-y:auto; overscroll-behavior:contain; padding:4px 12px 14px;
   display:flex; flex-direction:column; gap:10px }

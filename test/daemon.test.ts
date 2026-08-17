@@ -616,10 +616,19 @@ function brokenController(reason: string): AgentController {
   };
 }
 
+function hangingController(): AgentController {
+  return {
+    ...brokenController("unused"),
+    initialize: () => new Promise<SupercodeClientSnapshot>(() => undefined),
+  };
+}
+
 /** Like `sessionRig`, but attaching to ONE named workspace fails; every other attach is the real thing. */
 async function failingAttachRig(
   reason: string,
   failWorkspace = "/home/dev/volter/atlas",
+  attachTimeoutMs?: number,
+  hang = false,
 ): Promise<Rig & { logs: string[] }> {
   const client = new FakeHarnessClient({ sessions: [OWN, ATLAS, BRIDGE] });
   const logs: string[] = [];
@@ -634,9 +643,10 @@ async function failingAttachRig(
     now: () => 2_000_000,
     attachHost: async () => host,
     log: (m) => logs.push(m),
+    ...(attachTimeoutMs === undefined ? {} : { attachTimeoutMs }),
     createController: ({ workspace }) =>
       workspace === failWorkspace
-        ? brokenController(reason)
+        ? hang ? hangingController() : brokenController(reason)
         : (new SupercodeController({ client, workspace, ownsClient: false }) as unknown as AgentController),
   });
   running.push(daemon);
@@ -644,6 +654,15 @@ async function failingAttachRig(
 }
 
 describe("an attach that fails", () => {
+  it("turns a hung harness attach into a visible row error", async () => {
+    const { host, lastPush } = await failingAttachRig("unused", "/home/dev/volter/atlas", 5, true);
+    await host.fireIntent(INTENT_QUEUE, { action: "attach", key: sessionKey(ATLAS.locator) });
+    expect(lastPush().attachError).toEqual({
+      key: sessionKey(ATLAS.locator),
+      message: "could not open this session within 1 second",
+    });
+  });
+
   it("pushes the reason, keyed to the row that was tapped", async () => {
     const { daemon, host, logs, lastPush } = await failingAttachRig(REAL_FAILURE);
     await host.fireIntent(INTENT_QUEUE, { action: "attach", key: sessionKey(ATLAS.locator) });

@@ -354,6 +354,13 @@ export function attachOutcome(
  */
 export const ATTACH_ERROR_LINGER_MS = 8000;
 
+/** Progressive copy for a real attach that may need to load and normalize a large transcript. */
+export function openingMessage(elapsedMs: number): string {
+  if (elapsedMs < 4_000) return "Opening";
+  if (elapsedMs < 12_000) return "Loading transcript";
+  return "Still loading";
+}
+
 /**
  * The shell pill — the one thing visible while the widget is closed. It reports the attached
  * session's status when there is one, and otherwise how many sessions are waiting to be opened
