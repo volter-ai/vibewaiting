@@ -372,6 +372,7 @@ describe("project", () => {
     );
     expect(state).toEqual({
       pill: { tone: "live", label: "codex ready" },
+      startup: "ready",
       transcript: [
         { id: "a", role: "user", text: "hi", ts: null, truncated: false },
         { id: "b", role: "assistant", text: "hey", ts: null, truncated: false },

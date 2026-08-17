@@ -10,6 +10,7 @@ import {
   pillFor,
   readWidgetState,
   roleLabel,
+  startupMessage,
 } from "../widget/state.js";
 import { project } from "../src/projection.js";
 import type { SupercodeClientSnapshot } from "@volter-ai-dev/supercode-client";
@@ -17,7 +18,7 @@ import type { SupercodeClientSnapshot } from "@volter-ai-dev/supercode-client";
 describe("readWidgetState", () => {
   it("renders something sane before the first push has landed", () => {
     expect(readWidgetState(undefined)).toEqual(EMPTY_STATE);
-    expect(readWidgetState({})).toMatchObject({ transcript: [], pill: { tone: "off", label: "" } });
+    expect(readWidgetState({})).toMatchObject({ startup: "connecting", transcript: [], pill: { tone: "off", label: "" } });
   });
 
   it("round-trips exactly what the projection pushes", () => {
@@ -85,6 +86,16 @@ describe("readWidgetState", () => {
     expect(state.transcript).toEqual([{ id: "ok", role: "user", text: "fine", ts: null, truncated: false }]);
     expect(state.busy).toBe(false);
     expect(state.harness).toBe("");
+    expect(state.startup).toBe("connecting");
+  });
+});
+
+describe("startupMessage", () => {
+  it("makes every bootstrap wait specific and visibly progressive", () => {
+    expect(startupMessage("connecting", "")).toMatchObject({ title: "Connecting to coding agents", step: 0 });
+    expect(startupMessage("starting", "claude-code")).toMatchObject({ title: "Starting Claude Code", step: 1 });
+    expect(startupMessage("discovering", "claude-code")).toMatchObject({ title: "Loading recent sessions", step: 2 });
+    expect(startupMessage("ready", "claude-code")).toMatchObject({ title: "Ready", step: 3 });
   });
 });
 

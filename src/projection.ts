@@ -22,6 +22,9 @@ export interface WidgetPill {
   label: string;
 }
 
+/** Daemon bootstrap milestones shown explicitly so a quiet network wait never reads as a freeze. */
+export type StartupPhase = "connecting" | "starting" | "discovering" | "ready";
+
 /**
  * The transcript's roles. The first four are Supercode's own message roles; the last three name the
  * non-message conversation entries the controller keeps distinct (`ToolEntry`/`ReasoningEntry`/…),
@@ -122,6 +125,8 @@ export interface AttachError {
 
 export interface WidgetState {
   pill: WidgetPill;
+  /** Current daemon bootstrap milestone. `ready` means the normal session state owns the UI. */
+  startup: StartupPhase;
   transcript: TranscriptEntry[];
   /** A turn is in flight (running / interrupting / reconciling) — the composer shows it, never blocks on it. */
   busy: boolean;
@@ -390,6 +395,7 @@ export function derivePill(snapshot: SupercodeClientSnapshot): WidgetPill {
 export function project(snapshot: SupercodeClientSnapshot, options: ProjectionOptions = {}): WidgetState {
   return {
     pill: derivePill(snapshot),
+    startup: "ready",
     transcript: projectTranscript(snapshot.conversation, options),
     busy: isBusy(snapshot),
     harness: snapshot.activeHarness ?? "",

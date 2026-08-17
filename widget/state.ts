@@ -10,15 +10,17 @@ import type {
   TranscriptEntry,
   TranscriptRequest,
   TranscriptRole,
+  StartupPhase,
   TranscriptTaskPlan,
   WidgetState,
 } from "../src/projection.js";
 import type { AttachedSession, SessionRow } from "../src/sessions.js";
 
-export type { AttachError, AttachedSession, SessionRow, TranscriptEntry, TranscriptRole, WidgetState };
+export type { AttachError, AttachedSession, SessionRow, StartupPhase, TranscriptEntry, TranscriptRole, WidgetState };
 
 export const EMPTY_STATE: WidgetState = {
   pill: { tone: "off", label: "connecting…" },
+  startup: "connecting",
   transcript: [],
   busy: false,
   harness: "",
@@ -38,8 +40,52 @@ export const EMPTY_STATE: WidgetState = {
 /** The messenger's two views: the session list (root) and one session's transcript. */
 export type View = "list" | "chat";
 
+export interface StartupMessage {
+  title: string;
+  detail: string;
+  step: number;
+}
+
+function harnessDisplayName(harness: string): string {
+  const known: Record<string, string> = {
+    "claude-code": "Claude Code",
+    codex: "Codex",
+    opencode: "OpenCode",
+    pi: "Pi",
+    grok: "Grok",
+  };
+  return known[harness] ?? harness;
+}
+
+/** Human copy for each real bootstrap milestone; the step feeds the small visual progress track. */
+export function startupMessage(phase: StartupPhase, harness: string): StartupMessage {
+  switch (phase) {
+    case "connecting":
+      return {
+        title: "Connecting to coding agents",
+        detail: "Checking installed harnesses and their capabilities.",
+        step: 0,
+      };
+    case "starting":
+      return {
+        title: harness ? `Starting ${harnessDisplayName(harness)}` : "Starting your coding agent",
+        detail: "Opening a controlled session in this workspace.",
+        step: 1,
+      };
+    case "discovering":
+      return {
+        title: "Loading recent sessions",
+        detail: "Scanning Claude, Codex, OpenCode, Pi, and Grok.",
+        step: 2,
+      };
+    case "ready":
+      return { title: "Ready", detail: "Coding sessions are up to date.", step: 3 };
+  }
+}
+
 const TONES = new Set(["live", "warn", "dead", "off"]);
 const ROLES = new Set<string>(["system", "user", "assistant", "tool", "reasoning", "request", "notice"]);
+const STARTUP_PHASES = new Set<StartupPhase>(["connecting", "starting", "discovering", "ready"]);
 const REQUEST_OPTION_KINDS = new Set(["allow_once", "allow_always", "reject_once", "reject_always", "other"]);
 const TASK_PLAN_SOURCES = new Set(["codex-update-plan", "claude-tasks", "opencode-todos", "none"]);
 const TASK_PLAN_STATUSES = new Set(["pending", "in_progress", "completed", "cancelled", "unknown"]);
@@ -217,6 +263,9 @@ export function readWidgetState(raw: unknown): WidgetState {
       tone: typeof tone === "string" && TONES.has(tone) ? (tone as WidgetState["pill"]["tone"]) : "off",
       label: typeof label === "string" ? label : "",
     },
+    startup: typeof raw["startup"] === "string" && STARTUP_PHASES.has(raw["startup"] as StartupPhase)
+      ? (raw["startup"] as StartupPhase)
+      : "connecting",
     transcript,
     busy: raw["busy"] === true,
     harness: typeof raw["harness"] === "string" ? raw["harness"] : "",

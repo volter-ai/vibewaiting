@@ -151,7 +151,7 @@ describe("parseReleaseIntent", () => {
 
 describe("startDaemon", () => {
   it("mounts the widget under the shared namespace and starts a session", async () => {
-    const { attached, client, lastPush } = await rig();
+    const { attached, client, host, lastPush } = await rig();
     expect(attached).toEqual([
       { sessionId: "session-abc", ns: WIDGET_NS, html: "<!doctype html><html></html>" },
     ]);
@@ -159,11 +159,20 @@ describe("startDaemon", () => {
     expect(client.startedWith).toEqual([{ harness: "claude-code", cwd: "/tmp/project", policy: "default" }]);
     expect(lastPush()).toMatchObject({
       pill: { tone: "live", label: "claude-code ready" },
+      startup: "ready",
       harness: "claude-code",
       canSend: true,
       busy: false,
       transcript: [],
     });
+    const phases = host.pushes.map((push) => (push as WidgetState).startup);
+    expect(phases.indexOf("connecting")).toBeLessThan(phases.indexOf("starting"));
+    expect(phases.indexOf("starting")).toBeLessThan(phases.indexOf("discovering"));
+    expect(phases.indexOf("discovering")).toBeLessThan(phases.indexOf("ready"));
+    expect(host.pushes).toContainEqual(expect.objectContaining({
+      startup: "connecting",
+      pill: { tone: "off", label: "Connecting to coding agents…" },
+    }));
   });
 
   it("starts the harness the caller named", async () => {
@@ -220,6 +229,7 @@ describe("startDaemon", () => {
       "owned",
       "pill",
       "sessions",
+      "startup",
       "taskPlan",
       "transcript",
       "workspace",
