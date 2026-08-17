@@ -11,6 +11,7 @@ import type {
   ConversationEntry,
   SupercodeClientSnapshot,
 } from "@volter-ai-dev/supercode-client";
+import type { JsonValue } from "@volter-ai-dev/supercode-harness-sdk";
 import type { AttachedSession, SessionRow } from "./sessions.js";
 
 /** The four tones `lucarne/widget/runtime`'s shell renders on the pill (`Tone` in runtime.ts). */
@@ -36,6 +37,29 @@ export type TranscriptRole =
   | "request"
   | "notice";
 
+export interface TranscriptContext {
+  id?: string;
+  kind?: string;
+  label: string;
+  detail: string;
+}
+
+export interface TranscriptRequestOption {
+  optionId: string;
+  name: string;
+  kind: "allow_once" | "allow_always" | "reject_once" | "reject_always" | "other";
+}
+
+export interface TranscriptRequest {
+  requestId: Extract<ConversationEntry, { kind: "request" }>["requestId"];
+  requestKind: string;
+  payloadText: string;
+  options: TranscriptRequestOption[];
+  cancellable: boolean;
+  status: "pending" | "responded";
+  resolution: { optionId: string | null; name: string; kind: string } | null;
+}
+
 export interface TranscriptEntry {
   /** The controller's own stable entry id — the widget keys rows on it, so a streaming entry updates in place. */
   id: string;
@@ -52,10 +76,34 @@ export interface TranscriptEntry {
   truncated: boolean;
   /** Tool name, kept separate from its output so the widget can render real tool chrome. */
   label?: string;
+  /** Tool input and output stay separate so a completed call does not erase what was invoked. */
+  arguments?: string;
+  resultText?: string;
   /** Native tool lifecycle, when this is a tool row. */
   status?: "pending" | "completed" | "error";
   /** Whether a reasoning row is still growing. */
   streaming?: boolean;
+  /** Structured approval/input request data, retained for VGAI-parity request cards. */
+  request?: TranscriptRequest;
+  /** Harness notice code, kept distinct from its human-readable text. */
+  code?: string;
+  /** Typed prompt context used by the work-plan/header projection. */
+  context?: TranscriptContext[];
+}
+
+export interface TranscriptTaskPlanItem {
+  id: string;
+  title: string;
+  status: "pending" | "in_progress" | "completed" | "cancelled" | "unknown";
+  nativeStatus?: string;
+  blockedBy?: string[];
+}
+
+export interface TranscriptTaskPlan {
+  source: "codex-update-plan" | "claude-tasks" | "opencode-todos" | "none";
+  items: TranscriptTaskPlanItem[];
+  residueCount: number;
+  observedAt: number | null;
 }
 
 /**
@@ -79,10 +127,18 @@ export interface WidgetState {
   busy: boolean;
   /** The active harness id (`claude-code`, `codex`, …), or `""` when nothing is selected yet. */
   harness: string;
+  /** Controller lifecycle mode; unlike `canSend`, this does not temporarily change while a turn runs. */
+  mode: "none" | "control" | "mirror";
   /** The controller's own honest capability; the composer uses it to prevent guaranteed refusals. */
   canSend: boolean;
   /** True only while the active controlled runtime can accept a native interrupt. */
   canInterrupt: boolean;
+  /** True while a pending native request can be answered from this controller. */
+  canRespond: boolean;
+  /** Workspace used only to compact absolute tool targets in the presentation layer. */
+  workspace: string;
+  /** Normalized native plan (Codex/Claude/OpenCode) rendered above the transcript. */
+  taskPlan: TranscriptTaskPlan;
   /** The controller's last structured error message, or `null`. */
   error: string | null;
   /**
@@ -94,6 +150,8 @@ export interface WidgetState {
   sessions: SessionRow[];
   /** Which session the Agent panel is showing, for its header. Merged in by the daemon, same as `sessions`. */
   attached: AttachedSession | null;
+  /** The runtime this daemon owns, retained even while the panel temporarily mirrors another session. */
+  owned: AttachedSession | null;
   /**
    * Why the last attach did not happen, or `null`. Merged in by the daemon (it owns attaching);
    * cleared the moment another attach is attempted and on any attach that succeeds.
@@ -108,8 +166,8 @@ export interface ProjectionOptions {
   maxEntryChars?: number;
 }
 
-export const DEFAULT_MAX_ENTRIES = 50;
-export const DEFAULT_MAX_ENTRY_CHARS = 2000;
+export const DEFAULT_MAX_ENTRIES = 120;
+export const DEFAULT_MAX_ENTRY_CHARS = 16_000;
 /** The pill is one line of chrome — a long error message is cut here, not in the shell. */
 export const MAX_PILL_LABEL_CHARS = 72;
 /** An attach failure is one line under a 300px-wide row — a stack-trace-length message is cut here. */
@@ -121,6 +179,17 @@ const TIMESTAMP_KEYS = ["timestamp", "ts", "time", "created_at", "createdAt", "d
 function truncate(text: string, max: number): { text: string; truncated: boolean } {
   if (text.length <= max) return { text, truncated: false };
   return { text: `${text.slice(0, max)}…`, truncated: true };
+}
+
+/** Copy controller-owned JSON before crossing the projection seam. */
+function cloneJsonValue(value: JsonValue): JsonValue {
+  if (Array.isArray(value)) return value.map(cloneJsonValue);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, nested]) => [key, cloneJsonValue(nested)]),
+    );
+  }
+  return value;
 }
 
 /**
@@ -150,11 +219,6 @@ export function toAttachError(key: string, message: string): AttachError {
   return { key, message: truncate(message.trim(), MAX_ATTACH_ERROR_CHARS).text };
 }
 
-function toolText(entry: Extract<ConversationEntry, { kind: "tool" }>): string {
-  const detail = entry.status === "pending" ? (entry.arguments ?? "") : entry.resultText;
-  return detail.trim();
-}
-
 function requestText(entry: Extract<ConversationEntry, { kind: "request" }>): string {
   const options = entry.options.map((o) => o.name).filter(Boolean).join(" / ");
   const resolved = entry.resolution ? ` → ${entry.resolution.name}` : "";
@@ -170,20 +234,51 @@ export function projectEntry(entry: ConversationEntry, maxEntryChars: number): T
   let role: TranscriptRole;
   let raw: string;
   let ts: number | null = null;
-  let detail: Pick<TranscriptEntry, "label" | "status" | "streaming"> = {};
+  let detail: Pick<
+    TranscriptEntry,
+    "label" | "arguments" | "resultText" | "status" | "streaming" | "request" | "code" | "context"
+  > = {};
   switch (entry.kind) {
     case "message":
       if (entry.visibility === "context") return null;
       role = entry.role;
       raw = entry.text;
       ts = timestampFromMetadata(entry.metadata);
+      if (entry.context?.length) {
+        detail = {
+          ...detail,
+          context: entry.context.map((item) => ({
+            ...(item.id ? { id: item.id } : {}),
+            ...(item.kind ? { kind: item.kind } : {}),
+            label: item.label,
+            detail: item.detail,
+          })),
+        };
+      }
       break;
     case "tool":
       role = "tool";
-      raw = toolText(entry);
+      raw = entry.status === "pending" ? (entry.arguments ?? "").trim() : entry.resultText.trim();
       ts = timestampFromMetadata(entry.metadata);
-      detail = { label: entry.name ?? "tool", status: entry.status };
-      break;
+      {
+        const projectedArguments = truncate((entry.arguments ?? "").trim(), maxEntryChars);
+        const projectedResult = truncate(entry.resultText.trim(), maxEntryChars);
+        detail = {
+          label: entry.name ?? "tool",
+          status: entry.status,
+          arguments: projectedArguments.text,
+          resultText: projectedResult.text,
+        };
+        const projected = truncate(raw ?? "", maxEntryChars);
+        return {
+          id: entry.id,
+          role,
+          text: projected.text,
+          ts,
+          truncated: projectedArguments.truncated || projectedResult.truncated,
+          ...detail,
+        };
+      }
     case "reasoning":
       role = "reasoning";
       raw = entry.text;
@@ -192,10 +287,33 @@ export function projectEntry(entry: ConversationEntry, maxEntryChars: number): T
     case "request":
       role = "request";
       raw = requestText(entry);
-      break;
+      {
+        const payload = truncate(JSON.stringify(entry.payload, null, 2), maxEntryChars);
+        detail = {
+          request: {
+            requestId: cloneJsonValue(entry.requestId),
+            requestKind: entry.requestKind,
+            payloadText: payload.text,
+            options: entry.options.map((option) => ({ ...option })),
+            cancellable: entry.cancellable,
+            status: entry.status,
+            resolution: entry.resolution ? { ...entry.resolution } : null,
+          },
+        };
+        const projected = truncate(raw ?? "", maxEntryChars);
+        return {
+          id: entry.id,
+          role,
+          text: projected.text,
+          ts,
+          truncated: projected.truncated || payload.truncated,
+          ...detail,
+        };
+      }
     case "notice":
       role = "notice";
       raw = entry.text || entry.code;
+      detail = { code: entry.code };
       break;
   }
   const { text, truncated } = truncate(raw ?? "", maxEntryChars);
@@ -275,11 +393,24 @@ export function project(snapshot: SupercodeClientSnapshot, options: ProjectionOp
     transcript: projectTranscript(snapshot.conversation, options),
     busy: isBusy(snapshot),
     harness: snapshot.activeHarness ?? "",
+    mode: snapshot.connection.mode,
     canSend: snapshot.availableActions.send,
     canInterrupt: snapshot.availableActions.interrupt,
+    canRespond: snapshot.availableActions.respond,
+    workspace: snapshot.workspace,
+    taskPlan: {
+      source: snapshot.taskPlan.source,
+      items: snapshot.taskPlan.items.map((item) => ({
+        ...item,
+        ...(item.blockedBy ? { blockedBy: [...item.blockedBy] } : {}),
+      })),
+      residueCount: snapshot.taskPlan.residue.length,
+      observedAt: snapshot.taskPlan.observedAt,
+    },
     error: snapshot.error?.message ?? null,
     sessions: [],
     attached: null,
+    owned: null,
     attachError: null,
   };
 }

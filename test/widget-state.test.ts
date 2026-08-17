@@ -116,6 +116,8 @@ describe("rich transcript details", () => {
           ts: null,
           truncated: false,
           label: "Read",
+          arguments: '{"path":"a.ts"}',
+          resultText: "42 lines",
           status: "completed",
           streaming: true,
         },
@@ -140,6 +142,8 @@ describe("rich transcript details", () => {
         ts: null,
         truncated: false,
         label: "Read",
+        arguments: '{"path":"a.ts"}',
+        resultText: "42 lines",
         status: "completed",
       },
       {
@@ -334,11 +338,23 @@ describe("listRows", () => {
       ...EMPTY_STATE,
       sessions: [row],
       attached: { key: "", harness: "claude-code", name: "atlas", cwd: "~/volter/atlas", title: "" },
+      owned: { key: "", harness: "claude-code", name: "atlas", cwd: "~/volter/atlas", title: "" },
     };
     const rows = listRows(state);
     expect(rows.length).toBe(2);
     // It is the session the panel is attached to right now — live by definition, with no descriptor
     // timestamp to read it from.
     expect(rows[0]).toMatchObject({ key: "", name: "atlas", harness: "claude-code", active: true, age: "", live: true });
+  });
+
+  it("keeps a fresh owned runtime reachable while viewing a foreign mirror", () => {
+    const rows = listRows({
+      ...EMPTY_STATE,
+      sessions: [row],
+      attached: { key: "k1", harness: "codex", name: "bridge", cwd: "~/b", title: "t" },
+      owned: { key: "", harness: "claude-code", name: "vibewaiting", cwd: "~/vibewaiting", title: "" },
+    });
+    expect(rows[0]).toMatchObject({ key: "", name: "vibewaiting", active: false, live: true });
+    expect(rows[1]).toEqual(row);
   });
 });

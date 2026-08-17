@@ -3,7 +3,7 @@
 // Three directions, and only three:
 //   controller revision → debounced `project(snapshot)` → `host.push(patch)`
 //   global discovery tick → `projectSessions(descriptors)` → the same push
-//   widget intent ("agent" queue) → `send`/`interrupt` on the active controller, or `attach` elsewhere
+//   widget intent ("agent" queue) → `send`/`interrupt`/`respond`, `attach` elsewhere, or `release`
 //
 // Both ends are INJECTABLE (`attachHost`, `client`, `controller`) because the honest test of this
 // module is a scripted snapshot sequence, not a browser: the widget half is proven by the fake host
@@ -22,7 +22,7 @@ import type {
   SupercodeClientAction,
   SupercodeClientSnapshot,
 } from "@volter-ai-dev/supercode-client";
-import type { DiscoveryQuery, HarnessId, SessionDescriptor } from "@volter-ai-dev/supercode-harness-sdk";
+import type { DiscoveryQuery, HarnessId, JsonValue, SessionDescriptor } from "@volter-ai-dev/supercode-harness-sdk";
 import { WidgetHost } from "lucarne/widget/host";
 import {
   project,
@@ -185,6 +185,40 @@ export function parseInterruptIntent(payload: unknown): boolean {
   return (payload as { action?: unknown }).action === "interrupt";
 }
 
+/** Return from a foreign mirror to the runtime this daemon started. No browser-supplied target. */
+export function parseReleaseIntent(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object") return false;
+  return (payload as { action?: unknown }).action === "release";
+}
+
+export interface RespondIntent {
+  requestId: JsonValue;
+  optionId: string | null;
+}
+
+function isJsonValue(value: unknown): value is JsonValue {
+  if (value === null || typeof value === "string" || typeof value === "boolean") {
+    return true;
+  }
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value)) return value.every(isJsonValue);
+  if (!value || typeof value !== "object") return false;
+  return Object.values(value as Record<string, unknown>).every(isJsonValue);
+}
+
+/** A structured native request response. The page can select only a controller-minted request id. */
+export function parseRespondIntent(payload: unknown): RespondIntent | null {
+  if (!payload || typeof payload !== "object") return null;
+  const { action, requestId, optionId } = payload as {
+    action?: unknown;
+    requestId?: unknown;
+    optionId?: unknown;
+  };
+  if (action !== "respond" || !isJsonValue(requestId)) return null;
+  if (optionId !== null && typeof optionId !== "string") return null;
+  return { requestId, optionId };
+}
+
 /** The Sessions panel's intent shape: a row key minted by `sessionKey`, echoed back on click. */
 export function parseAttachIntent(payload: unknown): string | null {
   if (!payload || typeof payload !== "object") return null;
@@ -268,10 +302,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     const snapshot = activeController().getSnapshot();
     const ref = activeRef(snapshot);
     const sessions = projectSessions(descriptors, { now: now(), home, active: ref, max: MAX_SESSION_ROWS });
+    const ownSnapshot = controller.getSnapshot();
+    const ownRef = activeRef(ownSnapshot);
+    const ownRows = projectSessions(descriptors, { now: now(), home, active: ownRef, max: MAX_SESSION_ROWS });
     const state: WidgetState = {
       ...project(snapshot, options.projection ?? {}),
       sessions,
       attached: attachmentFor(ref, sessions, snapshot.workspace, home),
+      owned: attachmentFor(ownRef, ownRows, ownSnapshot.workspace, home),
       attachError,
     };
     lastPushed = state;
@@ -426,6 +464,22 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         await activeController().dispatch({ type: "interrupt" });
       } catch (e) {
         log(`interrupt failed: ${message(e)}`);
+      }
+      await pushNow();
+      return;
+    }
+    if (parseReleaseIntent(intent.payload)) {
+      await releaseMirror();
+      attachError = null;
+      await pushNow();
+      return;
+    }
+    const response = parseRespondIntent(intent.payload);
+    if (response !== null) {
+      try {
+        await activeController().dispatch({ type: "respond", ...response });
+      } catch (e) {
+        log(`respond failed: ${message(e)}`);
       }
       await pushNow();
       return;

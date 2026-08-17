@@ -8,12 +8,14 @@ import {
   chooseHarness,
   parseAttachIntent,
   parseInterruptIntent,
+  parseReleaseIntent,
+  parseRespondIntent,
   parseSendIntent,
   startDaemon,
   type AgentController,
   type Daemon,
 } from "../src/daemon.js";
-import { DEFAULT_MAX_ENTRIES, MAX_ATTACH_ERROR_CHARS } from "../src/projection.js";
+import { DEFAULT_MAX_ENTRIES, DEFAULT_MAX_ENTRY_CHARS, MAX_ATTACH_ERROR_CHARS } from "../src/projection.js";
 import type { WidgetState } from "../src/projection.js";
 import { sessionKey } from "../src/sessions.js";
 import { FakeHarnessClient, FakeWidgetHost, descriptor, localHarness, waitFor } from "./fakes.js";
@@ -120,6 +122,33 @@ describe("parseInterruptIntent", () => {
   });
 });
 
+describe("parseRespondIntent", () => {
+  it("accepts structured request ids and an option or cancellation", () => {
+    expect(parseRespondIntent({ action: "respond", requestId: { id: 7 }, optionId: "allow" })).toEqual({
+      requestId: { id: 7 },
+      optionId: "allow",
+    });
+    expect(parseRespondIntent({ action: "respond", requestId: 7, optionId: null })).toEqual({
+      requestId: 7,
+      optionId: null,
+    });
+  });
+
+  it("rejects malformed response payloads", () => {
+    expect(parseRespondIntent({ action: "respond", requestId: undefined, optionId: "allow" })).toBeNull();
+    expect(parseRespondIntent({ action: "respond", requestId: 7 })).toBeNull();
+    expect(parseRespondIntent({ action: "send", requestId: 7, optionId: null })).toBeNull();
+  });
+});
+
+describe("parseReleaseIntent", () => {
+  it("accepts only the target-free return-to-owned-runtime action", () => {
+    expect(parseReleaseIntent({ action: "release" })).toBe(true);
+    expect(parseReleaseIntent({ action: "attach", key: "release" })).toBe(false);
+    expect(parseReleaseIntent(null)).toBe(false);
+  });
+});
+
 describe("startDaemon", () => {
   it("mounts the widget under the shared namespace and starts a session", async () => {
     const { attached, client, lastPush } = await rig();
@@ -183,12 +212,17 @@ describe("startDaemon", () => {
       "attached",
       "busy",
       "canInterrupt",
+      "canRespond",
       "canSend",
       "error",
       "harness",
+      "mode",
+      "owned",
       "pill",
       "sessions",
+      "taskPlan",
       "transcript",
+      "workspace",
     ]);
     expect(push["conversation"]).toBeUndefined();
     expect(push["harnesses"]).toBeUndefined();
@@ -196,15 +230,17 @@ describe("startDaemon", () => {
 
   it("caps what crosses the wire, however long the session runs", async () => {
     const { host, client, daemon } = await rig();
-    for (let i = 0; i < 120; i += 1) client.runtime.assistantMessage(`${i}:${"y".repeat(5000)}`);
+    for (let i = 0; i < DEFAULT_MAX_ENTRIES + 5; i += 1) {
+      client.runtime.assistantMessage(`${i}:${"y".repeat(DEFAULT_MAX_ENTRY_CHARS + 50)}`);
+    }
     await waitFor(() => (host.pushes.at(-1) as WidgetState).transcript.length > 0);
     await daemon.flush();
     const state = host.pushes.at(-1) as WidgetState;
     expect(state.transcript.length).toBe(DEFAULT_MAX_ENTRIES);
-    expect(state.transcript[0]?.text.startsWith("70:")).toBe(true);
+    expect(state.transcript[0]?.text.startsWith("5:")).toBe(true);
     for (const entry of state.transcript) {
       expect(entry.truncated).toBe(true);
-      expect(entry.text.length).toBeLessThanOrEqual(2001);
+      expect(entry.text.length).toBeLessThanOrEqual(DEFAULT_MAX_ENTRY_CHARS + 1);
     }
   });
 
@@ -476,6 +512,21 @@ describe("attaching", () => {
     expect(lastPush()).toMatchObject({ canSend: true, attached: { name: "project" } });
     await host.fireIntent(INTENT_QUEUE, { action: "send", text: "carry on" });
     expect(client.runtime.sent).toEqual(["carry on"]);
+  });
+
+  it("retains and releases back to a brand-new owned runtime before it has persisted", async () => {
+    const { daemon, client, host, lastPush } = await sessionRig([ATLAS]);
+    expect(lastPush().owned).toMatchObject({ key: "", name: "project", harness: "claude-code" });
+
+    await host.fireIntent(INTENT_QUEUE, { action: "attach", key: sessionKey(ATLAS.locator) });
+    await daemon.flush();
+    expect(lastPush()).toMatchObject({ attached: { name: "atlas" }, owned: { key: "", name: "project" } });
+
+    await host.fireIntent(INTENT_QUEUE, { action: "release" });
+    await daemon.flush();
+    expect(client.activeFollows).toBe(0);
+    expect(daemon.activeController()).toBe(daemon.controller);
+    expect(lastPush()).toMatchObject({ canSend: true, attached: { key: "", name: "project" } });
   });
 
   it("makes a discovered live Claude row sendable without taking over its runtime", async () => {

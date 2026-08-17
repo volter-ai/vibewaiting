@@ -118,6 +118,8 @@ describe("projectEntry", () => {
       label: "Read",
       status: "completed",
       text: "42 lines",
+      arguments: '{"path":"a.ts"}',
+      resultText: "42 lines",
     });
   });
 
@@ -175,7 +177,22 @@ describe("projectEntry", () => {
       },
       500,
     );
-    expect(row).toMatchObject({ role: "request", text: "command_approval: Allow / Deny" });
+    expect(row).toMatchObject({
+      role: "request",
+      text: "command_approval: Allow / Deny",
+      request: {
+        requestId: 7,
+        requestKind: "command_approval",
+        payloadText: "null",
+        options: [
+          { optionId: "a", name: "Allow", kind: "allow_once" },
+          { optionId: "d", name: "Deny", kind: "reject_once" },
+        ],
+        cancellable: true,
+        status: "pending",
+        resolution: null,
+      },
+    });
   });
 
   it("projects reasoning and notices as their own roles", () => {
@@ -213,13 +230,13 @@ describe("projectEntry", () => {
 
 describe("projectTranscript", () => {
   it("keeps only the trailing window, in order", () => {
-    const long: ConversationEntry[] = Array.from({ length: 120 }, (_, i) =>
+    const long: ConversationEntry[] = Array.from({ length: DEFAULT_MAX_ENTRIES + 70 }, (_, i) =>
       message({ id: `m${i}`, text: `line ${i}` }),
     );
     const rows = projectTranscript(long);
     expect(rows.length).toBe(DEFAULT_MAX_ENTRIES);
     expect(rows[0]?.id).toBe("m70");
-    expect(rows.at(-1)?.id).toBe("m119");
+    expect(rows.at(-1)?.id).toBe(`m${DEFAULT_MAX_ENTRIES + 69}`);
   });
 
   it("counts the window in RENDERED rows — hidden context messages do not eat it", () => {
@@ -361,12 +378,17 @@ describe("project", () => {
       ],
       busy: false,
       harness: "codex",
+      mode: "control",
       canSend: true,
       canInterrupt: false,
+      canRespond: false,
+      workspace: "/w",
+      taskPlan: { source: "none", items: [], residueCount: 0, observedAt: null },
       error: null,
       // Machine-wide facts the snapshot cannot know: the daemon merges them over this result.
       sessions: [],
       attached: null,
+      owned: null,
       attachError: null,
     });
   });
@@ -376,6 +398,23 @@ describe("project", () => {
       expect(project(snapshot({ turn: { state, id: null, startedAt: null } })).busy).toBe(true);
     }
     expect(project(snapshot()).busy).toBe(false);
+  });
+
+  it("retains the normalized cross-harness task plan", () => {
+    const state = project(snapshot({
+      taskPlan: {
+        source: "codex-update-plan",
+        items: [{ id: "one", title: "Render Markdown", status: "in_progress" }],
+        residue: [{ native: "kept upstream" }],
+        observedAt: 123,
+      },
+    }));
+    expect(state.taskPlan).toEqual({
+      source: "codex-update-plan",
+      items: [{ id: "one", title: "Render Markdown", status: "in_progress" }],
+      residueCount: 1,
+      observedAt: 123,
+    });
   });
 
   it("stays bounded no matter how long the session got", () => {
