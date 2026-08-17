@@ -25,6 +25,7 @@ import type {
 import type { DiscoveryQuery, HarnessId, JsonValue, SessionDescriptor } from "@volter-ai-dev/supercode-harness-sdk";
 import { WidgetHost } from "lucarne/widget/host";
 import {
+  DEFAULT_MAX_ENTRIES,
   project,
   toAttachError,
   type AttachError,
@@ -56,6 +57,13 @@ export const DEFAULT_DISCOVER_INTERVAL_MS = 5000;
 export const DEFAULT_ATTACH_TIMEOUT_MS = 45_000;
 /** Harnesses tried, in order, when the caller named none — first one that can actually start wins. */
 export const HARNESS_PREFERENCE: readonly string[] = ["claude-code", "codex", "opencode", "pi", "grok"];
+/** The widget renders this many entries, so its passive transport should never fetch more. */
+const PASSIVE_MIRROR_VIEW = Object.freeze({
+  tailMessages: DEFAULT_MAX_ENTRIES,
+  maxMessageChars: 16_000,
+  includeSubagents: false,
+  displayHistory: true,
+});
 
 /** The slice of `WidgetHost` this daemon uses — the seam a test replaces with a recorder. */
 export interface WidgetBridge {
@@ -268,6 +276,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       client: requireClient(options),
       workspace: options.workspace,
       ownsClient: true,
+      // Startup immediately creates its own runtime; observing the newest
+      // persisted session first only performs a redundant full transcript load.
+      autoObserve: false,
+      mirrorView: PASSIVE_MIRROR_VIEW,
       ...(options.policy ? { policy: options.policy } : {}),
     });
 
@@ -372,7 +384,15 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     options.createController ??
     ((opts: { workspace: string }): AgentController =>
       // `ownsClient: false`: this daemon's ONE transport outlives every mirror that borrows it.
-      new SupercodeController({ client: requireClient(options), workspace: opts.workspace, ownsClient: false }));
+      // The requested descriptor is observed explicitly below, so automatic
+      // observation here would load the workspace's newest session twice.
+      new SupercodeController({
+        client: requireClient(options),
+        workspace: opts.workspace,
+        ownsClient: false,
+        autoObserve: false,
+        mirrorView: PASSIVE_MIRROR_VIEW,
+      }));
 
   /** Close the current mirror (which aborts its follower) and fall back to the owned controller. */
   const releaseMirror = async (): Promise<void> => {
