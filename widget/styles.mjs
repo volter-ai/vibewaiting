@@ -59,9 +59,25 @@ export const PANEL_CSS = `
 .vw-user .vw-role { color: var(--acc) }
 .vw-user .vw-text { background: var(--fill); border-left: 2px solid var(--acc); border-radius: 0 8px 8px 0; padding: 5px 8px }
 .vw-assistant .vw-role { color: var(--ok) }
-.vw-tool .vw-text, .vw-reasoning .vw-text { color: var(--mut); font-size: 12px }
-.vw-tool .vw-text { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; max-height: 8.5em; overflow: hidden }
-.vw-reasoning .vw-text { font-style: italic }
+.vw-fold { border: 1px solid var(--hair); border-radius: 8px; background: var(--fill); overflow: hidden }
+.vw-fold-head { display: flex; align-items: center; gap: 6px; padding: 5px 7px; color: var(--mut);
+  font-size: 10px; letter-spacing: .04em; text-transform: uppercase; cursor: pointer; list-style: none }
+.vw-fold-head::-webkit-details-marker { display: none }
+.vw-fold-mark { flex: none; font-size: 15px; line-height: 10px; transition: transform 120ms ease }
+.vw-fold[open] .vw-fold-mark { transform: rotate(90deg) }
+.vw-tool-name { min-width: 0; color: var(--fg); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px; font-weight: 600; text-transform: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.vw-tool-status { margin-left: auto; font-size: 9px }
+.vw-tool-pending .vw-tool-status { color: var(--ask) }
+.vw-tool-error { border-color: var(--block) }
+.vw-tool-error .vw-tool-status { color: var(--block) }
+.vw-tool-body { margin: 0; border-top: 1px solid var(--hair); padding: 7px 8px; color: var(--mut);
+  font: 11.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word;
+  max-height: 9em; overflow: auto }
+.vw-reasoning .vw-role { color: var(--mut) }
+.vw-thinking-live { color: var(--ask); font-size: 9px }
+.vw-reasoning-body { border-top: 1px solid var(--hair); padding: 6px 8px; color: var(--mut);
+  font-size: 12px; line-height: 1.45; font-style: italic; white-space: pre-wrap; word-break: break-word }
 .vw-request .vw-role { color: var(--ask) }
 .vw-notice .vw-text { color: var(--ask) }
 .vw-pending { opacity: .55 }

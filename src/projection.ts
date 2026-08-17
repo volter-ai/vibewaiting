@@ -50,6 +50,12 @@ export interface TranscriptEntry {
   ts: number | null;
   /** True when `text` was cut to `maxEntryChars` — the widget marks the row rather than lying about length. */
   truncated: boolean;
+  /** Tool name, kept separate from its output so the widget can render real tool chrome. */
+  label?: string;
+  /** Native tool lifecycle, when this is a tool row. */
+  status?: "pending" | "completed" | "error";
+  /** Whether a reasoning row is still growing. */
+  streaming?: boolean;
 }
 
 /**
@@ -145,11 +151,8 @@ export function toAttachError(key: string, message: string): AttachError {
 }
 
 function toolText(entry: Extract<ConversationEntry, { kind: "tool" }>): string {
-  const head = entry.name ?? "tool";
   const detail = entry.status === "pending" ? (entry.arguments ?? "") : entry.resultText;
-  const trimmed = detail.trim();
-  const suffix = entry.status === "error" ? " (error)" : entry.status === "pending" ? " …" : "";
-  return trimmed ? `${head}${suffix}: ${trimmed}` : `${head}${suffix}`;
+  return detail.trim();
 }
 
 function requestText(entry: Extract<ConversationEntry, { kind: "request" }>): string {
@@ -167,6 +170,7 @@ export function projectEntry(entry: ConversationEntry, maxEntryChars: number): T
   let role: TranscriptRole;
   let raw: string;
   let ts: number | null = null;
+  let detail: Pick<TranscriptEntry, "label" | "status" | "streaming"> = {};
   switch (entry.kind) {
     case "message":
       if (entry.visibility === "context") return null;
@@ -178,10 +182,12 @@ export function projectEntry(entry: ConversationEntry, maxEntryChars: number): T
       role = "tool";
       raw = toolText(entry);
       ts = timestampFromMetadata(entry.metadata);
+      detail = { label: entry.name ?? "tool", status: entry.status };
       break;
     case "reasoning":
       role = "reasoning";
       raw = entry.text;
+      detail = { streaming: entry.streaming };
       break;
     case "request":
       role = "request";
@@ -193,7 +199,7 @@ export function projectEntry(entry: ConversationEntry, maxEntryChars: number): T
       break;
   }
   const { text, truncated } = truncate(raw ?? "", maxEntryChars);
-  return { id: entry.id, role, text, ts, truncated };
+  return { id: entry.id, role, text, ts, truncated, ...detail };
 }
 
 /** The trailing window of renderable rows — capped AFTER context messages are dropped, so hidden scaffolding never eats the window. */

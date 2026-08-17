@@ -34,16 +34,22 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 
 function readEntry(raw: unknown): TranscriptEntry | null {
   if (!isRecord(raw)) return null;
-  const { id, role, text, ts, truncated } = raw;
+  const { id, role, text, ts, truncated, label, status, streaming } = raw;
   if (typeof id !== "string" || typeof text !== "string") return null;
   if (typeof role !== "string" || !ROLES.has(role)) return null;
-  return {
+  const entry: TranscriptEntry = {
     id,
     role: role as TranscriptRole,
     text,
     ts: typeof ts === "number" ? ts : null,
     truncated: truncated === true,
   };
+  if (role === "tool") {
+    if (typeof label === "string" && label !== "") entry.label = label;
+    if (status === "pending" || status === "completed" || status === "error") entry.status = status;
+  }
+  if (role === "reasoning" && typeof streaming === "boolean") entry.streaming = streaming;
+  return entry;
 }
 
 function readSessionRow(raw: unknown): SessionRow | null {

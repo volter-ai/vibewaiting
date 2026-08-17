@@ -112,7 +112,13 @@ describe("projectEntry", () => {
       },
       500,
     );
-    expect(row).toMatchObject({ id: "t1", role: "tool", text: "Read: 42 lines" });
+    expect(row).toMatchObject({
+      id: "t1",
+      role: "tool",
+      label: "Read",
+      status: "completed",
+      text: "42 lines",
+    });
   });
 
   it("shows a pending tool call's arguments, since it has no result yet", () => {
@@ -130,7 +136,7 @@ describe("projectEntry", () => {
       },
       500,
     );
-    expect(row?.text).toBe("Bash …: npm test");
+    expect(row).toMatchObject({ label: "Bash", status: "pending", text: "npm test" });
   });
 
   it("marks a failed tool call", () => {
@@ -148,7 +154,7 @@ describe("projectEntry", () => {
       },
       500,
     );
-    expect(row?.text).toBe("Bash (error): exit 1");
+    expect(row).toMatchObject({ label: "Bash", status: "error", text: "exit 1" });
   });
 
   it("keeps an approval request's options visible", () => {
@@ -176,6 +182,7 @@ describe("projectEntry", () => {
     expect(projectEntry({ id: "x1", kind: "reasoning", text: "hmm", streaming: true }, 500)).toMatchObject({
       role: "reasoning",
       text: "hmm",
+      streaming: true,
     });
     expect(projectEntry({ id: "n1", kind: "notice", code: "reconnected", text: "" }, 500)).toMatchObject({
       role: "notice",
