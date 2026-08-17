@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { TranscriptEntry } from "../src/projection.js";
 import {
-  activeWorkContext,
   compactToolTarget,
   conversationBlocks,
   toolCategory,
@@ -46,20 +45,4 @@ describe("VGAI-compatible tool presentation", () => {
     expect(blocks[2]?.kind === "tool-group" && toolGroupSummary(blocks[2].tools)).toBe("Activity · 1 changed");
   });
 
-  it("finds the newest typed work-item context without parsing prose", () => {
-    const work = activeWorkContext([
-      entry({
-        id: "m1",
-        role: "user",
-        context: [{ kind: "work-item", label: "Older", detail: "one" }],
-      }),
-      entry({
-        id: "m2",
-        role: "assistant",
-        context: [{ kind: "work-item", label: "Markdown parity", detail: "two" }],
-      }),
-    ]);
-    expect(work?.label).toBe("Markdown parity");
-  });
 });
-

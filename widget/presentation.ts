@@ -1,4 +1,4 @@
-import type { TranscriptContext, TranscriptEntry } from "../src/projection.js";
+import type { TranscriptEntry } from "../src/projection.js";
 
 export type ToolCategory = "read" | "search" | "edit" | "command" | "test" | "web" | "agent" | "other";
 
@@ -92,14 +92,3 @@ export function conversationBlocks(entries: readonly TranscriptEntry[]): Convers
   }
   return blocks;
 }
-
-export function activeWorkContext(entries: readonly TranscriptEntry[]): TranscriptContext | null {
-  for (let index = entries.length - 1; index >= 0; index -= 1) {
-    const entry = entries[index];
-    if (!entry || (entry.role !== "user" && entry.role !== "assistant")) continue;
-    const work = [...(entry.context ?? [])].reverse().find((candidate) => candidate.kind === "work-item");
-    if (work) return work;
-  }
-  return null;
-}
-

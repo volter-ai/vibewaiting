@@ -52,6 +52,8 @@ export const DEFAULT_PUSH_DEBOUNCE_MS = 150;
 export const DEFAULT_REPUSH_INTERVAL_MS = 2000;
 /** How often the machine is re-scanned for coding sessions. Cheap: one RPC, capped result. */
 export const DEFAULT_DISCOVER_INTERVAL_MS = 5000;
+/** A broken harness attach must become a visible row error, never an eternal local spinner. */
+export const DEFAULT_ATTACH_TIMEOUT_MS = 45_000;
 /** Harnesses tried, in order, when the caller named none — first one that can actually start wins. */
 export const HARNESS_PREFERENCE: readonly string[] = ["claude-code", "codex", "opencode", "pi", "grok"];
 
@@ -121,6 +123,8 @@ export interface DaemonOptions {
    * `0` disables the Sessions panel's refresh entirely (tests). Default `DEFAULT_DISCOVER_INTERVAL_MS`.
    */
   discoverIntervalMs?: number | undefined;
+  /** Maximum total time to initialize and observe a foreign session. Default 45 seconds. */
+  attachTimeoutMs?: number | undefined;
   /** Home directory folded to `~` in the session list. Default: the process's own. */
   home?: string | undefined;
   /** Clock for relative ages. Default `Date.now` — injected so a test can pin "3m ago". */
@@ -384,6 +388,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // running against two sessions, and the loser must be closed rather than merely forgotten.
   let attachSeq = 0;
   let attachChain: Promise<void> = Promise.resolve();
+  const attachTimeoutMs = options.attachTimeoutMs ?? DEFAULT_ATTACH_TIMEOUT_MS;
 
   /**
    * Record why an attach did not happen, and PUSH it — the panel's stuck "opening…" row is settled
@@ -426,16 +431,23 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       return;
     }
     try {
-      await candidate.initialize();
-      // The controller mints its own workspace-scoped keys; ours is a hash of the locator, so the
-      // two are matched on the pair every representation carries.
-      const target = candidate
-        .getSnapshot()
-        .sessions.find(
-          (s) => s.harness === descriptor.locator.harness && s.sessionId === descriptor.locator.session_id,
-        );
-      if (!target) throw new Error(`that session is not visible in ${workspace}`);
-      await candidate.dispatch({ type: "observe", sessionKey: target.key });
+      const timeoutSeconds = Math.max(1, Math.ceil(attachTimeoutMs / 1000));
+      await withTimeout(
+        (async () => {
+          await candidate.initialize();
+          // The controller mints its own workspace-scoped keys; ours is a hash of the locator, so
+          // the two are matched on the pair every representation carries.
+          const target = candidate
+            .getSnapshot()
+            .sessions.find(
+              (s) => s.harness === descriptor.locator.harness && s.sessionId === descriptor.locator.session_id,
+            );
+          if (!target) throw new Error(`that session is not visible in ${workspace}`);
+          await candidate.dispatch({ type: "observe", sessionKey: target.key });
+        })(),
+        attachTimeoutMs,
+        `could not open this session within ${timeoutSeconds} ${timeoutSeconds === 1 ? "second" : "seconds"}`,
+      );
     } catch (e) {
       await candidate.close().catch(() => undefined);
       await failAttach(key, seq, message(e));
@@ -562,6 +574,19 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 /** One place that turns a thrown unknown into a line a human can read. */
 function message(e: unknown): string {
   return (e as Error)?.message ?? String(e);
+}
+
+async function withTimeout<T>(work: Promise<T>, timeoutMs: number, reason: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(reason)), timeoutMs);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([work, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function requireClient(options: DaemonOptions): HarnessClientAdapter {

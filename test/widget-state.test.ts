@@ -6,6 +6,7 @@ import {
   isSendKey,
   listRows,
   nearBottom,
+  openingMessage,
   pendingResolved,
   pillFor,
   readWidgetState,
@@ -293,6 +294,14 @@ describe("attachOutcome", () => {
 
   it("prefers the attach that landed over an error carrying the same key", () => {
     expect(attachOutcome("k2", attached, failed)).toBe("attached");
+  });
+});
+
+describe("openingMessage", () => {
+  it("keeps a slow transcript attach visibly progressing", () => {
+    expect(openingMessage(0)).toBe("Opening");
+    expect(openingMessage(5_000)).toBe("Loading transcript");
+    expect(openingMessage(20_000)).toBe("Still loading");
   });
 });
 
