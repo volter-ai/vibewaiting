@@ -77,7 +77,7 @@ async function rig(options: { client?: FakeHarnessClient; harness?: string } = {
     host,
     client,
     attached,
-    lastPush: () => host.pushes.at(-1) as WidgetState,
+    lastPush: () => daemon.lastPushed() as WidgetState,
   };
 }
 
@@ -580,6 +580,21 @@ describe("event-driven state delivery", () => {
     expect(host.pushes.length).toBe(before);
   });
 
+  it("delivers discovery churn as a small inventory patch without replaying the transcript", async () => {
+    const { daemon, host, client } = await sessionRig([OWN, ATLAS]);
+    for (let index = 0; index < 30; index += 1) client.runtime.assistantMessage(`${index}:${"x".repeat(1_000)}`);
+    await waitFor(() => (daemon.lastPushed()?.transcript.length ?? 0) > 0);
+    await daemon.flush();
+    const fullBytes = JSON.stringify(daemon.lastPushed()).length;
+
+    client.sessions = [OWN, { ...ATLAS, updated_at_ms: (ATLAS.updated_at_ms ?? 0) + 1 }];
+    await host.ticks.find((tick) => tick.ms === DEFAULT_DISCOVER_INTERVAL_MS)?.fn();
+    const patch = host.pushes.at(-1) as Record<string, unknown>;
+    expect(patch["sessions"]).toEqual(expect.any(Array));
+    expect(patch).not.toHaveProperty("transcript");
+    expect(JSON.stringify(patch).length).toBeLessThan(fullBytes / 5);
+  });
+
   it("repushIntervalMs: 0 / discoverIntervalMs: 0 disable their ticks", async () => {
     const client = new FakeHarnessClient();
     const host = new FakeWidgetHost();
@@ -649,7 +664,7 @@ async function sessionRig(
     ...(materializeArtifact ? { materializeArtifact } : {}),
   });
   running.push(daemon);
-  return { daemon, host, client, logs, attached: [], lastPush: () => host.pushes.at(-1) as WidgetState };
+  return { daemon, host, client, logs, attached: [], lastPush: () => daemon.lastPushed() as WidgetState };
 }
 
 describe("the Sessions list", () => {
@@ -1217,7 +1232,7 @@ async function failingAttachRig(
         : (new SupercodeController({ client, workspace, ownsClient: false }) as unknown as AgentController),
   });
   running.push(daemon);
-  return { daemon, host, client, logs, attached: [], lastPush: () => host.pushes.at(-1) as WidgetState };
+  return { daemon, host, client, logs, attached: [], lastPush: () => daemon.lastPushed() as WidgetState };
 }
 
 describe("an attach that fails", () => {

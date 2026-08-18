@@ -527,6 +527,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   let stopped = false;
   let lastPushed: WidgetState | null = null;
   let lastQueuedFingerprint: string | null = null;
+  let lastInventoryFingerprint: string | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let inFlight: Promise<void> = Promise.resolve();
   let startup: StartupPhase = "connecting";
@@ -667,7 +668,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     return [...attention.values()].filter((item) => visible.has(item.key));
   };
 
-  const pushNow = (force = false): Promise<void> => {
+  const pushNow = (force = false, scope: "full" | "inventory" = "full"): Promise<void> => {
     if (stopped) return Promise.resolve();
     const snapshot = activeController().getSnapshot();
     const ref = activeRef(snapshot);
@@ -733,17 +734,40 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       attention: observeAttention(snapshot, sessions, attached, observedAt),
     };
     lastPushed = state;
-    const fingerprint = JSON.stringify(state);
-    if (!force && fingerprint === lastQueuedFingerprint) return inFlight;
-    lastQueuedFingerprint = fingerprint;
+    const inventoryPatch: Partial<WidgetState> = {
+      pill: state.pill,
+      startup: state.startup,
+      sessions: state.sessions,
+      attached: state.attached,
+      owned: state.owned,
+      attachError: state.attachError,
+      attention: state.attention,
+      history: state.history,
+      error: state.error,
+      recoverable: state.recoverable,
+      canExport: state.canExport,
+      canReduce: state.canReduce,
+      exportBackTarget: state.exportBackTarget,
+      exportReceipt: state.exportReceipt,
+      savedDraft: state.savedDraft,
+    };
+    const stateFingerprint = JSON.stringify(state);
+    const inventoryFingerprint = JSON.stringify(inventoryPatch);
+    if (!force && (scope === "full" ? stateFingerprint === lastQueuedFingerprint : inventoryFingerprint === lastInventoryFingerprint)) {
+      return inFlight;
+    }
+    lastQueuedFingerprint = stateFingerprint;
+    lastInventoryFingerprint = inventoryFingerprint;
+    const delivery: WidgetState | Partial<WidgetState> = scope === "full" ? state : inventoryPatch;
     // Serialize pushes: two overlapping CDP evaluations could otherwise deliver out of order and
     // leave the panel showing an older transcript than the one already drawn.
     inFlight = inFlight
       .catch(() => undefined)
-      .then(() => host.push(state))
+      .then(() => host.push(delivery))
       .catch((e: unknown) => {
         // A failed delivery must remain retryable even if the projected state itself is unchanged.
-        if (lastQueuedFingerprint === fingerprint) lastQueuedFingerprint = null;
+        if (lastQueuedFingerprint === stateFingerprint) lastQueuedFingerprint = null;
+        if (lastInventoryFingerprint === inventoryFingerprint) lastInventoryFingerprint = null;
         log(`push failed (continuing): ${(e as Error)?.message ?? String(e)}`);
       });
     return inFlight;
@@ -774,7 +798,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       log(`session discovery failed (continuing): ${message(e)}`);
       return;
     }
-    await pushNow();
+    await pushNow(false, "inventory");
   };
 
   const discoverMs = options.discoverIntervalMs ?? DEFAULT_DISCOVER_INTERVAL_MS;
