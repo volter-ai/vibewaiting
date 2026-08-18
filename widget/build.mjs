@@ -3,7 +3,7 @@
 // `dist/widget.html` — the artifact `WidgetHost.attach({ html })` injects. Run directly
 // (`node widget/build.mjs`) or call `buildWidget()`; the CLI calls it when `dist/widget.html` is
 // missing, which is why `esbuild` is a real dependency here rather than a devDependency.
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { SHELL_CSS } from "lucarne/widget";
 import { buildSrcdoc } from "lucarne/widget/build";
@@ -13,9 +13,10 @@ import { PANEL_CSS } from "./styles.mjs";
 export const WIDGET_HTML_PATH = fileURLToPath(new URL("../dist/widget.html", import.meta.url));
 
 export async function buildWidget({ outFile = WIDGET_HTML_PATH, minify = true } = {}) {
+  const supercodeUiCss = await readFile(fileURLToPath(import.meta.resolve("@volter-ai-dev/supercode-ui/styles.css")), "utf8");
   const { html } = await buildSrcdoc({
     entryPoints: fileURLToPath(new URL("./entry.tsx", import.meta.url)),
-    css: SHELL_CSS + PANEL_CSS,
+    css: SHELL_CSS + supercodeUiCss + PANEL_CSS,
     title: "vibewaiting",
     jsxImportSource: "preact",
     minify,
