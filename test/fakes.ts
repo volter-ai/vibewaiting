@@ -198,6 +198,7 @@ export class FakeHarnessClient implements HarnessClientAdapter {
   readonly attachedWith: RuntimeAttachExistingParams[] = [];
   readonly attachedRuntimes: FakeRuntime[] = [];
   readonly branchedWith: Array<{ locator: SessionLocator; target_harness?: SessionFormat }> = [];
+  readonly reducedWith: Array<{ locator: SessionLocator; target_harness: SessionFormat }> = [];
   readonly exportedWith: Array<{ locator: SessionLocator; target_harness: SessionFormat }> = [];
   /** Persisted sessions on this fake box — what `discover` returns and `session()` can load/follow. */
   sessions: Array<SessionDescriptor & { text?: string; messages?: string[] }>;
@@ -284,6 +285,31 @@ export class FakeHarnessClient implements HarnessClientAdapter {
       parent: params.locator,
       session: source,
       bootstrap_prompt: "Continue this imported conversation without losing context.",
+    } as never;
+  }
+
+  async reduceSession(params: { locator: SessionLocator; target_harness: SessionFormat }): Promise<never> {
+    this.reducedWith.push(params);
+    const source = await this.session(params.locator).load();
+    return {
+      session: { ...source, session_id: "rescue-fake" },
+      bootstrap_prompt: "Continue from this verified reversible reduction.",
+      receipt: {
+        id: "rescue-fake",
+        sidecar_id: "rescue-fake",
+        source_harness: params.locator.harness,
+        target_harness: params.target_harness,
+        source_tokens: 100_000,
+        reduced_tokens: 10_000,
+        ratio: 10,
+        source_bytes: 400_000,
+        reduced_bytes: 40_000,
+        reductions: 12,
+        sidecar_path: "/tmp/rescue-fake.sidecar.jsonl",
+        reduction_log_path: "/tmp/rescue-fake.reduction.json",
+        verified: true,
+        reversible: true,
+      },
     } as never;
   }
 
