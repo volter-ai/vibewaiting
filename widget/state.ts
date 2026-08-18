@@ -59,6 +59,9 @@ export const EMPTY_STATE: WidgetState = {
 /** Conversation-first navigation: history and compose sit behind the active thread. */
 export type View = "list" | "chat" | "new";
 
+/** Visual state of the collapsed messenger control. */
+export type PillMode = "connecting" | "idle" | "unread" | "working" | "needs-input" | "error";
+
 export interface StartupMessage {
   title: string;
   detail: string;
@@ -534,6 +537,16 @@ export function pillFor(state: WidgetState): WidgetState["pill"] {
     return { tone: "warn", label: `${count} unread chat${count === 1 ? "" : "s"}` };
   }
   return { tone: "off", label: "Agent chats" };
+}
+
+/** Keep unread idle chats compact; expand only when the current agent has actionable live state. */
+export function pillModeFor(state: WidgetState): PillMode {
+  if (state.startup !== "ready") return "connecting";
+  if (state.needsInput) return "needs-input";
+  if (state.error) return "error";
+  if (state.busy) return "working";
+  if (state.attention.length > 0) return "unread";
+  return "idle";
 }
 
 /** Enter sends; Shift+Enter is a newline; an IME composition commit is never a send. */

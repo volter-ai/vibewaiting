@@ -14,6 +14,7 @@ import {
   orderedSessionRows,
   pendingResolved,
   pillFor,
+  pillModeFor,
   readWidgetState,
   roleLabel,
   sessionActivity,
@@ -395,6 +396,16 @@ describe("pillFor", () => {
     expect(pillFor({ ...base, attention: [{ key: "k", kind: "unseen" }] })).toEqual({ tone: "warn", label: "1 unread chat" });
     expect(pillFor({ ...base, busy: true, harness: "codex" })).toEqual({ tone: "live", label: "Codex is working" });
     expect(pillFor({ ...base, needsInput: true, harness: "codex" })).toEqual({ tone: "warn", label: "Codex needs input" });
+  });
+
+  it("keeps passive attention compact and expands actionable live states", () => {
+    expect(pillModeFor({ ...base, startup: "connecting" })).toBe("connecting");
+    expect(pillModeFor(base)).toBe("idle");
+    expect(pillModeFor({ ...base, attention: [{ key: "k", kind: "unseen" }] })).toBe("unread");
+    expect(pillModeFor({ ...base, busy: true })).toBe("working");
+    expect(pillModeFor({ ...base, needsInput: true, busy: true })).toBe("needs-input");
+    expect(pillModeFor({ ...base, error: "failed", needsInput: true, busy: true })).toBe("needs-input");
+    expect(pillModeFor({ ...base, error: "failed" })).toBe("error");
   });
 });
 
