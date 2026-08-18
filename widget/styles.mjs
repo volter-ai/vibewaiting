@@ -64,6 +64,11 @@ export const PANEL_CSS = `
   padding:7px 8px; text-align:left; color:var(--fg); font:inherit; cursor:pointer }
 .vw-srow:hover,.vw-srow.vw-active { background:var(--fill) }
 .vw-srow:focus-visible,.vw-back:focus-visible,.vw-copy:focus-visible { outline:2px solid var(--acc); outline-offset:-2px }
+.vw-load-more,.vw-load-earlier { align-self:center; min-height:30px; margin:7px auto; padding:5px 11px; border:1px solid var(--hair);
+  border-radius:8px; background:var(--fill); color:var(--mut); font:inherit; font-size:10.5px; cursor:pointer }
+.vw-load-more:hover,.vw-load-earlier:hover { color:var(--fg); border-color:var(--acc) }
+.vw-load-more:focus-visible,.vw-load-earlier:focus-visible { outline:2px solid var(--acc); outline-offset:2px }
+.vw-load-earlier { display:block }
 .vw-harness-logo { position:relative; display:inline-grid; place-items:center; width:var(--vw-logo-size); height:var(--vw-logo-size); flex:none;
   border:1px solid var(--bd); border-radius:50%; background:#111; color:#f7f7f5; font-size:calc(var(--vw-logo-size) * .36); font-weight:700; text-transform:uppercase }
 .vw-harness-logo svg { width:70%; height:70%; fill:currentColor }

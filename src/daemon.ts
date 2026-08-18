@@ -77,6 +77,8 @@ const PASSIVE_MIRROR_VIEW = Object.freeze({
   includeSubagents: false,
   displayHistory: true,
 });
+/** Each explicit history request adds one bounded page, never the entire transcript/session store. */
+export const TRANSCRIPT_PAGE_SIZE = DEFAULT_MAX_ENTRIES;
 
 /** The slice of `WidgetHost` this daemon uses — the seam a test replaces with a recorder. */
 export interface WidgetBridge {
@@ -204,6 +206,7 @@ export interface DaemonOptions {
     workspace: string;
     descriptor: SessionDescriptor;
     harnesses: readonly FrontendHarness[];
+    tailMessages: number;
   }) => AgentController) | undefined;
   projection?: ProjectionOptions | undefined;
   log?: ((message: string) => void) | undefined;
@@ -355,6 +358,14 @@ export function parseMountedIntent(payload: unknown): boolean {
   return (payload as { action?: unknown }).action === "mounted" && Object.keys(payload).length === 1;
 }
 
+export function parseLoadSessionsIntent(payload: unknown): boolean {
+  return Boolean(payload && typeof payload === "object" && (payload as { action?: unknown }).action === "loadSessions" && Object.keys(payload).length === 1);
+}
+
+export function parseLoadEarlierIntent(payload: unknown): boolean {
+  return Boolean(payload && typeof payload === "object" && (payload as { action?: unknown }).action === "loadEarlier" && Object.keys(payload).length === 1);
+}
+
 export interface NewChatIntent {
   harness: HarnessId;
   text: string;
@@ -486,6 +497,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const discovery: SessionDiscoveryClient | undefined = options.client;
   /** The last global scan, held whole — the row keys the panel echoes back resolve through it. */
   let descriptors: readonly SessionDescriptor[] = [];
+  let sessionLimit = MAX_SESSION_ROWS;
+  let hasMoreSessions = false;
+  const initialTranscriptLimit = options.projection?.maxEntries ?? DEFAULT_MAX_ENTRIES;
+  const transcriptLimits = new Map<string, number>();
   /** A page action can fail before the controller publishes a structured error. Keep it visible. */
   let actionError: string | null = null;
 
@@ -590,23 +605,40 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const persisted = descriptors.find((descriptor) => matchesActive(descriptor, ref));
       const persistedKey = persisted ? sessionKey(persisted.locator) : null;
       if (current && persistedKey && persistedKey !== activeForeignKey) {
+        const priorLimit = transcriptLimits.get(activeForeignKey);
         foreignControllers.delete(activeForeignKey);
         foreignControllers.set(persistedKey, current);
+        if (priorLimit !== undefined) {
+          transcriptLimits.delete(activeForeignKey);
+          transcriptLimits.set(persistedKey, priorLimit);
+        }
         activeForeignKey = persistedKey;
       }
     }
+    const transcriptWindowKey = activeForeignKey ?? "@owned";
+    const transcriptLimit = transcriptLimits.get(transcriptWindowKey) ?? initialTranscriptLimit;
     const observedAt = now();
-    const sessions = projectSessions(descriptors, { now: observedAt, home, active: ref, max: MAX_SESSION_ROWS });
+    const sessions = projectSessions(descriptors, { now: observedAt, home, active: ref, max: sessionLimit });
     const ownSnapshot = controller.getSnapshot();
     const ownRef = activeRef(ownSnapshot);
-    const ownRows = projectSessions(descriptors, { now: observedAt, home, active: ownRef, max: MAX_SESSION_ROWS });
-    const projected = project(snapshot, options.projection ?? {});
+    const ownRows = projectSessions(descriptors, { now: observedAt, home, active: ownRef, max: sessionLimit });
+    const projected = project(snapshot, { ...options.projection, maxEntries: transcriptLimit });
     const startupLabel = startup === "connecting"
       ? "Connecting to coding agents…"
       : startup === "starting"
         ? `Starting ${startupHarness || "coding agent"}…`
         : "Loading recent sessions…";
     const attached = attachmentFor(ref, sessions, snapshot.workspace, home);
+    const activeDescriptor = ref?.sessionId
+      ? descriptors.find((descriptor) => matchesActive(descriptor, ref))
+      : undefined;
+    const loadedMessages = snapshot.activeSession?.messages.length
+      ?? snapshot.conversation.filter((entry) => entry.kind === "message").length;
+    const hasEarlier = snapshot.conversation.length > transcriptLimit || (
+      activeDescriptor?.message_count !== null &&
+      activeDescriptor?.message_count !== undefined &&
+      activeDescriptor.message_count > loadedMessages
+    );
     const state: WidgetState = {
       ...projected,
       pill: startup === "ready" ? projected.pill : { tone: "off", label: startupLabel },
@@ -617,6 +649,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       attachError,
       error: actionError ?? projected.error,
       recoverable: actionError !== null || projected.recoverable,
+      history: { sessionLimit, hasMoreSessions, transcriptLimit, hasEarlier },
       attention: observeAttention(snapshot, sessions, attached, observedAt),
     };
     lastPushed = state;
@@ -654,8 +687,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const refreshSessions = async (): Promise<void> => {
     if (stopped || !discovery) return;
     try {
-      const result = await discovery.discover({ limit: MAX_SESSION_ROWS });
-      descriptors = result.sessions;
+      const result = await discovery.discover({ limit: sessionLimit + 1 });
+      hasMoreSessions = result.sessions.length > sessionLimit;
+      descriptors = result.sessions.slice(0, sessionLimit);
     } catch (e) {
       log(`session discovery failed (continuing): ${message(e)}`);
       return;
@@ -669,7 +703,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   const createController =
     options.createController ??
-    ((opts: { workspace: string; descriptor: SessionDescriptor; harnesses: readonly FrontendHarness[] }): AgentController =>
+    ((opts: { workspace: string; descriptor: SessionDescriptor; harnesses: readonly FrontendHarness[]; tailMessages: number }): AgentController =>
       // `ownsClient: false`: this daemon's ONE transport outlives every mirror that borrows it.
       // Seed the locator and already-known harness inventory so initialization does not rediscover
       // an entire workspace merely to mint the controller's local session key.
@@ -678,7 +712,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         workspace: opts.workspace,
         ownsClient: false,
         autoObserve: false,
-        mirrorView: PASSIVE_MIRROR_VIEW,
+        mirrorView: { ...PASSIVE_MIRROR_VIEW, tailMessages: opts.tailMessages },
       }));
 
   /**
@@ -755,6 +789,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         workspace,
         descriptor,
         harnesses: controller.getSnapshot().harnesses,
+        tailMessages: transcriptLimits.get(key) ?? initialTranscriptLimit,
       });
     } catch (e) {
       await failAttach(key, seq, message(e), `attach unavailable: ${message(e)}`);
@@ -808,6 +843,66 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const stopIntentPump = bindIntentQueue(host, INTENT_QUEUE, async (intent) => {
     if (parseMountedIntent(intent.payload)) {
       await pushNow(true);
+      return;
+    }
+    if (parseLoadSessionsIntent(intent.payload)) {
+      sessionLimit += MAX_SESSION_ROWS;
+      await refreshSessions();
+      return;
+    }
+    if (parseLoadEarlierIntent(intent.payload)) {
+      actionError = null;
+      const key = activeForeignKey ?? "@owned";
+      const nextLimit = (transcriptLimits.get(key) ?? initialTranscriptLimit) + TRANSCRIPT_PAGE_SIZE;
+      transcriptLimits.set(key, nextLimit);
+      const slot = activeForeign();
+      const snapshot = slot?.controller.getSnapshot();
+      if (slot && snapshot?.connection.mode === "mirror" && activeForeignKey !== null) {
+        const foreignKey = activeForeignKey;
+        const descriptor = descriptors.find((candidate) => sessionKey(candidate.locator) === foreignKey);
+        let replacement: AgentController | null = null;
+        const seq = (attachSeq += 1);
+        try {
+          if (!descriptor) throw new Error("this conversation is no longer available to load earlier messages");
+          replacement = createController({
+            workspace: descriptor.cwd ?? options.workspace,
+            descriptor,
+            harnesses: controller.getSnapshot().harnesses,
+            tailMessages: nextLimit,
+          });
+          await withTimeout(
+            (async () => {
+              await replacement!.initialize();
+              const target = replacement!.getSnapshot().sessions.find(
+                (session) => session.harness === descriptor.locator.harness && session.sessionId === descriptor.locator.session_id,
+              );
+              if (!target) throw new Error("that session is no longer visible in its workspace");
+              await replacement!.dispatch({ type: "observe", sessionKey: target.key });
+            })(),
+            attachTimeoutMs,
+            "loading earlier messages timed out",
+          );
+          if (stopped || seq !== attachSeq) {
+            await replacement.close().catch(() => undefined);
+            return;
+          }
+          const previous = foreignControllers.get(foreignKey);
+          foreignControllers.set(foreignKey, {
+            controller: replacement,
+            unsubscribe: replacement.subscribe(schedulePush),
+          });
+          activeForeignKey = foreignKey;
+          previous?.unsubscribe();
+          await previous?.controller.close().catch((e: unknown) => log(`older-window replacement close failed: ${message(e)}`));
+          log(`expanded ${descriptor.locator.harness} transcript window to ${nextLimit} entries`);
+        } catch (e) {
+          await replacement?.close().catch(() => undefined);
+          transcriptLimits.set(key, nextLimit - TRANSCRIPT_PAGE_SIZE);
+          actionError = message(e);
+          log(`load earlier failed: ${actionError}`);
+        }
+      }
+      await pushNow();
       return;
     }
     const acknowledged = parseAcknowledgeIntent(intent.payload);

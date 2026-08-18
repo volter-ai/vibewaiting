@@ -56,6 +56,7 @@ export const EMPTY_STATE: WidgetState = {
   error: null,
   recoverable: false,
   harnesses: [],
+  history: { sessionLimit: 0, hasMoreSessions: false, transcriptLimit: 120, hasEarlier: false },
   attention: [],
   sessions: [],
   attached: null,
@@ -357,6 +358,14 @@ export function readWidgetState(raw: unknown): WidgetState {
     harnesses: Array.isArray(raw["harnesses"])
       ? raw["harnesses"].map(readHarness).filter((h): h is WidgetHarness => h !== null)
       : [],
+    history: isRecord(raw["history"])
+      ? {
+          sessionLimit: typeof raw["history"]["sessionLimit"] === "number" ? Math.max(0, raw["history"]["sessionLimit"] as number) : 0,
+          hasMoreSessions: raw["history"]["hasMoreSessions"] === true,
+          transcriptLimit: typeof raw["history"]["transcriptLimit"] === "number" ? Math.max(1, raw["history"]["transcriptLimit"] as number) : 120,
+          hasEarlier: raw["history"]["hasEarlier"] === true,
+        }
+      : EMPTY_STATE.history,
     attention: Array.isArray(raw["attention"])
       ? raw["attention"].map(readAttention).filter((a): a is SessionAttention => a !== null)
       : [],

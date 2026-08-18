@@ -412,6 +412,11 @@ function SessionList({
             onOpen={(): void => onOpen(row)}
           />
         ))}
+        {!loading && state.history.hasMoreSessions ? (
+          <button class="vw-load-more" type="button" onClick={(): void => { widget.sendIntent(INTENT_QUEUE, { action: "loadSessions" }); }}>
+            {query.trim() ? "Search 30 older chats" : "Load 30 older chats"}
+          </button>
+        ) : null}
       </div>
     </div>
   );
@@ -454,6 +459,7 @@ function Chat({ state, onBack, onNew, onClose }: { state: WidgetState; onBack: (
   const textarea = useRef<HTMLTextAreaElement | null>(null);
   const stick = useRef(memory.stick);
   const pinnedUntil = useRef(0);
+  const earlierAnchor = useRef<{ height: number; top: number; entries: number } | null>(null);
   const [atBottom, setAtBottom] = useState(memory.stick);
   const restoredScroll = useRef(false);
   const focusedComposer = useRef(false);
@@ -517,6 +523,13 @@ function Chat({ state, onBack, onNew, onClose }: { state: WidgetState; onBack: (
   useLayoutEffect(() => {
     const el = scroller.current;
     if (!el) return;
+    const anchor = earlierAnchor.current;
+    if (anchor && (state.transcript.length > anchor.entries || !state.history.hasEarlier)) {
+      el.scrollTop = anchor.top + (el.scrollHeight - anchor.height);
+      memory.scrollTop = el.scrollTop;
+      earlierAnchor.current = null;
+      return;
+    }
     if (!restoredScroll.current) {
       el.scrollTop = memory.scrollTop ?? el.scrollHeight;
       pinnedUntil.current = performance.now() + 120;
@@ -681,6 +694,28 @@ function Chat({ state, onBack, onNew, onClose }: { state: WidgetState; onBack: (
       ) : null}
       <div class="vw-scroll" ref={scroller} onScroll={onScroll} tabIndex={0} aria-label="Conversation">
         <div ref={content}>
+          {state.history.hasEarlier ? (
+            <button
+              class="vw-load-earlier"
+              type="button"
+              disabled={state.operation !== null}
+              onClick={(): void => {
+                const element = scroller.current;
+                if (element) {
+                  earlierAnchor.current = {
+                    height: element.scrollHeight,
+                    top: element.scrollTop,
+                    entries: state.transcript.length,
+                  };
+                  stick.current = false;
+                  memory.stick = false;
+                }
+                widget.sendIntent(INTENT_QUEUE, { action: "loadEarlier" });
+              }}
+            >
+              Load earlier messages
+            </button>
+          ) : null}
           {empty && state.startup !== "ready" ? <StartupStatus state={state} /> : null}
           {empty && state.startup === "ready" ? (
             <div class="vw-empty">{state.error ?? (state.harness ? `${harnessDisplayName(state.harness)} is listening. Say something.` : "No transcript yet.")}</div>

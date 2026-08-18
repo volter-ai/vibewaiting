@@ -397,6 +397,7 @@ describe("project", () => {
       error: null,
       recoverable: false,
       harnesses: [],
+      history: { sessionLimit: 0, hasMoreSessions: false, transcriptLimit: 120, hasEarlier: false },
       attention: [],
       // Machine-wide facts the snapshot cannot know: the daemon merges them over this result.
       sessions: [],

@@ -15,6 +15,8 @@ import {
   parseInterruptIntent,
   parseJoinIntent,
   parseDetachIntent,
+  parseLoadEarlierIntent,
+  parseLoadSessionsIntent,
   parseMountedIntent,
   parseNewChatIntent,
   parseRefreshIntent,
@@ -132,6 +134,15 @@ describe("continuation control intents", () => {
     expect(parseBranchIntent({ action: "branch", targetHarness: " codex " })).toEqual({ targetHarness: "codex" });
     expect(parseBranchIntent({ action: "branch", targetHarness: "" })).toBeNull();
     expect(parseBranchIntent({ action: "branch", key: "untrusted" })).toBeNull();
+  });
+});
+
+describe("history intents", () => {
+  it("accepts only target-free bounded window requests", () => {
+    expect(parseLoadSessionsIntent({ action: "loadSessions" })).toBe(true);
+    expect(parseLoadSessionsIntent({ action: "loadSessions", limit: 10000 })).toBe(false);
+    expect(parseLoadEarlierIntent({ action: "loadEarlier" })).toBe(true);
+    expect(parseLoadEarlierIntent({ action: "loadEarlier", path: "/tmp/private" })).toBe(false);
   });
 });
 
@@ -338,6 +349,7 @@ describe("startDaemon", () => {
       "error",
       "harness",
       "harnesses",
+      "history",
       "messaging",
       "mode",
       "needsInput",
@@ -583,7 +595,8 @@ describe("the Sessions list", () => {
   it("shows every session on the machine, not just this workspace's", async () => {
     const { client, lastPush } = await sessionRig();
     // The scan that fills the panel carries NO workspace — that is what makes it global.
-    expect(client.discoverQueries.some((q) => q.workspace === undefined && q.limit === 30)).toBe(true);
+    // One sentinel descriptor tells the UI whether another bounded page exists.
+    expect(client.discoverQueries.some((q) => q.workspace === undefined && q.limit === 31)).toBe(true);
     expect(lastPush().sessions.map((s) => s.name)).toEqual(["atlas", "bridge", "project"]);
     expect(lastPush().sessions.map((s) => s.harness)).toEqual(["claude-code", "codex", "claude-code"]);
   });
@@ -603,6 +616,27 @@ describe("the Sessions list", () => {
     const discoveryTick = host.ticks.find((t) => t.ms === DEFAULT_DISCOVER_INTERVAL_MS);
     await discoveryTick?.fn();
     expect(lastPush().sessions.map((s) => s.name)).toEqual(["atlas", "project"]);
+  });
+
+  it("loads older session rows in explicit 30-chat pages", async () => {
+    const sessions = Array.from({ length: 65 }, (_, index) => descriptor({
+      sessionId: `history-${index}`,
+      cwd: `/home/dev/history/project-${index}`,
+      title: `History ${index}`,
+      updatedAtMs: 2_000_000 - index,
+    }));
+    const { host, client, lastPush } = await sessionRig(sessions);
+    expect(lastPush().sessions).toHaveLength(30);
+    expect(lastPush().history).toMatchObject({ sessionLimit: 30, hasMoreSessions: true });
+
+    await host.fireIntent(INTENT_QUEUE, { action: "loadSessions" });
+    expect(lastPush().sessions).toHaveLength(60);
+    expect(lastPush().history).toMatchObject({ sessionLimit: 60, hasMoreSessions: true });
+    expect(client.discoverQueries.at(-1)).toEqual({ limit: 61 });
+
+    await host.fireIntent(INTENT_QUEUE, { action: "loadSessions" });
+    expect(lastPush().sessions).toHaveLength(65);
+    expect(lastPush().history).toMatchObject({ sessionLimit: 90, hasMoreSessions: false });
   });
 
   it("keeps the last list when a scan fails", async () => {
@@ -684,6 +718,37 @@ describe("attaching", () => {
     // The global inbox already supplied ATLAS's exact locator. Opening it must not rescan every
     // transcript in that workspace just so the mirror controller can rediscover the same locator.
     expect(client.discoverQueries.some((query) => query.workspace === ATLAS.cwd)).toBe(false);
+  });
+
+  it("expands a passive transcript in bounded windows while preserving one follower", async () => {
+    const messages = Array.from({ length: 260 }, (_, index) => `message-${index}`);
+    const long = descriptor({
+      sessionId: "long-session",
+      cwd: "/home/dev/volter/long",
+      title: "Long conversation",
+      messages,
+      messageCount: messages.length,
+      updatedAtMs: 2_000_000,
+    });
+    const { daemon, client, host, lastPush } = await sessionRig([OWN, long]);
+    await host.fireIntent(INTENT_QUEUE, { action: "attach", key: sessionKey(long.locator) });
+    expect(lastPush().transcript).toHaveLength(120);
+    expect(lastPush().transcript[0]?.text).toBe("message-140");
+    expect(lastPush().history).toMatchObject({ transcriptLimit: 120, hasEarlier: true });
+
+    await host.fireIntent(INTENT_QUEUE, { action: "loadEarlier" });
+    await daemon.flush();
+    expect(lastPush().transcript).toHaveLength(240);
+    expect(lastPush().transcript[0]?.text).toBe("message-20");
+    expect(lastPush().history).toMatchObject({ transcriptLimit: 240, hasEarlier: true });
+    expect(client.activeFollows).toBe(1);
+
+    await host.fireIntent(INTENT_QUEUE, { action: "loadEarlier" });
+    await daemon.flush();
+    expect(lastPush().transcript).toHaveLength(260);
+    expect(lastPush().transcript[0]?.text).toBe("message-0");
+    expect(lastPush().history).toMatchObject({ transcriptLimit: 360, hasEarlier: false });
+    expect(client.activeFollows).toBe(1);
   });
 
   it("returns to the daemon's own session, which can still send", async () => {

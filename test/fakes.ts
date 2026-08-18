@@ -142,6 +142,7 @@ export function descriptor(over: {
   updatedAtMs?: number | null;
   messageCount?: number | null;
   text?: string;
+  messages?: string[];
   liveEndpoint?: string | null;
   liveStatus?: "busy" | "idle" | null;
 } = {}): SessionDescriptor & { text: string } {
@@ -156,11 +157,12 @@ export function descriptor(over: {
     cwd: over.cwd === undefined ? "/home/dev/projects/atlas" : over.cwd,
     title: over.title === undefined ? "Atlas refactor" : over.title,
     updated_at_ms: over.updatedAtMs === undefined ? 1_000_000 : over.updatedAtMs,
-    message_count: over.messageCount === undefined ? 12 : over.messageCount,
+    message_count: over.messageCount === undefined ? over.messages?.length ?? 12 : over.messageCount,
     model: over.model === undefined ? "claude-opus-5" : over.model,
     ...(over.liveEndpoint !== undefined ? { live_endpoint: over.liveEndpoint } : {}),
     ...(over.liveStatus !== undefined ? { live_status: over.liveStatus } : {}),
     text: over.text ?? "hello from another window",
+    ...(over.messages ? { messages: [...over.messages] } : {}),
   };
 }
 
@@ -170,7 +172,7 @@ export interface FakeHarnessClientOptions {
   /** Make `startManagedRuntime` reject, to exercise the daemon's "could not start" path. */
   failStart?: string;
   /** What global discovery finds on this fake box. */
-  sessions?: Array<SessionDescriptor & { text?: string }>;
+  sessions?: Array<SessionDescriptor & { text?: string; messages?: string[] }>;
 }
 
 /** The `HarnessClientAdapter` surface, with everything this milestone does not use refusing loudly. */
@@ -185,7 +187,7 @@ export class FakeHarnessClient implements HarnessClientAdapter {
   readonly attachedRuntimes: FakeRuntime[] = [];
   readonly branchedWith: Array<{ locator: SessionLocator; target_harness?: SessionFormat }> = [];
   /** Persisted sessions on this fake box — what `discover` returns and `session()` can load/follow. */
-  sessions: Array<SessionDescriptor & { text?: string }>;
+  sessions: Array<SessionDescriptor & { text?: string; messages?: string[] }>;
   /** Every discovery query seen, so a test can prove the GLOBAL scan carries no workspace. */
   readonly discoverQueries: Array<{ workspace?: string; limit?: number }> = [];
   /** Followers currently streaming. The leak check: this must settle back to one attachment's worth. */
@@ -304,9 +306,9 @@ export class FakeHarnessClient implements HarnessClientAdapter {
  */
 class FakeManagedSession {
   readonly #client: FakeHarnessClient;
-  readonly #record: SessionDescriptor & { text?: string };
+  readonly #record: SessionDescriptor & { text?: string; messages?: string[] };
 
-  constructor(client: FakeHarnessClient, record: SessionDescriptor & { text?: string }) {
+  constructor(client: FakeHarnessClient, record: SessionDescriptor & { text?: string; messages?: string[] }) {
     this.#client = client;
     this.#record = record;
   }
@@ -315,14 +317,14 @@ class FakeManagedSession {
     return this.#record.locator;
   }
 
-  async load(): Promise<NormalizedSession> {
-    return this.#session();
+  async load(options: { tailMessages?: number } = {}): Promise<NormalizedSession> {
+    return this.#session(options.tailMessages);
   }
 
-  async *follow(options: { signal?: AbortSignal } = {}): AsyncGenerator<SessionWatchEvent> {
+  async *follow(options: { signal?: AbortSignal; tailMessages?: number } = {}): AsyncGenerator<SessionWatchEvent> {
     this.#client.activeFollows += 1;
     try {
-      yield { type: "session_snapshot", sequence: 1, reason: "initial", session: this.#session() };
+      yield { type: "session_snapshot", sequence: 1, reason: "initial", session: this.#session(options.tailMessages) };
       const { signal } = options;
       await new Promise<void>((resolve) => {
         if (!signal || signal.aborted) {
@@ -336,7 +338,9 @@ class FakeManagedSession {
     }
   }
 
-  #session(): NormalizedSession {
+  #session(tailMessages?: number): NormalizedSession {
+    const allMessages = this.#record.messages ?? [this.#record.text ?? "…"];
+    const visibleMessages = typeof tailMessages === "number" ? allMessages.slice(-tailMessages) : allMessages;
     return {
       source: "claude_code",
       session_id: this.#record.locator.session_id,
@@ -346,7 +350,7 @@ class FakeManagedSession {
       agent_id: null,
       parent_tool_use_id: null,
       lineage: {},
-      messages: [{ role: "assistant", content: this.#record.text ?? "…", metadata: {} }],
+      messages: visibleMessages.map((content) => ({ role: "assistant", content, metadata: {} })),
       subagents: [],
       raw_record_count: 1,
       parse_error_lines: 0,

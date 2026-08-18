@@ -183,6 +183,13 @@ export interface WidgetState {
   recoverable: boolean;
   /** Harnesses available for a lazy-created new chat. */
   harnesses: WidgetHarness[];
+  /** Explicit bounded windows: the UI can request more without pretending the current tail is all. */
+  history: {
+    sessionLimit: number;
+    hasMoreSessions: boolean;
+    transcriptLimit: number;
+    hasEarlier: boolean;
+  };
   /** Durable attention is owned by the daemon, not inferred from a red inventory badge in the page. */
   attention: SessionAttention[];
   /**
@@ -470,6 +477,12 @@ export function project(snapshot: SupercodeClientSnapshot, options: ProjectionOp
       installed: harness.installed,
       reason: harness.reason,
     })),
+    history: {
+      sessionLimit: 0,
+      hasMoreSessions: false,
+      transcriptLimit: options.maxEntries ?? DEFAULT_MAX_ENTRIES,
+      hasEarlier: false,
+    },
     attention: [],
     sessions: [],
     attached: null,
