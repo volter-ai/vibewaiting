@@ -25,7 +25,7 @@ export const PANEL_CSS = `
 }
 
 /* Lucarne owns the collapsed control; Supercode supplies its canonical harness identity. */
-.pill { position:relative; width:50px; height:50px; justify-content:center; margin:4px; padding:0; border:0;
+.pill { position:relative; box-sizing:border-box; width:56px; height:56px; justify-content:center; margin:4px; padding:0; border:0;
   border-radius:50%; background:transparent; overflow:visible; animation:none }
 .pill[hidden] { display:none }
 .pill:hover { border-color:transparent; background:var(--fill) }
@@ -36,12 +36,12 @@ export const PANEL_CSS = `
 .pill .lead { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap }
 .pill .triad { position:absolute; inset:0; margin:0; padding:0; pointer-events:none }
 .pill .triad .oi.dot { display:none }
-.pill .triad .oi.badge { position:absolute; top:6px; right:6px; min-width:17px; height:17px; padding:0 4px;
+.pill .triad .oi.badge { position:absolute; top:1px; right:1px; box-sizing:border-box; min-width:18px; height:18px; padding:0 4px;
   border:1.5px solid var(--bg); border-radius:9px; background:var(--block); box-shadow:0 1px 4px rgba(0,0,0,.28) }
 .pill:is([data-mode="connecting"],[data-mode="working"]) .brand::after { content:""; position:absolute; inset:-4px;
   border:2px solid color-mix(in srgb,var(--acc) 28%,transparent); border-top-color:var(--acc); border-radius:50%; animation:vw-spin .8s linear infinite }
-.pill:is([data-mode="needs-input"],[data-mode="error"]) .triad .oi.dot { position:absolute; right:6px; bottom:6px;
-  display:grid; place-items:center; width:17px; height:17px; border:1.5px solid var(--bg); border-radius:50%; box-shadow:0 1px 4px rgba(0,0,0,.28); animation:none }
+.pill:is([data-mode="needs-input"],[data-mode="error"]) .triad .oi.dot { position:absolute; right:1px; bottom:1px;
+  display:grid; place-items:center; box-sizing:border-box; width:18px; height:18px; border:1.5px solid var(--bg); border-radius:50%; box-shadow:0 1px 4px rgba(0,0,0,.28); animation:none }
 .pill[data-mode="needs-input"] .triad .oi.dot { border-color:var(--bg); background:var(--ask); color:var(--bg) }
 .pill[data-mode="needs-input"] .triad .oi.dot::before { content:"!"; font-size:11px; font-weight:800; line-height:1 }
 .pill[data-mode="error"] .triad .oi.dot { border-color:var(--bg); background:var(--block); color:#fff }

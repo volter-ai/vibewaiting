@@ -221,6 +221,16 @@ export class FakeHarnessClient implements HarnessClientAdapter {
     return { harnesses: this.harnesses };
   }
 
+  async capabilities(): Promise<{ methods: string[] }> {
+    return {
+      methods: [
+        "harness.v1.sessions.branch",
+        "harness.v1.sessions.reduce",
+        "harness.v1.sessions.export",
+      ],
+    };
+  }
+
   /** Global when `workspace` is absent (the Sessions panel), workspace-scoped when a controller asks. */
   async discover(query: { workspace?: string; limit?: number } = {}): Promise<{
     sessions: DiscoverableSessionDescriptor[];
