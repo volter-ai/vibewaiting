@@ -17,6 +17,7 @@ import { createWidget } from "lucarne/widget/runtime";
 import { mountPanel } from "lucarne/widget/preact";
 import MarkdownIt from "markdown-it";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
+import { render as renderPreact } from "preact";
 import type { JSX } from "preact";
 import {
   ATTACH_ERROR_LINGER_MS,
@@ -30,6 +31,7 @@ import {
   operationLabel,
   pendingResolved,
   pillFor,
+  pillModeFor,
   readWidgetState,
   roleLabel,
   activityLabel,
@@ -41,6 +43,7 @@ import {
   openingMessage,
   startupMessage,
   type SessionRow,
+  type PillMode,
   type TranscriptEntry,
   type View,
   type WidgetState,
@@ -922,6 +925,9 @@ function MessengerPanel({ state }: { state: unknown }): JSX.Element {
 // The last tone the host reported — the shell asks for it whenever it redraws the pill's dot.
 let lastTone: WidgetState["pill"]["tone"] = "off";
 let unreadCount = 0;
+let collapsedMode: PillMode = "connecting";
+let collapsedHarness = "";
+let collapsedHarnessLabel = "Agent";
 widget.registerPanel({
   id: "agent",
   title: "Chats",
@@ -930,6 +936,33 @@ widget.registerPanel({
   indicator: () => lastTone,
   badge: () => unreadCount,
 });
+
+/**
+ * Lucarne owns the pill DOM, but this app owns its identity. Decorate each shell redraw with the
+ * same canonical harness mark used throughout the messenger and expose its semantic layout mode
+ * to CSS. Observing only the wrap's direct children avoids reacting to our own logo render.
+ */
+function syncCollapsedChrome(): void {
+  const pill = document.querySelector<HTMLButtonElement>(".pill");
+  if (!pill) return;
+  pill.dataset.mode = collapsedMode;
+  const brand = pill.querySelector<HTMLElement>(".brand");
+  if (brand) {
+    renderPreact(
+      <HarnessLogo id={collapsedHarness} label={collapsedHarnessLabel} size={30} />,
+      brand,
+    );
+  }
+}
+
+const shellWrap = document.querySelector(".wrap");
+if (shellWrap) {
+  new MutationObserver(syncCollapsedChrome).observe(shellWrap, { childList: true });
+}
+syncCollapsedChrome();
+// Lucarne's observer is armed on first panel open. Size the initial collapsed render immediately,
+// otherwise its 220px boot placeholder can survive forever on a never-opened widget.
+widget.requestResize();
 
 /**
  * Preact panel content is unmounted while Lucarne draws the collapsed pill. Keep the queue alive at
@@ -958,7 +991,16 @@ widget.onPatch((patch) => {
   const pill = pillFor(state);
   lastTone = pill.tone;
   unreadCount = state.attention.length + (state.needsInput ? 1 : 0);
+  collapsedMode = pillModeFor(state);
+  collapsedHarness = state.attached?.harness
+    ?? state.harness
+    ?? state.sessions.find((session) => session.active)?.harness
+    ?? "";
+  collapsedHarnessLabel = collapsedHarness ? harnessDisplayName(collapsedHarness) : "Agent";
   widget.setPill({ tone: pill.tone, label: pill.label });
+  syncCollapsedChrome();
+  // setPill replaces the shell node while minimized; explicitly relay every resulting width.
+  widget.requestResize();
 });
 
 function isRecord(v: unknown): v is Record<string, unknown> {

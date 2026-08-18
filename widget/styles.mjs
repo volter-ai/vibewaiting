@@ -2,17 +2,43 @@
 // this keeps VGAI's information architecture without inheriting VGAI's editor backdrop/theme.
 export const PANEL_CSS = `
 /* One app, one messenger: remove Lucarne's redundant single-tab toolbar and let the app header
-   carry navigation/close semantics. The resting surface is the conventional circular launcher. */
+   carry navigation/close semantics. The collapsed surface uses Lucarne's 80px safe host minimum
+   as an intentional compact capsule instead of leaving a small button stranded in empty glass. */
+.wrap { width:max-content }
 .panel { width:var(--vw-panel-width,420px) }
 .panel > header { display:none }
 .pill,.panel { animation-duration:.18s }
-.pill { position:relative; width:46px; height:46px; justify-content:center; padding:0; border-color:var(--bd2) }
-.pill .brand::before { content:"✦"; font-size:18px; color:var(--acc) }
+.pill { position:relative; width:80px; height:48px; justify-content:center; gap:8px; padding:0; border:0;
+  background:transparent; transition:background-color .14s,width .18s ease; overflow:hidden }
+.pill:hover { border-color:transparent; background:var(--fill) }
+.pill:focus-visible { outline:2px solid var(--acc); outline-offset:-3px }
+.pill .brand { display:grid; place-items:center }
+.pill .brand .vw-harness-logo { box-shadow:0 1px 4px rgba(0,0,0,.22); transition:transform .16s ease }
+.pill:hover .brand .vw-harness-logo { transform:scale(1.05) }
 .pill .lead { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap }
 .pill .triad { position:absolute; inset:0; margin:0; padding:0; pointer-events:none }
-.pill .triad .oi.dot { position:absolute; right:0; bottom:0; width:9px; height:9px; border:2px solid var(--bg) }
-.pill .triad .oi.badge { position:absolute; top:-3px; right:-3px; min-width:18px; height:18px; border-radius:9px; background:var(--block); box-shadow:0 1px 4px rgba(0,0,0,.28) }
-.pill.live { box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 18%,transparent) }
+.pill .triad .oi.dot { display:none }
+.pill .triad .oi.badge { position:absolute; top:4px; right:7px; min-width:17px; height:17px; padding:0 4px;
+  border:1.5px solid var(--bg); border-radius:9px; background:var(--block); box-shadow:0 1px 4px rgba(0,0,0,.28) }
+
+/* Work, connection, and blocked states become a concise status capsule. Passive unread activity
+   remains compact and uses only the familiar badge, like a minimized messenger launcher. */
+.pill:is([data-mode="connecting"],[data-mode="working"],[data-mode="needs-input"],[data-mode="error"]) {
+  width:auto; min-width:80px; max-width:250px; justify-content:flex-start; padding:7px 11px 7px 8px }
+.pill:is([data-mode="connecting"],[data-mode="working"],[data-mode="needs-input"],[data-mode="error"]) .lead {
+  position:static; width:auto; height:auto; min-width:0; max-width:174px; overflow:hidden; clip-path:none;
+  color:var(--fg); font-size:11.5px; font-weight:600; text-overflow:ellipsis }
+.pill:is([data-mode="connecting"],[data-mode="working"],[data-mode="needs-input"],[data-mode="error"]) .triad {
+  position:static; inset:auto; display:inline-flex; margin-left:auto; padding-left:1px }
+.pill:is([data-mode="connecting"],[data-mode="working"],[data-mode="needs-input"],[data-mode="error"]) .triad .oi.dot {
+  display:block; width:13px; height:13px; border-width:2px; background:transparent; box-shadow:none; animation:none }
+.pill[data-mode="connecting"] .triad .oi.dot,
+.pill[data-mode="working"] .triad .oi.dot { border-color:color-mix(in srgb,var(--acc) 28%,transparent); border-top-color:var(--acc); animation:vw-spin .8s linear infinite }
+.pill[data-mode="needs-input"] .triad .oi.dot { display:grid; place-items:center; border:0; color:var(--ask) }
+.pill[data-mode="needs-input"] .triad .oi.dot::before { content:"!"; font-size:13px; font-weight:800; line-height:1 }
+.pill[data-mode="error"] .triad .oi.dot { display:grid; place-items:center; border:0; color:var(--block) }
+.pill[data-mode="error"] .triad .oi.dot::before { content:"×"; font-size:17px; font-weight:700; line-height:1 }
+.pill:is([data-mode="connecting"],[data-mode="working"],[data-mode="needs-input"],[data-mode="error"]) .triad .oi.badge { display:none }
 .vw-screen,.vw-chat { display:flex; flex-direction:column; height:var(--vw-panel-height,480px); min-height:280px }
 .vw-chat { position:relative }
 
