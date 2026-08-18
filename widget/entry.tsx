@@ -20,6 +20,8 @@ import type { JSX } from "preact";
 import {
   ATTACH_ERROR_LINGER_MS,
   attachOutcome,
+  filterSessionRows,
+  harnessDisplayName,
   isSendKey,
   listRows,
   nearBottom,
@@ -27,6 +29,8 @@ import {
   pillFor,
   readWidgetState,
   roleLabel,
+  sessionDetail,
+  sessionDisplayName,
   openingMessage,
   startupMessage,
   type SessionRow,
@@ -102,10 +106,9 @@ function ToolRow({ entry, workspace }: { entry: TranscriptEntry; workspace: stri
 }
 
 function ToolGroup({ tools, workspace }: { tools: TranscriptEntry[]; workspace: string }): JSX.Element {
-  const important = tools.some((tool) => {
-    const category = toolCategory(tool);
-    return tool.status === "pending" || category === "edit" || category === "test";
-  });
+  // Historical edits/tests are useful on demand, but opening every old activity group turns a
+  // conversation into a build log. Only the work happening NOW expands itself.
+  const important = tools.some((tool) => tool.status === "pending");
   const [expanded, setExpanded] = useState(important);
   useEffect(() => {
     if (important) setExpanded(true);
@@ -193,15 +196,6 @@ function TranscriptRow({ entry, pending, canRespond }: { entry: TranscriptEntry;
   return <MessageRow entry={entry} pending={pending} />;
 }
 
-/** The secondary line: what the session IS, in the order the harness actually knows it. */
-function subtitle(row: SessionRow): string {
-  const parts: string[] = [];
-  if (row.title !== "" && row.title !== row.name) parts.push(row.title);
-  if (row.messages !== null) parts.push(`${row.messages} msg${row.messages === 1 ? "" : "s"}`);
-  if (parts.length === 0) parts.push(row.cwd);
-  return parts.join(" · ");
-}
-
 function SessionListRow({
   row,
   openingLabel,
@@ -229,7 +223,7 @@ function SessionListRow({
       <span class={`vw-dot${row.live ? " vw-live" : ""}`} title={row.live ? "active now" : "idle"} />
       <span class="vw-scol">
         <span class="vw-sline">
-          <span class="vw-sname">{row.name || row.title}</span>
+          <span class="vw-sname">{sessionDisplayName(row)}</span>
           {row.active ? (
             <span class="vw-follow" title="the panel is following this session">
               › following
@@ -245,8 +239,8 @@ function SessionListRow({
           </span>
         ) : (
           <span class="vw-ssub">
-            <span class="vw-sharness">{row.harness}</span>
-            {subtitle(row) !== "" ? <span class="vw-sdetail">{subtitle(row)}</span> : null}
+            <span class="vw-sharness">{harnessDisplayName(row.harness)}</span>
+            {sessionDetail(row) !== "" ? <span class="vw-sdetail">{sessionDetail(row)}</span> : null}
           </span>
         )}
       </span>
@@ -277,6 +271,8 @@ function SessionList({
   awaiting,
   now,
   failure,
+  query,
+  onQuery,
   onOpen,
 }: {
   state: WidgetState;
@@ -284,14 +280,32 @@ function SessionList({
   now: number;
   /** The attach that failed, still worth showing under its row. */
   failure: { key: string; message: string } | null;
+  query: string;
+  onQuery: (query: string) => void;
   onOpen: (row: SessionRow) => void;
 }): JSX.Element {
-  const rows = listRows(state);
+  const allRows = listRows(state);
+  const rows = filterSessionRows(allRows, query);
   const loading = state.startup !== "ready";
   return (
     <div class="vw-list">
       {loading ? <StartupStatus state={state} compact={rows.length > 0} /> : null}
-      {!loading && rows.length === 0 ? <div class="vw-empty">{state.error ?? "No coding sessions found."}</div> : null}
+      {!loading && allRows.length > 4 ? (
+        <label class="vw-search">
+          <span aria-hidden="true">⌕</span>
+          <input
+            type="search"
+            aria-label="Search chats"
+            placeholder="Search chats"
+            value={query}
+            onInput={(event): void => onQuery(event.currentTarget.value)}
+          />
+          <small role="status" aria-label={`${rows.length} chats`}>{rows.length}</small>
+        </label>
+      ) : null}
+      {!loading && rows.length === 0 ? (
+        <div class="vw-empty">{query.trim() ? "No chats match your search." : state.error ?? "No coding chats found."}</div>
+      ) : null}
       {rows.map((row) => (
         <SessionListRow
           key={row.key}
@@ -305,25 +319,73 @@ function SessionList({
   );
 }
 
+interface RememberedChat {
+  draft: string;
+  pending: string | null;
+  queued: string[];
+  scrollTop: number | null;
+  stick: boolean;
+}
+
+const rememberedChats = new Map<string, RememberedChat>();
+const rememberedUi: { view: View; query: string } = { view: "list", query: "" };
+let mountedChatKey: string | null = null;
+
+function chatMemoryKey(state: WidgetState): string {
+  return state.attached?.key || `${state.harness}:${state.workspace}`;
+}
+
+function chatMemory(state: WidgetState): RememberedChat {
+  const key = chatMemoryKey(state);
+  let memory = rememberedChats.get(key);
+  if (!memory) {
+    memory = { draft: "", pending: null, queued: [], scrollTop: null, stick: true };
+    rememberedChats.set(key, memory);
+  }
+  return memory;
+}
+
 function Chat({ state, onBack }: { state: WidgetState; onBack: () => void }): JSX.Element {
-  const [draft, setDraft] = useState("");
-  const [pending, setPending] = useState<string | null>(null);
-  const [queued, setQueued] = useState<string[]>([]);
+  const memory = chatMemory(state);
+  const memoryKey = chatMemoryKey(state);
+  const [draft, setDraft] = useState(memory.draft);
+  const [pending, setPending] = useState<string | null>(memory.pending);
+  const [queued, setQueued] = useState<string[]>(memory.queued);
   const scroller = useRef<HTMLDivElement | null>(null);
   const textarea = useRef<HTMLTextAreaElement | null>(null);
-  const stick = useRef(true);
+  const stick = useRef(memory.stick);
+  const restoredScroll = useRef(false);
+  const focusedComposer = useRef(false);
+
+  useEffect(() => {
+    memory.draft = draft;
+    memory.pending = pending;
+    memory.queued = queued;
+  }, [draft, memory, pending, queued]);
+
+  useEffect(() => {
+    mountedChatKey = memoryKey;
+    return () => {
+      if (mountedChatKey === memoryKey) mountedChatKey = null;
+    };
+  }, [memoryKey]);
 
   // The pending echo clears as soon as the real transcript carries the prompt.
   useEffect(() => {
-    if (pending !== null && pendingResolved(pending, state.transcript)) setPending(null);
+    if (pending !== null && pendingResolved(pending, state.transcript)) {
+      memory.pending = null;
+      setPending(null);
+    }
   });
 
   useEffect(() => {
     if (state.busy || !state.canSend || pending !== null || queued.length === 0) return;
     const [next, ...rest] = queued;
     if (!next) return;
+    memory.queued = rest;
     setQueued(rest);
     widget.sendIntent(INTENT_QUEUE, { action: "send", text: next });
+    memory.pending = next;
     setPending(next);
     stick.current = true;
   }, [state.busy, state.canSend, pending, queued]);
@@ -331,7 +393,13 @@ function Chat({ state, onBack }: { state: WidgetState; onBack: () => void }): JS
   // Auto-scroll AFTER layout, and only when the reader hadn't scrolled up to read something.
   useLayoutEffect(() => {
     const el = scroller.current;
-    if (el && stick.current) el.scrollTop = el.scrollHeight;
+    if (!el) return;
+    if (!restoredScroll.current) {
+      el.scrollTop = memory.scrollTop ?? el.scrollHeight;
+      restoredScroll.current = true;
+      return;
+    }
+    if (stick.current) el.scrollTop = el.scrollHeight;
   });
 
   useLayoutEffect(() => {
@@ -341,24 +409,40 @@ function Chat({ state, onBack }: { state: WidgetState; onBack: () => void }): JS
     el.style.height = `${Math.min(el.scrollHeight, 150)}px`;
   }, [draft]);
 
+  useEffect(() => {
+    if (focusedComposer.current || !state.canSend || state.startup !== "ready") return;
+    textarea.current?.focus();
+    focusedComposer.current = true;
+  }, [state.canSend, state.startup]);
+
   const onScroll = (): void => {
     const el = scroller.current;
-    if (el) stick.current = nearBottom(el);
+    if (el) {
+      stick.current = nearBottom(el);
+      memory.stick = stick.current;
+      memory.scrollTop = el.scrollTop;
+    }
   };
 
   const send = (): void => {
     const text = draft.trim();
     if (text === "") return;
     if (state.busy) {
-      setQueued((messages) => [...messages, text]);
+      setQueued((messages) => {
+        const next = [...messages, text];
+        memory.queued = next;
+        return next;
+      });
       setDraft("");
       return;
     }
     if (!state.canSend) return;
     widget.sendIntent(INTENT_QUEUE, { action: "send", text });
+    memory.pending = text;
     setPending(text);
     setDraft("");
     stick.current = true;
+    memory.stick = true;
   };
 
   const interrupt = (): void => {
@@ -381,17 +465,17 @@ function Chat({ state, onBack }: { state: WidgetState; onBack: () => void }): JS
   return (
     <div class="vw-chat">
       <div class="vw-head">
-        <button class="vw-back" type="button" onClick={onBack} title="All sessions">
+        <button class="vw-back" type="button" onClick={onBack} title="All chats" aria-label="Back to chats">
           ‹
         </button>
-        <span class="vw-hname">{attached?.name ?? state.harness ?? ""}</span>
-        <span class="vw-hsub">{attached?.harness ?? ""}</span>
+        <span class="vw-hname">{attached ? sessionDisplayName(attached) : harnessDisplayName(state.harness)}</span>
+        <span class="vw-hsub">{harnessDisplayName(attached?.harness ?? state.harness)}</span>
         {readOnly ? <span class="vw-ro">read-only</span> : null}
       </div>
-      <div class="vw-scroll" ref={scroller} onScroll={onScroll}>
+      <div class="vw-scroll" ref={scroller} onScroll={onScroll} tabIndex={0} aria-label="Conversation">
         {empty && state.startup !== "ready" ? <StartupStatus state={state} /> : null}
         {empty && state.startup === "ready" ? (
-          <div class="vw-empty">{state.error ?? (state.harness ? `${state.harness} is listening. Say something.` : "No transcript yet.")}</div>
+          <div class="vw-empty">{state.error ?? (state.harness ? `${harnessDisplayName(state.harness)} is listening. Say something.` : "No transcript yet.")}</div>
         ) : null}
         {blocks.map((block) =>
           block.kind === "tool-group"
@@ -406,21 +490,30 @@ function Chat({ state, onBack }: { state: WidgetState; onBack: () => void }): JS
             canRespond={false}
           />
         ) : null}
-        {state.busy ? <div class="vw-working" role="status"><span class="vw-spinner" />Working…</div> : null}
+        {state.busy ? (
+          <div class="vw-typing" role="status" aria-label={`${harnessDisplayName(state.harness)} is working`}>
+            <span class="vw-typing-mark" aria-hidden="true">✦</span>
+            <span class="vw-typing-dots" aria-hidden="true"><i /><i /><i /></span>
+            <span>{harnessDisplayName(state.harness)} is working</span>
+          </div>
+        ) : null}
       </div>
       {state.error !== null && !empty ? <div class="vw-error">{state.error}</div> : null}
       <div class="vw-composer">
         {queued.length ? (
           <div class="vw-queue" role="status">
             <strong>{queued.length} queued</strong>
-            {queued.map((message, index) => <div key={`${index}:${message}`}><span>{message}</span><button type="button" aria-label={`Remove queued message ${index + 1}`} onClick={(): void => setQueued((items) => items.filter((_, itemIndex) => itemIndex !== index))}>×</button></div>)}
+            {queued.map((message, index) => <div key={`${index}:${message}`}><span>{message}</span><button type="button" aria-label={`Remove queued message ${index + 1}`} onClick={(): void => setQueued((items) => {
+              const next = items.filter((_, itemIndex) => itemIndex !== index);
+              memory.queued = next;
+              return next;
+            })}>×</button></div>)}
           </div>
         ) : null}
         {readOnly ? (
-          <div class="vw-mirror-card">
-            <strong>Live mirror</strong>
-            <span>Someone else is controlling this session. You can follow its transcript here without interrupting it.</span>
-            <button type="button" onClick={onBack}>Choose another session</button>
+          <div class="vw-readonly" aria-label="Read-only chat">
+            <span aria-hidden="true">◉</span>
+            <span><strong>Read-only</strong> · controlled in another agent window</span>
           </div>
         ) : (
           <div class="vw-envelope">
@@ -428,15 +521,19 @@ function Chat({ state, onBack }: { state: WidgetState; onBack: () => void }): JS
               ref={textarea}
               class="vw-input"
               rows={2}
-              aria-label={`Message ${attached?.harness ?? state.harness ?? "agent"}`}
+              aria-label={`Message ${harnessDisplayName(attached?.harness ?? state.harness ?? "agent")}`}
               placeholder={state.startup !== "ready" ? "Connecting…" : state.busy ? "Queue a follow-up…" : "Ask your agent…"}
               value={draft}
               disabled={state.mode !== "control" && !state.canSend}
-              onInput={(e): void => setDraft((e.currentTarget as HTMLTextAreaElement).value)}
+              onInput={(e): void => {
+                const value = (e.currentTarget as HTMLTextAreaElement).value;
+                memory.draft = value;
+                setDraft(value);
+              }}
               onKeyDown={onKeyDown}
             />
             <div class="vw-composer-foot">
-              <span class="vw-agent-id">{attached?.harness ?? state.harness}</span>
+              <span class="vw-agent-id">{harnessDisplayName(attached?.harness ?? state.harness)}</span>
               <span class="vw-actions">
                 {state.busy ? <button class="vw-stop" type="button" aria-label="Stop agent" onClick={interrupt} disabled={!state.canInterrupt}>■</button> : null}
                 <button class="vw-send" type="button" aria-label={state.busy ? "Queue message" : "Send message"} onClick={send} disabled={draft.trim() === "" || (!state.busy && !state.canSend)}>
@@ -453,13 +550,27 @@ function Chat({ state, onBack }: { state: WidgetState; onBack: () => void }): JS
 
 function MessengerPanel({ state }: { state: unknown }): JSX.Element {
   const s = readWidgetState(state);
-  const [view, setView] = useState<View>("list");
+  const [view, setView] = useState<View>(() => rememberedUi.view === "chat" && s.attached !== null ? "chat" : "list");
+  const [query, setQuery] = useState(rememberedUi.query);
   const [awaiting, setAwaiting] = useState<{ key: string; startedAt: number } | null>(null);
   const [openingNow, setOpeningNow] = useState(() => Date.now());
   // The failure is copied into local state on arrival so the row can stop showing it without the
   // host having to retract anything — the host's `attachError` is a fact about the last attach and
   // stays true until the next one.
   const [failure, setFailure] = useState<{ key: string; message: string } | null>(null);
+
+  useEffect(() => {
+    rememberedUi.view = view;
+    rememberedUi.query = query;
+  }, [query, view]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") widget.close();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   // The awaited attach settled — either into that session's chat, or into a reason under its row.
   useEffect(() => {
@@ -490,6 +601,10 @@ function MessengerPanel({ state }: { state: unknown }): JSX.Element {
 
   const open = (row: SessionRow): void => {
     setFailure(null);
+    if (s.attached?.key === row.key) {
+      setView("chat");
+      return;
+    }
     // The keyless row is the daemon-owned runtime before its first persisted turn. While we are
     // already on it there is nothing to ask; from a mirror, releasing that mirror restores it.
     if (row.key === "") {
@@ -515,29 +630,58 @@ function MessengerPanel({ state }: { state: unknown }): JSX.Element {
       />
     );
   }
-  return <SessionList state={s} awaiting={awaiting} now={openingNow} failure={failure} onOpen={open} />;
+  return (
+    <SessionList
+      state={s}
+      awaiting={awaiting}
+      now={openingNow}
+      failure={failure}
+      query={query}
+      onQuery={setQuery}
+      onOpen={open}
+    />
+  );
 }
 
 // The last tone the host reported — the shell asks for it whenever it redraws the pill's dot.
 let lastTone: WidgetState["pill"]["tone"] = "off";
-let sessionCount = 0;
-
 widget.registerPanel({
   id: "agent",
-  title: "Sessions",
+  title: "Chats",
   render: mountPanel(MessengerPanel),
   default: true,
   indicator: () => lastTone,
-  badge: () => sessionCount,
+  // A total-session count looks exactly like an unread badge. We do not have unread semantics yet,
+  // so showing no badge is more honest and calmer than a permanent red-herring count.
+  badge: () => 0,
 });
+
+/**
+ * Preact panel content is unmounted while Lucarne draws the collapsed pill. Keep the queue alive at
+ * module scope so a follow-up advances when the agent becomes idle even if the messenger is still
+ * minimized (the mounted Chat component owns the same transition while it is visible).
+ */
+function advanceMinimizedQueue(state: WidgetState): void {
+  const key = chatMemoryKey(state);
+  if (mountedChatKey === key) return;
+  const memory = rememberedChats.get(key);
+  if (!memory) return;
+  if (memory.pending !== null && pendingResolved(memory.pending, state.transcript)) memory.pending = null;
+  if (state.busy || !state.canSend || memory.pending !== null) return;
+  const next = memory.queued.shift();
+  if (!next) return;
+  memory.pending = next;
+  memory.stick = true;
+  widget.sendIntent(INTENT_QUEUE, { action: "send", text: next });
+}
 
 // The pill is shell chrome, not panel content — it is the one thing visible while the panel is closed.
 widget.onPatch((patch) => {
   if (!isRecord(patch) || !("pill" in patch)) return;
   const state = readWidgetState(patch);
+  advanceMinimizedQueue(state);
   const pill = pillFor(state);
   lastTone = pill.tone;
-  sessionCount = state.sessions.length;
   widget.setPill({ tone: pill.tone, label: pill.label });
 });
 

@@ -34,6 +34,7 @@ import {
   type WidgetState,
 } from "./projection.js";
 import { homedir } from "node:os";
+import { performance } from "node:perf_hooks";
 import {
   MAX_SESSION_ROWS,
   attachmentFor,
@@ -49,6 +50,8 @@ export const WIDGET_NS = "vibewaiting";
 export const INTENT_QUEUE = "agent";
 /** Controller revisions arrive in bursts (one per streamed delta); coalesce them into one push. */
 export const DEFAULT_PUSH_DEBOUNCE_MS = 150;
+/** Messenger interactions should reach the daemon in the same perceptual beat as the click. */
+export const DEFAULT_INTENT_POLL_MS = 100;
 /** Steady re-push so a shell mounted on a NEWLY NAVIGATED page populates without an agent event. */
 export const DEFAULT_REPUSH_INTERVAL_MS = 2000;
 /** How often the machine is re-scanned for coding sessions. Cheap: one RPC, capped result. */
@@ -69,6 +72,13 @@ const PASSIVE_MIRROR_VIEW = Object.freeze({
 export interface WidgetBridge {
   push(patch: unknown): Promise<void>;
   onIntent(name: string, cb: (intent: { id: string | number; payload: unknown }) => void | Promise<void>): void;
+  /**
+   * Lucarne's context-aware queue primitive. Newer hosts expose this so a latency-sensitive app
+   * can choose its own drain cadence instead of waiting for the conservative shared 1.2s pump.
+   */
+  drainIntentsWithContext?(name: string): Promise<Array<{
+    items: Array<{ id: string | number; payload: unknown }>;
+  }>>;
   /** Crash-safe repeating tick (`WidgetHost.every`) — returns a stop function. */
   every(ms: number, fn: () => unknown): () => void;
   remove(): Promise<void>;
@@ -118,6 +128,8 @@ export interface DaemonOptions {
   /** Replace the widget mount (tests). Default: `WidgetHost.attach`. */
   attachHost?: (opts: { sessionId: string; ns: string; html: string; engine?: DaemonOptions["engine"] }) => Promise<WidgetBridge>;
   pushDebounceMs?: number | undefined;
+  /** Intent queue cadence. Default 100ms; `0` uses Lucarne's stock shared drain pump. */
+  intentPollMs?: number | undefined;
   /**
    * Re-push heartbeat. A shell mounted AFTER the last revision-driven push (the user navigated to a
    * new page while the agent was idle) starts EMPTY and would stay empty until the next agent event
@@ -144,6 +156,49 @@ export interface DaemonOptions {
   createController?: ((opts: { workspace: string }) => AgentController) | undefined;
   projection?: ProjectionOptions | undefined;
   log?: ((message: string) => void) | undefined;
+}
+
+/**
+ * Bind one intent queue at messenger latency when the host exposes its safe context-aware drain.
+ * The queue is still read-and-cleared by Lucarne; this layer only chooses a faster cadence and
+ * preserves the stock host's dedupe-before-handle contract. Older/test hosts fall back unchanged.
+ */
+export function bindIntentQueue(
+  host: WidgetBridge,
+  name: string,
+  handler: (intent: { id: string | number; payload: unknown }) => void | Promise<void>,
+  pollMs = DEFAULT_INTENT_POLL_MS,
+): () => void {
+  if (pollMs <= 0 || host.drainIntentsWithContext === undefined) {
+    host.onIntent(name, handler);
+    return (): void => undefined;
+  }
+
+  const seen = new Set<string | number>();
+  const seenOrder: Array<string | number> = [];
+  let draining = false;
+  return host.every(pollMs, async () => {
+    if (draining) return;
+    draining = true;
+    try {
+      const pages = await host.drainIntentsWithContext!(name);
+      for (const page of pages) {
+        for (const intent of page.items) {
+          if (seen.has(intent.id)) continue;
+          seen.add(intent.id);
+          seenOrder.push(intent.id);
+          // Bound the page-lifetime dedupe cache without making a recent intent replayable.
+          if (seenOrder.length > 2_000) {
+            const oldest = seenOrder.shift();
+            if (oldest !== undefined) seen.delete(oldest);
+          }
+          await handler(intent);
+        }
+      }
+    } finally {
+      draining = false;
+    }
+  });
 }
 
 export interface Daemon {
@@ -443,6 +498,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       return;
     }
     const workspace = descriptor.cwd ?? options.workspace;
+    const attachStartedAt = performance.now();
+    let initializedAt = attachStartedAt;
     let candidate: AgentController;
     try {
       candidate = createController({ workspace });
@@ -455,6 +512,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       await withTimeout(
         (async () => {
           await candidate.initialize();
+          initializedAt = performance.now();
           // The controller mints its own workspace-scoped keys; ours is a hash of the locator, so
           // the two are matched on the pair every representation carries.
           const target = candidate
@@ -479,7 +537,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     }
     mirror = candidate;
     unsubscribeMirror = candidate.subscribe(schedulePush);
-    log(`following ${descriptor.locator.harness} in ${workspace} (read-only mirror)`);
+    const attachedAt = performance.now();
+    log(
+      `following ${descriptor.locator.harness} in ${workspace} (read-only mirror; ` +
+      `${Math.round(attachedAt - attachStartedAt)}ms total = ${Math.round(initializedAt - attachStartedAt)}ms discovery + ` +
+      `${Math.round(attachedAt - initializedAt)}ms transcript)`,
+    );
     await pushNow();
   };
 
@@ -489,7 +552,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     return attachChain;
   };
 
-  host.onIntent(INTENT_QUEUE, async (intent) => {
+  const stopIntentPump = bindIntentQueue(host, INTENT_QUEUE, async (intent) => {
     const text = parseSendIntent(intent.payload);
     if (text !== null) {
       try {
@@ -533,7 +596,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       return;
     }
     log(`ignoring unrecognized intent payload: ${JSON.stringify(intent.payload)}`);
-  });
+  }, options.intentPollMs ?? DEFAULT_INTENT_POLL_MS);
 
   // Push before the first potentially slow RPC. Without this, the iframe mounts but receives no
   // state until initialization, harness startup, and discovery have all finished — indistinguishable
@@ -579,6 +642,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       timer = null;
       stopRepush();
       stopDiscovery();
+      stopIntentPump();
       unsubscribe();
       await attachChain.catch(() => undefined);
       await releaseMirror();
