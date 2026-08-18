@@ -30,6 +30,8 @@ import {
   toAttachError,
   type AttachError,
   type ProjectionOptions,
+  type SessionAttention,
+  type SessionAttentionKind,
   type StartupPhase,
   type WidgetState,
 } from "./projection.js";
@@ -42,6 +44,7 @@ import {
   projectSessions,
   sessionKey,
   type ActiveSessionRef,
+  type SessionRow,
 } from "./sessions.js";
 
 /** Namespaces every page global / element id / sticky-injection id the widget mints (see `lucarne/widget/ns`). */
@@ -56,6 +59,8 @@ export const DEFAULT_INTENT_POLL_MS = 100;
 export const DEFAULT_REPUSH_INTERVAL_MS = 2000;
 /** How often the machine is re-scanned for coding sessions. Cheap: one RPC, capped result. */
 export const DEFAULT_DISCOVER_INTERVAL_MS = 5000;
+/** Tool-stream churn is not unread. A no-status peer must be quiet this long before it asks for attention. */
+export const DEFAULT_ATTENTION_SETTLE_MS = 15_000;
 /** A broken harness attach must become a visible row error, never an eternal local spinner. */
 export const DEFAULT_ATTACH_TIMEOUT_MS = 45_000;
 /** Harnesses tried, in order, when the caller named none — first one that can actually start wins. */
@@ -259,6 +264,34 @@ export function parseReleaseIntent(payload: unknown): boolean {
   return (payload as { action?: unknown }).action === "release";
 }
 
+export interface NewChatIntent {
+  harness: HarnessId;
+  text: string;
+}
+
+/** A new chat is lazy: the runtime is replaced only when the first message is actually sent. */
+export function parseNewChatIntent(payload: unknown): NewChatIntent | null {
+  if (!payload || typeof payload !== "object") return null;
+  const { action, harness, text } = payload as { action?: unknown; harness?: unknown; text?: unknown };
+  if (action !== "new" || typeof harness !== "string" || typeof text !== "string") return null;
+  const trimmedHarness = harness.trim();
+  const trimmedText = text.trim();
+  if (trimmedHarness === "" || trimmedText === "") return null;
+  return { harness: trimmedHarness as HarnessId, text: trimmedText };
+}
+
+/** Reading a chat is explicit acknowledgement; inventory counts are never treated as unread. */
+export function parseAcknowledgeIntent(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object") return null;
+  const { action, key } = payload as { action?: unknown; key?: unknown };
+  if (action !== "ack" || typeof key !== "string") return null;
+  return key.trim() || null;
+}
+
+export function parseRefreshIntent(payload: unknown): boolean {
+  return Boolean(payload && typeof payload === "object" && (payload as { action?: unknown }).action === "refresh");
+}
+
 export interface RespondIntent {
   requestId: JsonValue;
   optionId: string | null;
@@ -322,6 +355,7 @@ async function defaultAttachHost(opts: {
  */
 export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const log = options.log ?? ((): void => undefined);
+  const daemonStartedAt = performance.now();
   const debounceMs = options.pushDebounceMs ?? DEFAULT_PUSH_DEBOUNCE_MS;
   const attach = options.attachHost ?? defaultAttachHost;
 
@@ -338,12 +372,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       ...(options.policy ? { policy: options.policy } : {}),
     });
 
+  const hostAttachStartedAt = performance.now();
   const host = await attach({
     sessionId: options.sessionId,
     ns: WIDGET_NS,
     html: options.html,
     ...(options.engine ? { engine: options.engine } : {}),
   });
+  log(`widget host attached in ${Math.round(performance.now() - hostAttachStartedAt)}ms`);
 
   let stopped = false;
   let lastPushed: WidgetState | null = null;
@@ -358,6 +394,18 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const discovery: SessionDiscoveryClient | undefined = options.client;
   /** The last global scan, held whole — the row keys the panel echoes back resolve through it. */
   let descriptors: readonly SessionDescriptor[] = [];
+  /** A page action can fail before the controller publishes a structured error. Keep it visible. */
+  let actionError: string | null = null;
+
+  // Messenger attention belongs to the daemon so it remains consistent across every injected page.
+  // The first inventory establishes a baseline; only later transcript changes become unread.
+  const observedUpdates = new Map<
+    string,
+    Pick<SessionRow, "messages" | "runtimeStatus"> & { announcedMessages: number | null }
+  >();
+  const attention = new Map<string, SessionAttentionKind>();
+  let priorRuntimeActive = false;
+  let priorRuntimeKey: string | null = null;
 
   /**
    * Why the last attach did not happen. A logged-only failure is invisible to the person who tapped
@@ -371,28 +419,90 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   let unsubscribeMirror: (() => void) | null = null;
   const activeController = (): AgentController => mirror ?? controller;
 
+  const observeAttention = (
+    snapshot: SupercodeClientSnapshot,
+    sessions: ReturnType<typeof projectSessions>,
+    attached: ReturnType<typeof attachmentFor>,
+    observedAt: number,
+  ): SessionAttention[] => {
+    for (const row of sessions) {
+      const prior = observedUpdates.get(row.key);
+      let announcedMessages = prior?.announcedMessages ?? row.messages;
+      if (prior === undefined) {
+        observedUpdates.set(row.key, { messages: row.messages, runtimeStatus: row.runtimeStatus, announcedMessages });
+        continue;
+      }
+      if (row.key === attached?.key) {
+        announcedMessages = row.messages;
+        observedUpdates.set(row.key, { messages: row.messages, runtimeStatus: row.runtimeStatus, announcedMessages });
+        continue;
+      }
+      // A live peer can refresh its descriptor timestamp on every heartbeat. That is recency, not
+      // unread conversation. Harnesses with process state announce completion explicitly. For
+      // others, hold message growth until the transcript has gone quiet: tool-stream churn should
+      // never make the launcher's badge climb every five seconds.
+      if (prior.runtimeStatus === "busy" && row.runtimeStatus === "idle") {
+        attention.set(row.key, "finished");
+        announcedMessages = row.messages;
+      } else if (
+        row.runtimeStatus !== "busy" &&
+        row.messages !== null &&
+        announcedMessages !== null &&
+        row.messages > announcedMessages &&
+        row.updatedAt !== null &&
+        observedAt - row.updatedAt >= DEFAULT_ATTENTION_SETTLE_MS
+      ) {
+        attention.set(row.key, "unseen");
+        announcedMessages = row.messages;
+      } else if (row.messages !== null && prior.messages !== null && row.messages < prior.messages) {
+        // A rewritten/compacted session establishes a new baseline; it is not negative unread.
+        announcedMessages = row.messages;
+      }
+      observedUpdates.set(row.key, { messages: row.messages, runtimeStatus: row.runtimeStatus, announcedMessages });
+    }
+
+    const runtimeActive =
+      snapshot.turn.state !== "idle" || snapshot.requests.some((request) => request.status === "pending");
+    const runtimeKey = attached?.key || priorRuntimeKey;
+    if (priorRuntimeActive && !runtimeActive && priorRuntimeKey) {
+      attention.set(priorRuntimeKey, snapshot.error ? "failed" : "finished");
+    }
+    priorRuntimeActive = runtimeActive;
+    priorRuntimeKey = runtimeActive ? runtimeKey : null;
+
+    const visible = new Set(sessions.map((row) => row.key));
+    return [...attention]
+      .filter(([key]) => visible.has(key))
+      .map(([key, kind]) => ({ key, kind }));
+  };
+
   const pushNow = (): Promise<void> => {
     if (stopped) return Promise.resolve();
     const snapshot = activeController().getSnapshot();
     const ref = activeRef(snapshot);
-    const sessions = projectSessions(descriptors, { now: now(), home, active: ref, max: MAX_SESSION_ROWS });
+    const observedAt = now();
+    const sessions = projectSessions(descriptors, { now: observedAt, home, active: ref, max: MAX_SESSION_ROWS });
     const ownSnapshot = controller.getSnapshot();
     const ownRef = activeRef(ownSnapshot);
-    const ownRows = projectSessions(descriptors, { now: now(), home, active: ownRef, max: MAX_SESSION_ROWS });
+    const ownRows = projectSessions(descriptors, { now: observedAt, home, active: ownRef, max: MAX_SESSION_ROWS });
     const projected = project(snapshot, options.projection ?? {});
     const startupLabel = startup === "connecting"
       ? "Connecting to coding agents…"
       : startup === "starting"
         ? `Starting ${startupHarness || "coding agent"}…`
         : "Loading recent sessions…";
+    const attached = attachmentFor(ref, sessions, snapshot.workspace, home);
     const state: WidgetState = {
       ...projected,
       pill: startup === "ready" ? projected.pill : { tone: "off", label: startupLabel },
       startup,
       sessions,
-      attached: attachmentFor(ref, sessions, snapshot.workspace, home),
+      attached,
       owned: attachmentFor(ownRef, ownRows, ownSnapshot.workspace, home),
       attachError,
+      error: actionError ?? projected.error,
+      recoverable: actionError !== null || projected.recoverable,
+      attention: observeAttention(snapshot, sessions, attached, observedAt),
     };
     lastPushed = state;
     // Serialize pushes: two overlapping CDP evaluations could otherwise deliver out of order and
@@ -553,23 +663,59 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   };
 
   const stopIntentPump = bindIntentQueue(host, INTENT_QUEUE, async (intent) => {
+    const acknowledged = parseAcknowledgeIntent(intent.payload);
+    if (acknowledged !== null) {
+      if (attention.delete(acknowledged)) await pushNow();
+      return;
+    }
+    if (parseRefreshIntent(intent.payload)) {
+      actionError = null;
+      try {
+        await activeController().dispatch({ type: "refresh", autoObserve: false });
+        await refreshSessions();
+      } catch (e) {
+        actionError = message(e);
+        log(`refresh failed: ${actionError}`);
+      }
+      await pushNow();
+      return;
+    }
+    const newChat = parseNewChatIntent(intent.payload);
+    if (newChat !== null) {
+      actionError = null;
+      attachSeq += 1;
+      try {
+        await releaseMirror();
+        await controller.dispatch({ type: "start", harness: newChat.harness });
+        await controller.dispatch({ type: "send", text: newChat.text });
+      } catch (e) {
+        actionError = message(e);
+        log(`new chat failed: ${actionError}`);
+      }
+      await pushNow();
+      return;
+    }
     const text = parseSendIntent(intent.payload);
     if (text !== null) {
+      actionError = null;
       try {
         // The ACTIVE controller: a mirror will refuse (`send` is not among its available actions),
         // and that refusal is the honest answer — the panel never fabricates a send path.
         await activeController().dispatch({ type: "send", text });
       } catch (e) {
-        log(`send failed: ${message(e)}`);
+        actionError = message(e);
+        log(`send failed: ${actionError}`);
       }
       await pushNow();
       return;
     }
     if (parseInterruptIntent(intent.payload)) {
+      actionError = null;
       try {
         await activeController().dispatch({ type: "interrupt" });
       } catch (e) {
-        log(`interrupt failed: ${message(e)}`);
+        actionError = message(e);
+        log(`interrupt failed: ${actionError}`);
       }
       await pushNow();
       return;
@@ -577,21 +723,25 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     if (parseReleaseIntent(intent.payload)) {
       await releaseMirror();
       attachError = null;
+      actionError = null;
       await pushNow();
       return;
     }
     const response = parseRespondIntent(intent.payload);
     if (response !== null) {
+      actionError = null;
       try {
         await activeController().dispatch({ type: "respond", ...response });
       } catch (e) {
-        log(`respond failed: ${message(e)}`);
+        actionError = message(e);
+        log(`respond failed: ${actionError}`);
       }
       await pushNow();
       return;
     }
     const key = parseAttachIntent(intent.payload);
     if (key !== null) {
+      actionError = null;
       await attachSession(key);
       return;
     }
@@ -602,7 +752,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // state until initialization, harness startup, and discovery have all finished — indistinguishable
   // from a frozen panel on a cold machine.
   await pushNow();
+  const inventoryStartedAt = performance.now();
   await controller.initialize();
+  log(`controller inventory ready in ${Math.round(performance.now() - inventoryStartedAt)}ms`);
 
   const harness = chooseHarness(controller.getSnapshot(), options.harness);
   startupHarness = harness ?? options.harness ?? "";
@@ -610,8 +762,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     startup = "starting";
     await pushNow();
     try {
+      const harnessStartedAt = performance.now();
       await controller.dispatch({ type: "start", harness });
-      log(`started ${harness} in ${options.workspace}`);
+      log(`started ${harness} in ${options.workspace} in ${Math.round(performance.now() - harnessStartedAt)}ms`);
     } catch (e) {
       log(`could not start ${harness}: ${(e as Error)?.message ?? String(e)}`);
     }
@@ -623,9 +776,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   startup = "discovering";
   await pushNow();
+  const discoveryStartedAt = performance.now();
   await refreshSessions();
+  log(`discovered ${descriptors.length} recent sessions in ${Math.round(performance.now() - discoveryStartedAt)}ms`);
   startup = "ready";
   await pushNow();
+  log(`widget ready in ${Math.round(performance.now() - daemonStartedAt)}ms total`);
 
   return {
     host,

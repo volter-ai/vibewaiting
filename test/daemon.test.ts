@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
   DEFAULT_DISCOVER_INTERVAL_MS,
+  DEFAULT_ATTENTION_SETTLE_MS,
   DEFAULT_INTENT_POLL_MS,
   DEFAULT_PUSH_DEBOUNCE_MS,
   DEFAULT_REPUSH_INTERVAL_MS,
@@ -9,7 +10,10 @@ import {
   bindIntentQueue,
   chooseHarness,
   parseAttachIntent,
+  parseAcknowledgeIntent,
   parseInterruptIntent,
+  parseNewChatIntent,
+  parseRefreshIntent,
   parseReleaseIntent,
   parseRespondIntent,
   parseSendIntent,
@@ -192,6 +196,26 @@ describe("parseReleaseIntent", () => {
   });
 });
 
+describe("messenger lifecycle intents", () => {
+  it("accepts a lazy new-chat payload only when both harness and first message are present", () => {
+    expect(parseNewChatIntent({ action: "new", harness: " codex ", text: "  fix the tests  " })).toEqual({
+      harness: "codex",
+      text: "fix the tests",
+    });
+    expect(parseNewChatIntent({ action: "new", harness: "codex", text: "   " })).toBeNull();
+    expect(parseNewChatIntent({ action: "new", harness: "", text: "hello" })).toBeNull();
+    expect(parseNewChatIntent({ action: "send", harness: "codex", text: "hello" })).toBeNull();
+  });
+
+  it("accepts explicit acknowledgement and refresh without guessing at malformed payloads", () => {
+    expect(parseAcknowledgeIntent({ action: "ack", key: " session-key " })).toBe("session-key");
+    expect(parseAcknowledgeIntent({ action: "ack", key: "" })).toBeNull();
+    expect(parseAcknowledgeIntent({ action: "attach", key: "session-key" })).toBeNull();
+    expect(parseRefreshIntent({ action: "refresh" })).toBe(true);
+    expect(parseRefreshIntent({ action: "send", text: "refresh" })).toBe(false);
+  });
+});
+
 describe("startDaemon", () => {
   it("mounts the widget under the shared namespace and starts a session", async () => {
     const { attached, client, host, lastPush } = await rig();
@@ -262,15 +286,20 @@ describe("startDaemon", () => {
     expect(Object.keys(push).sort()).toEqual([
       "attachError",
       "attached",
+      "attention",
       "busy",
       "canInterrupt",
       "canRespond",
       "canSend",
       "error",
       "harness",
+      "harnesses",
       "mode",
+      "needsInput",
+      "operation",
       "owned",
       "pill",
+      "recoverable",
       "sessions",
       "startup",
       "taskPlan",
@@ -278,7 +307,7 @@ describe("startDaemon", () => {
       "workspace",
     ]);
     expect(push["conversation"]).toBeUndefined();
-    expect(push["harnesses"]).toBeUndefined();
+    expect(push["harnesses"]).toEqual(expect.any(Array));
   });
 
   it("caps what crosses the wire, however long the session runs", async () => {
@@ -532,6 +561,53 @@ describe("the Sessions list", () => {
     await host.ticks.find((t) => t.ms === DEFAULT_DISCOVER_INTERVAL_MS)?.fn();
     expect(lastPush().sessions.length).toBe(before);
     expect(logs.some((l) => l.includes("session discovery failed"))).toBe(true);
+  });
+
+  it("marks only a later unseen transcript change as attention, then clears it when read", async () => {
+    const { client, host, lastPush } = await sessionRig();
+    // Live peers can touch their descriptor timestamp on heartbeat. That is not a new message.
+    client.sessions = [OWN, { ...ATLAS, updated_at_ms: 2_000_050 }, BRIDGE];
+    await host.ticks.find((tick) => tick.ms === DEFAULT_DISCOVER_INTERVAL_MS)?.fn();
+    expect(lastPush().attention).toEqual([]);
+
+    const changedAtlas = { ...ATLAS, updated_at_ms: 2_000_100, message_count: (ATLAS.message_count ?? 0) + 1 };
+    client.sessions = [OWN, changedAtlas, BRIDGE];
+    await host.ticks.find((tick) => tick.ms === DEFAULT_DISCOVER_INTERVAL_MS)?.fn();
+    expect(lastPush().attention).toEqual([]);
+
+    // The same grown transcript becomes unread only after it has been quiet long enough to be a
+    // useful notification rather than a badge increment for each streaming tool event.
+    client.sessions = [
+      OWN,
+      { ...changedAtlas, updated_at_ms: 2_000_000 - DEFAULT_ATTENTION_SETTLE_MS },
+      BRIDGE,
+    ];
+    await host.ticks.find((tick) => tick.ms === DEFAULT_DISCOVER_INTERVAL_MS)?.fn();
+
+    const key = sessionKey(ATLAS.locator);
+    expect(lastPush().attention).toContainEqual({ key, kind: "unseen" });
+    await host.fireIntent(INTENT_QUEUE, { action: "ack", key });
+    expect(lastPush().attention).not.toContainEqual(expect.objectContaining({ key }));
+  });
+
+  it("marks a completed owned turn until that conversation is acknowledged", async () => {
+    const { client, host, lastPush } = await sessionRig();
+    await host.fireIntent(INTENT_QUEUE, { action: "send", text: "do the work" });
+    client.runtime.assistantMessage("done");
+    client.runtime.turnCompleted();
+    await waitFor(() => lastPush().busy === false);
+
+    const key = sessionKey(OWN.locator);
+    expect(lastPush().attention).toContainEqual({ key, kind: "finished" });
+    await host.fireIntent(INTENT_QUEUE, { action: "ack", key });
+    expect(lastPush().attention).toEqual([]);
+  });
+
+  it("uses an explicit foreign busy-to-idle transition as immediate completion", async () => {
+    const { client, host, lastPush } = await sessionRig([OWN, LIVE_ATLAS]);
+    client.sessions = [{ ...LIVE_ATLAS, live_status: "idle" }, OWN];
+    await host.ticks.find((tick) => tick.ms === DEFAULT_DISCOVER_INTERVAL_MS)?.fn();
+    expect(lastPush().attention).toContainEqual({ key: sessionKey(LIVE_ATLAS.locator), kind: "finished" });
   });
 });
 

@@ -31,6 +31,7 @@ function descriptor(over: Partial<SessionDescriptor> & { sessionId?: string } = 
     updated_at_ms: over.updated_at_ms === undefined ? NOW - 3 * 60_000 : over.updated_at_ms,
     message_count: over.message_count === undefined ? 42 : over.message_count,
     model: over.model === undefined ? "claude-opus-5" : over.model,
+    ...(over.live_status === undefined ? {} : { live_status: over.live_status }),
   };
 }
 
@@ -135,6 +136,7 @@ describe("projectSession", () => {
       messages: 42,
       active: false,
       live: true,
+      runtimeStatus: null,
     });
   });
 
@@ -156,6 +158,12 @@ describe("projectSession", () => {
     // A controller with no session selected marks nothing.
     expect(matchesActive(descriptor(), { harness: "claude-code", sessionId: null })).toBe(false);
     expect(matchesActive(descriptor(), null)).toBe(false);
+  });
+
+  it("keeps explicit runtime state separate from recency", () => {
+    expect(projectSession(descriptor({ live_status: "busy" }), { now: NOW }).runtimeStatus).toBe("busy");
+    expect(projectSession(descriptor({ live_status: "idle" }), { now: NOW }).runtimeStatus).toBe("idle");
+    expect(projectSession(descriptor({ live_status: null }), { now: NOW }).runtimeStatus).toBeNull();
   });
 });
 

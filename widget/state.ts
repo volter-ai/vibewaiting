@@ -12,17 +12,33 @@ import type {
   TranscriptRole,
   StartupPhase,
   TranscriptTaskPlan,
+  SessionAttention,
+  SessionAttentionKind,
+  WidgetHarness,
   WidgetState,
 } from "../src/projection.js";
 import type { AttachedSession, SessionRow } from "../src/sessions.js";
 
-export type { AttachError, AttachedSession, SessionRow, StartupPhase, TranscriptEntry, TranscriptRole, WidgetState };
+export type {
+  AttachError,
+  AttachedSession,
+  SessionAttention,
+  SessionAttentionKind,
+  SessionRow,
+  StartupPhase,
+  TranscriptEntry,
+  TranscriptRole,
+  WidgetHarness,
+  WidgetState,
+};
 
 export const EMPTY_STATE: WidgetState = {
   pill: { tone: "off", label: "connecting…" },
   startup: "connecting",
   transcript: [],
   busy: false,
+  operation: null,
+  needsInput: false,
   harness: "",
   mode: "none",
   canSend: false,
@@ -31,14 +47,17 @@ export const EMPTY_STATE: WidgetState = {
   workspace: "",
   taskPlan: { source: "none", items: [], residueCount: 0, observedAt: null },
   error: null,
+  recoverable: false,
+  harnesses: [],
+  attention: [],
   sessions: [],
   attached: null,
   owned: null,
   attachError: null,
 };
 
-/** The messenger's two views: the session list (root) and one session's transcript. */
-export type View = "list" | "chat";
+/** Conversation-first navigation: history and compose sit behind the active thread. */
+export type View = "list" | "chat" | "new";
 
 export interface StartupMessage {
   title: string;
@@ -89,6 +108,7 @@ const STARTUP_PHASES = new Set<StartupPhase>(["connecting", "starting", "discove
 const REQUEST_OPTION_KINDS = new Set(["allow_once", "allow_always", "reject_once", "reject_always", "other"]);
 const TASK_PLAN_SOURCES = new Set(["codex-update-plan", "claude-tasks", "opencode-todos", "none"]);
 const TASK_PLAN_STATUSES = new Set(["pending", "in_progress", "completed", "cancelled", "unknown"]);
+const ATTENTION_KINDS = new Set<SessionAttentionKind>(["unseen", "finished", "failed"]);
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return !!v && typeof v === "object" && !Array.isArray(v);
@@ -211,7 +231,7 @@ function readTaskPlan(raw: unknown): TranscriptTaskPlan {
 
 function readSessionRow(raw: unknown): SessionRow | null {
   if (!isRecord(raw)) return null;
-  const { key, harness, name, cwd, title, age, updatedAt, messages, active, live } = raw;
+  const { key, harness, name, cwd, title, age, updatedAt, messages, active, live, runtimeStatus } = raw;
   if (typeof key !== "string" || key === "") return null;
   if (typeof harness !== "string") return null;
   return {
@@ -225,6 +245,7 @@ function readSessionRow(raw: unknown): SessionRow | null {
     messages: typeof messages === "number" ? messages : null,
     active: active === true,
     live: live === true,
+    runtimeStatus: runtimeStatus === "busy" || runtimeStatus === "idle" ? runtimeStatus : null,
   };
 }
 
@@ -249,6 +270,26 @@ function readAttached(raw: unknown): AttachedSession | null {
   };
 }
 
+function readHarness(raw: unknown): WidgetHarness | null {
+  if (!isRecord(raw)) return null;
+  const { id, label, startable, installed, reason } = raw;
+  if (typeof id !== "string" || id === "" || typeof label !== "string") return null;
+  return {
+    id,
+    label,
+    startable: startable === true,
+    installed: installed === true,
+    reason: typeof reason === "string" ? reason : null,
+  };
+}
+
+function readAttention(raw: unknown): SessionAttention | null {
+  if (!isRecord(raw)) return null;
+  const { key, kind } = raw;
+  if (typeof key !== "string" || typeof kind !== "string" || !ATTENTION_KINDS.has(kind as SessionAttentionKind)) return null;
+  return { key, kind: kind as SessionAttentionKind };
+}
+
 /** Normalize the merged patch accumulator into a `WidgetState` — never throws, never renders `undefined`. */
 export function readWidgetState(raw: unknown): WidgetState {
   if (!isRecord(raw)) return EMPTY_STATE;
@@ -268,6 +309,8 @@ export function readWidgetState(raw: unknown): WidgetState {
       : "connecting",
     transcript,
     busy: raw["busy"] === true,
+    operation: typeof raw["operation"] === "string" ? raw["operation"] : null,
+    needsInput: raw["needsInput"] === true,
     harness: typeof raw["harness"] === "string" ? raw["harness"] : "",
     mode: raw["mode"] === "control" || raw["mode"] === "mirror" ? raw["mode"] : "none",
     canSend: raw["canSend"] === true,
@@ -276,6 +319,13 @@ export function readWidgetState(raw: unknown): WidgetState {
     workspace: typeof raw["workspace"] === "string" ? raw["workspace"] : "",
     taskPlan: readTaskPlan(raw["taskPlan"]),
     error: typeof raw["error"] === "string" ? raw["error"] : null,
+    recoverable: raw["recoverable"] === true,
+    harnesses: Array.isArray(raw["harnesses"])
+      ? raw["harnesses"].map(readHarness).filter((h): h is WidgetHarness => h !== null)
+      : [],
+    attention: Array.isArray(raw["attention"])
+      ? raw["attention"].map(readAttention).filter((a): a is SessionAttention => a !== null)
+      : [],
     sessions: Array.isArray(raw["sessions"])
       ? raw["sessions"].map(readSessionRow).filter((s): s is SessionRow => s !== null)
       : [],
@@ -310,6 +360,7 @@ export function listRows(state: WidgetState): SessionRow[] {
       // The panel is attached to it right now — nothing is more live than that, and there is no
       // descriptor to read a timestamp from.
       live: true,
+      runtimeStatus: state.busy ? "busy" : "idle",
     },
     ...state.sessions,
   ];
@@ -322,11 +373,16 @@ function isModelTitle(title: string): boolean {
   );
 }
 
+function isOpaqueSessionTitle(title: string): boolean {
+  const value = title.trim();
+  return /^(?:[a-f0-9]{8,}|[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})$/i.test(value);
+}
+
 /** The messenger row's primary label: a real conversation title first, otherwise its project. */
 export function sessionDisplayName(row: Pick<SessionRow, "name" | "title">): string {
   const title = row.title.trim();
   const name = row.name.trim();
-  if (title !== "" && title !== name && !isModelTitle(title)) return title;
+  if (title !== "" && title !== name && !isModelTitle(title) && !isOpaqueSessionTitle(title)) return title;
   return name || title || "Untitled chat";
 }
 
@@ -353,11 +409,75 @@ export function filterSessionRows(rows: readonly SessionRow[], query: string): S
   );
 }
 
-/**
- * Has the host confirmed the attach this panel asked for? The list marks the tapped row as opening
- * until it has, and only then does the messenger slide to the chat view — a view that switched on
- * the click would show the PREVIOUS session's transcript under the new session's name.
- */
+export function attentionFor(state: WidgetState, key: string): SessionAttentionKind | null {
+  return state.attention.find((item) => item.key === key)?.kind ?? null;
+}
+
+export type SessionActivity = "needs-input" | "failed" | "working" | "finished" | "unseen" | "recent" | "idle";
+
+/** One honest state vocabulary shared by the launcher and the conversation list. */
+export function sessionActivity(state: WidgetState, row: SessionRow): SessionActivity {
+  if (row.active && state.needsInput) return "needs-input";
+  if (row.active && state.error) return "failed";
+  if (row.active && state.busy) return "working";
+  const attention = attentionFor(state, row.key);
+  if (attention) return attention;
+  if (row.runtimeStatus === "busy") return "working";
+  return row.live ? "recent" : "idle";
+}
+
+const ACTIVITY_PRIORITY: Record<SessionActivity, number> = {
+  "needs-input": 0,
+  failed: 1,
+  working: 2,
+  finished: 3,
+  unseen: 4,
+  recent: 5,
+  idle: 6,
+};
+
+/** Attention first, then the selected chat, then actual recency—matching a mature inbox. */
+export function orderedSessionRows(state: WidgetState): SessionRow[] {
+  return [...listRows(state)].sort((left, right) => {
+    const delta = ACTIVITY_PRIORITY[sessionActivity(state, left)] - ACTIVITY_PRIORITY[sessionActivity(state, right)];
+    if (delta !== 0) return delta;
+    if (left.active !== right.active) return left.active ? -1 : 1;
+    return (right.updatedAt ?? 0) - (left.updatedAt ?? 0);
+  });
+}
+
+export function activityLabel(activity: SessionActivity): string {
+  if (activity === "needs-input") return "Needs input";
+  if (activity === "failed") return "Failed";
+  if (activity === "working") return "Working";
+  if (activity === "finished") return "Finished";
+  if (activity === "unseen") return "New activity";
+  if (activity === "recent") return "Recent";
+  return "";
+}
+
+export function operationLabel(operation: string | null): string | null {
+  if (!operation) return null;
+  const labels: Record<string, string> = {
+    refresh: "Refreshing chats…",
+    observe: "Opening chat…",
+    start: "Starting agent…",
+    send: "Sending…",
+    interrupt: "Stopping…",
+    respond: "Responding…",
+    resume: "Resuming chat…",
+    attach: "Connecting live…",
+    branch: "Starting fork…",
+  };
+  return labels[operation] ?? `${operation.charAt(0).toUpperCase()}${operation.slice(1)}…`;
+}
+
+export function messageTime(timestamp: number | null): string {
+  if (timestamp === null || !Number.isFinite(timestamp)) return "";
+  return new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(timestamp);
+}
+
+/** Has the host confirmed the attach behind the immediate, transcript-free opening surface? */
 export function attachSettled(awaitingKey: string | null, attached: AttachedSession | null): boolean {
   if (awaitingKey === null || attached === null) return false;
   return attached.key === awaitingKey;
@@ -400,21 +520,20 @@ export function openingMessage(elapsedMs: number): string {
 }
 
 /**
- * The shell pill — the one thing visible while the widget is closed. It reports the attached
- * session's status when there is one, and otherwise how many sessions are waiting to be opened
- * (which is the only useful thing to say when nothing is attached).
+ * The shell pill — the one thing visible while the widget is closed. It stays quiet at rest and
+ * expands only for work, input, errors, or genuinely unseen activity.
  */
 export function pillFor(state: WidgetState): WidgetState["pill"] {
-  if (state.attached !== null) {
-    const harness = state.attached.harness;
-    const label = state.pill.label.startsWith(harness)
-      ? `${harnessDisplayName(harness)}${state.pill.label.slice(harness.length)}`
-      : state.pill.label;
-    return { ...state.pill, label };
+  const harness = harnessDisplayName(state.attached?.harness ?? state.harness);
+  if (state.startup !== "ready") return { tone: "off", label: state.pill.label || "Connecting" };
+  if (state.needsInput) return { tone: "warn", label: `${harness || "Agent"} needs input` };
+  if (state.error) return { tone: "dead", label: `${harness || "Agent"} needs attention` };
+  if (state.busy) return { tone: "live", label: `${harness || "Agent"} is working` };
+  if (state.attention.length > 0) {
+    const count = state.attention.length;
+    return { tone: "warn", label: `${count} unread chat${count === 1 ? "" : "s"}` };
   }
-  const count = state.sessions.length;
-  if (count === 0) return state.pill;
-  return { tone: state.pill.tone, label: `${count} session${count === 1 ? "" : "s"}` };
+  return { tone: "off", label: "Agent chats" };
 }
 
 /** Enter sends; Shift+Enter is a newline; an IME composition commit is never a send. */

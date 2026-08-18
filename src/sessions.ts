@@ -17,12 +17,10 @@ export const MAX_SESSION_ROWS = 30;
 /**
  * How recently a session's store must have been written for the row to read as LIVE.
  *
- * Descriptor recency is the best liveness signal the SDK exposes: `SessionDescriptor` carries no
- * process-level flag (no pid, no "running" boolean) — only the locator, the workspace, the title,
- * the model, the message count and `updated_at_ms`. A harness rewrites its session store on every
- * turn, so a store touched inside this window is a session someone is working in; anything older is
- * a session that is merely on disk. Five minutes is wide enough to cover a long single turn (the
- * agent thinking, or a human reading before replying) without calling yesterday's session live.
+ * Some harnesses expose `live_status`; others only expose the session store's timestamp. Recency is
+ * the conservative fallback for those older/no-status descriptors. The UI labels it "Recent", not
+ * "active now": a fresh file is evidence of activity, not proof that a process is still running.
+ * Five minutes is wide enough to cover a long turn without calling yesterday's session recent.
  */
 export const LIVENESS_WINDOW_MS = 5 * 60_000;
 
@@ -44,6 +42,8 @@ export interface SessionRow {
   active: boolean;
   /** True when the store was written within `LIVENESS_WINDOW_MS` of the caller's `now` — see `isLive`. */
   live: boolean;
+  /** Process-reported state when the harness publishes one; never inferred from file recency. */
+  runtimeStatus: "busy" | "idle" | null;
 }
 
 /** Which session the Agent panel is on, in the only terms both a descriptor and a snapshot carry. */
@@ -108,10 +108,9 @@ export function relativeAge(updatedAtMs: number | null | undefined, now: number)
 /**
  * Is this session one someone is working in right now?
  *
- * Recency of the harness's own store, against the caller's `now` — the only liveness the SDK gives
- * us (see `LIVENESS_WINDOW_MS`). A store with no recorded mtime is NOT live: absence of evidence is
- * reported as such rather than guessed either way. Clock skew between two stores (a timestamp in
- * the future) reads as live, matching `relativeAge`'s "now". The boundary is inclusive.
+ * Recency of the harness's own store, against the caller's `now` (see `LIVENESS_WINDOW_MS`). This is
+ * deliberately separate from the descriptor's explicit `live_status`. A store with no recorded
+ * mtime is not recent; clock skew reads as recent, matching `relativeAge`'s "now".
  */
 export function isLive(updatedAtMs: number | null | undefined, now: number): boolean {
   if (typeof updatedAtMs !== "number" || !Number.isFinite(updatedAtMs) || updatedAtMs <= 0) return false;
@@ -169,6 +168,8 @@ export function projectSession(
     messages: descriptor.message_count,
     active: matchesActive(descriptor, options.active),
     live: isLive(descriptor.updated_at_ms, options.now),
+    runtimeStatus:
+      descriptor.live_status === "busy" || descriptor.live_status === "idle" ? descriptor.live_status : null,
   };
 }
 
