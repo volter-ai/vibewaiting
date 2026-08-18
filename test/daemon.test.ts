@@ -12,6 +12,7 @@ import {
   parseAttachIntent,
   parseAcknowledgeIntent,
   parseInterruptIntent,
+  parseMountedIntent,
   parseNewChatIntent,
   parseRefreshIntent,
   parseReleaseIntent,
@@ -112,6 +113,15 @@ describe("parseResumeIntent", () => {
     expect(parseResumeIntent({ action: "resume", key: "page-must-not-pick-a-target" })).toBe(false);
     expect(parseResumeIntent({ action: "attach" })).toBe(false);
     expect(parseResumeIntent(null)).toBe(false);
+  });
+});
+
+describe("parseMountedIntent", () => {
+  it("accepts only the target-free iframe mount handshake", () => {
+    expect(parseMountedIntent({ action: "mounted" })).toBe(true);
+    expect(parseMountedIntent({ action: "mounted", state: "page-controlled" })).toBe(false);
+    expect(parseMountedIntent({ action: "refresh" })).toBe(false);
+    expect(parseMountedIntent(null)).toBe(false);
   });
 });
 
@@ -458,20 +468,24 @@ describe("startDaemon", () => {
   });
 });
 
-describe("re-push heartbeat", () => {
-  // The bug this guards: a shell mounted on a page navigated AFTER the last revision-driven push
-  // (agent idle) starts empty and stays empty. The heartbeat re-pushes current state on a steady
-  // tick so a fresh mount populates without an agent event.
-  it("registers a heartbeat that re-pushes the current state, and stop() ends it", async () => {
+describe("event-driven state delivery", () => {
+  it("does not register a full-state heartbeat by default and forces one snapshot for a fresh mount", async () => {
     const { daemon, host } = await rig();
-    // Two timers: the re-push heartbeat, then the session-discovery scan.
-    expect(host.ticks.map((t) => t.ms)).toEqual([DEFAULT_REPUSH_INTERVAL_MS, DEFAULT_DISCOVER_INTERVAL_MS]);
+    expect(DEFAULT_REPUSH_INTERVAL_MS).toBe(0);
+    expect(host.ticks.map((t) => t.ms)).toEqual([DEFAULT_DISCOVER_INTERVAL_MS]);
     const before = host.pushes.length;
-    await host.ticks[0]!.fn();
+    await host.fireIntent(INTENT_QUEUE, { action: "mounted" });
     expect(host.pushes.length).toBe(before + 1);
-    expect(host.pushes.at(-1)).toEqual(host.pushes.at(-2)); // same state, re-delivered for fresh mounts
+    expect(host.pushes.at(-1)).toEqual(host.pushes.at(-2));
     await daemon.stop();
     expect(host.ticks.every((t) => t.stopped)).toBe(true);
+  });
+
+  it("suppresses an unchanged full snapshot outside an explicit mount", async () => {
+    const { daemon, host } = await rig();
+    const before = host.pushes.length;
+    await daemon.flush();
+    expect(host.pushes.length).toBe(before);
   });
 
   it("repushIntervalMs: 0 / discoverIntervalMs: 0 disable their ticks", async () => {

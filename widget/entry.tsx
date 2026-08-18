@@ -65,6 +65,11 @@ const INTENT_QUEUE = "agent";
 
 const widget = createWidget({ ns: NS, version: 1 });
 
+// Sticky injection creates a fresh iframe after every navigation. Announce that mount so the
+// daemon delivers one current snapshot immediately; this replaces the old 2s full-transcript
+// heartbeat and makes an idle widget appear populated without continuously replaying its state.
+widget.sendIntent(INTENT_QUEUE, { action: "mounted" });
+
 // CSS viewport units inside the widget describe the iframe itself. While collapsed that viewport
 // is only the launcher's size, so `100vw` creates a circular trap: a 46px iframe asks the host for
 // a 46px panel and can never grow. A srcdoc iframe inherits the embedding page's origin; read that
@@ -162,8 +167,8 @@ function ToolRow({ entry, workspace }: { entry: TranscriptEntry; workspace: stri
       ) : <div class="vw-tool-row-head">{head}</div>}
       {hasDetails ? (
         <div id={detailId} class="vw-tool-detail" hidden={!expanded}>
-          {entry.arguments ? <pre class="vw-tool-code"><b>Input</b>{"\n"}{entry.arguments}</pre> : null}
-          {entry.resultText ? <pre class={`vw-tool-code vw-tool-result${status === "error" ? " vw-danger" : ""}`}><b>Output</b>{"\n"}{entry.resultText}{entry.truncated ? "\n[truncated]" : ""}</pre> : null}
+          {expanded && entry.arguments ? <pre class="vw-tool-code"><b>Input</b>{"\n"}{entry.arguments}</pre> : null}
+          {expanded && entry.resultText ? <pre class={`vw-tool-code vw-tool-result${status === "error" ? " vw-danger" : ""}`}><b>Output</b>{"\n"}{entry.resultText}{entry.truncated ? "\n[truncated]" : ""}</pre> : null}
         </div>
       ) : null}
     </div>
@@ -196,7 +201,7 @@ function ToolGroup({ tools, workspace }: { tools: TranscriptEntry[]; workspace: 
         <span class="vw-spacer" />
         <span class={hasError ? "vw-danger" : ""}>{completed}/{tools.length}</span>
       </button>
-      <div id={detailId} hidden={!expanded}>{tools.map((tool) => <ToolRow key={tool.id} entry={tool} workspace={workspace} />)}</div>
+      <div id={detailId} hidden={!expanded}>{expanded ? tools.map((tool) => <ToolRow key={tool.id} entry={tool} workspace={workspace} />) : null}</div>
     </section>
   );
 }

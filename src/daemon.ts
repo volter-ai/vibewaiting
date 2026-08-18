@@ -56,8 +56,12 @@ export const INTENT_QUEUE = "agent";
 export const DEFAULT_PUSH_DEBOUNCE_MS = 150;
 /** Messenger interactions should reach the daemon in the same perceptual beat as the click. */
 export const DEFAULT_INTENT_POLL_MS = 100;
-/** Steady re-push so a shell mounted on a NEWLY NAVIGATED page populates without an agent event. */
-export const DEFAULT_REPUSH_INTERVAL_MS = 2000;
+/**
+ * Legacy state heartbeat. Fresh iframe mounts now announce themselves through the intent queue,
+ * so unchanged transcripts never need to cross CDP on a timer. Kept configurable for embedders
+ * running an older widget bundle; the default is deliberately event-driven.
+ */
+export const DEFAULT_REPUSH_INTERVAL_MS = 0;
 /** How often the machine is re-scanned for coding sessions. Cheap: one RPC, capped result. */
 export const DEFAULT_DISCOVER_INTERVAL_MS = 5000;
 /** Tool-stream churn is not unread. A no-status peer must be quiet this long before it asks for attention. */
@@ -179,13 +183,7 @@ export interface DaemonOptions {
   pushDebounceMs?: number | undefined;
   /** Intent queue cadence. Default 100ms; `0` uses Lucarne's stock shared drain pump. */
   intentPollMs?: number | undefined;
-  /**
-   * Re-push heartbeat. A shell mounted AFTER the last revision-driven push (the user navigated to a
-   * new page while the agent was idle) starts EMPTY and would stay empty until the next agent event
-   * — the injector never tells the host about fresh mounts, so a steady re-push is the platform
-   * idiom (see the widget README's `host.every` usage). State is small (projection-capped), so the
-   * default is cheap. `0` disables (tests).
-   */
+  /** Legacy compatibility heartbeat. Default `0`; the widget's `mounted` intent requests state. */
   repushIntervalMs?: number | undefined;
   /**
    * How often to re-run GLOBAL session discovery (no workspace → every harness, every project).
@@ -318,6 +316,12 @@ export function parseResumeIntent(payload: unknown): boolean {
   return (payload as { action?: unknown }).action === "resume" && !("key" in payload);
 }
 
+/** A newly mounted iframe asks for one forced snapshot; no page-chosen target or state is trusted. */
+export function parseMountedIntent(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object") return false;
+  return (payload as { action?: unknown }).action === "mounted" && Object.keys(payload).length === 1;
+}
+
 export interface NewChatIntent {
   harness: HarnessId;
   text: string;
@@ -437,6 +441,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   let stopped = false;
   let lastPushed: WidgetState | null = null;
+  let lastQueuedFingerprint: string | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let inFlight: Promise<void> = Promise.resolve();
   let startup: StartupPhase = "connecting";
@@ -540,7 +545,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       .map(([key, kind]) => ({ key, kind }));
   };
 
-  const pushNow = (): Promise<void> => {
+  const pushNow = (force = false): Promise<void> => {
     if (stopped) return Promise.resolve();
     const snapshot = activeController().getSnapshot();
     const ref = activeRef(snapshot);
@@ -569,12 +574,19 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       attention: observeAttention(snapshot, sessions, attached, observedAt),
     };
     lastPushed = state;
+    const fingerprint = JSON.stringify(state);
+    if (!force && fingerprint === lastQueuedFingerprint) return inFlight;
+    lastQueuedFingerprint = fingerprint;
     // Serialize pushes: two overlapping CDP evaluations could otherwise deliver out of order and
     // leave the panel showing an older transcript than the one already drawn.
     inFlight = inFlight
       .catch(() => undefined)
       .then(() => host.push(state))
-      .catch((e: unknown) => log(`push failed (continuing): ${(e as Error)?.message ?? String(e)}`));
+      .catch((e: unknown) => {
+        // A failed delivery must remain retryable even if the projected state itself is unchanged.
+        if (lastQueuedFingerprint === fingerprint) lastQueuedFingerprint = null;
+        log(`push failed (continuing): ${(e as Error)?.message ?? String(e)}`);
+      });
     return inFlight;
   };
 
@@ -747,6 +759,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   };
 
   const stopIntentPump = bindIntentQueue(host, INTENT_QUEUE, async (intent) => {
+    if (parseMountedIntent(intent.payload)) {
+      await pushNow(true);
+      return;
+    }
     const acknowledged = parseAcknowledgeIntent(intent.payload);
     if (acknowledged !== null) {
       if (attention.delete(acknowledged)) await pushNow();
