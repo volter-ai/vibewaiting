@@ -66,11 +66,12 @@ export const PANEL_CSS = `
 .vw-srow:focus-visible,.vw-back:focus-visible,.vw-copy:focus-visible { outline:2px solid var(--acc); outline-offset:-2px }
 .vw-harness-logo { position:relative; display:inline-grid; place-items:center; width:var(--vw-logo-size); height:var(--vw-logo-size); flex:none;
   border:1px solid var(--bd); border-radius:50%; background:#111; color:#f7f7f5; font-size:calc(var(--vw-logo-size) * .36); font-weight:700; text-transform:uppercase }
-.vw-harness-logo svg { width:68%; height:68%; fill:currentColor }
+.vw-harness-logo svg { width:70%; height:70%; fill:currentColor }
 .vw-harness-logo[data-harness="claude-code"],.vw-harness-logo[data-harness="claude"] { color:#d97757; background:#09090b }
 .vw-harness-logo[data-harness="codex"] { color:#111; background:#f7f7f5 }
 .vw-harness-logo[data-harness="pi"] { color:#111; background:#f0f0ed }
-.vw-harness-logo i { position:absolute; right:-2px; bottom:-2px; width:10px; height:10px; border:2px solid var(--bg); border-radius:50%; background:var(--mut) }
+.vw-harness-logo i { position:absolute; right:-6%; bottom:-6%; width:31.25%; height:31.25%; box-sizing:border-box;
+  border:2px solid var(--bg); border-radius:50%; background:var(--mut) }
 .vw-harness-logo[data-activity="working"] i { background:var(--acc); animation:vw-breathe 1.4s ease-in-out infinite }
 .vw-harness-logo[data-activity="needs-input"] i { background:var(--ask) }
 .vw-harness-logo[data-activity="failed"] i { background:var(--block) }
