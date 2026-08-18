@@ -23,23 +23,24 @@ const LOGOS: Record<string, () => JSX.Element> = {
   ),
 };
 
-function initials(label: string): string {
-  const words = label.trim().split(/\s+/).filter(Boolean);
-  return words.length > 1 ? words.slice(0, 2).map((word) => word[0]).join("") : label.slice(0, 2);
+export function hasHarnessLogo(id: string): boolean {
+  return Object.hasOwn(LOGOS, id);
 }
 
 export function HarnessLogo({
   id,
-  label,
   activity,
   size = 28,
 }: {
   id: string;
-  label: string;
   activity?: SessionActivity;
   size?: number;
 }): JSX.Element {
   const Logo = LOGOS[id];
+  if (!Logo) {
+    console.error(`[vibewaiting] missing canonical harness logo for ${JSON.stringify(id)}`);
+    return <></>;
+  }
   return (
     <span
       class="vw-harness-logo"
@@ -48,7 +49,7 @@ export function HarnessLogo({
       style={`--vw-logo-size:${size}px`}
       aria-hidden="true"
     >
-      {Logo ? <svg viewBox="0 0 24 24" focusable="false"><Logo /></svg> : <span>{initials(label)}</span>}
+      <svg viewBox="0 0 24 24" focusable="false"><Logo /></svg>
       {activity && activity !== "idle" ? <i /> : null}
     </span>
   );

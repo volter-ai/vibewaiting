@@ -7,16 +7,14 @@ export const PANEL_CSS = `
 .wrap { width:max-content }
 .panel { width:var(--vw-panel-width,420px) }
 .panel > header { display:none }
-.pill,.panel { animation-duration:.18s }
+.panel { animation-duration:.18s }
 .pill { position:relative; width:50px; height:50px; justify-content:center; padding:0; border:0;
-  border-radius:50%; background:transparent; overflow:hidden }
+  border-radius:50%; background:transparent; overflow:hidden; animation:none }
 .pill:hover { border-color:transparent; background:var(--fill) }
 .pill:focus-visible { outline:2px solid var(--acc); outline-offset:-3px }
 .pill .brand { position:relative; display:grid; place-items:center }
 .pill .brand .vw-harness-logo { box-shadow:0 1px 4px rgba(0,0,0,.22); transition:transform .16s ease }
 .pill:hover .brand .vw-harness-logo { transform:scale(1.05) }
-.vw-launcher-fallback { display:grid; place-items:center; width:30px; height:30px; border-radius:50%; background:var(--fill-2); color:var(--acc) }
-.vw-launcher-fallback svg { width:18px; height:18px; fill:currentColor }
 .pill .lead { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap }
 .pill .triad { position:absolute; inset:0; margin:0; padding:0; pointer-events:none }
 .pill .triad .oi.dot { display:none }
