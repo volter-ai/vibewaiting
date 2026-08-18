@@ -122,7 +122,7 @@ export const PANEL_CSS = `
 .vw-assistant { padding-bottom:3px }
 .vw-pending { opacity:.55 }
 .vw-sending { display:block; color:var(--mut); font-size:10px; margin-top:3px }
-.vw-message-time { display:inline-block; margin-left:6px; color:var(--mut); font-size:9.5px; opacity:0; transition:opacity 120ms ease }
+.vw-message-time { display:inline-block; margin-left:6px; color:var(--mut); font-size:9.5px; opacity:.72; transition:opacity 120ms ease }
 .vw-message:hover .vw-message-time,.vw-message:focus-within .vw-message-time { opacity:1 }
 .vw-message-failed { opacity:1; border-color:var(--block) }
 .vw-send-failed { display:flex; align-items:center; gap:6px; margin-top:4px; color:var(--block); font-size:10px }
