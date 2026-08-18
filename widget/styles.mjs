@@ -127,7 +127,8 @@ export const PANEL_CSS = `
 .vw-message-failed { opacity:1; border-color:var(--block) }
 .vw-send-failed { display:flex; align-items:center; gap:6px; margin-top:4px; color:var(--block); font-size:10px }
 .vw-send-failed button { border:0; padding:0; background:transparent; color:var(--acc); font:inherit; cursor:pointer }
-.vw-latest { position:absolute; right:14px; bottom:112px; z-index:4; padding:5px 9px; border:1px solid var(--bd2);
+.vw-compose-shell { position:relative; flex:none }
+.vw-latest { position:absolute; right:14px; bottom:calc(100% + 8px); z-index:4; padding:5px 9px; border:1px solid var(--bd2);
   border-radius:999px; background:var(--bg2); color:var(--fg); box-shadow:0 2px 8px rgba(0,0,0,.24); font:11px inherit; cursor:pointer }
 
 /* GFM-rich Markdown. markdown-it has raw HTML disabled. */
@@ -208,6 +209,10 @@ export const PANEL_CSS = `
   border:0; padding:8px 9px 4px; font:inherit; font-size:12.5px; outline:none }
 .vw-input::placeholder { color:var(--mut) }
 .vw-composer-foot { min-height:30px; display:flex; align-items:center; justify-content:space-between; gap:8px; padding:2px 5px 5px 8px }
+.vw-composer-compact { padding:6px 10px 9px }
+.vw-envelope-compact { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:end; padding:3px }
+.vw-envelope-compact .vw-input { min-width:0; min-height:34px; height:34px; padding:7px 6px }
+.vw-envelope-compact .vw-composer-foot { min-height:34px; justify-content:flex-end; padding:0 }
 .vw-agent-id { min-width:0; color:var(--mut); font-size:10px; text-transform:uppercase; letter-spacing:.04em; overflow:hidden; text-overflow:ellipsis }
 .vw-actions { display:flex; align-items:center; gap:6px }
 .vw-stop,.vw-send { display:inline-flex; align-items:center; justify-content:center; width:27px; height:27px; border-radius:8px;

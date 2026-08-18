@@ -4,6 +4,7 @@ import {
   attachOutcome,
   attachSettled,
   activityLabel,
+  composerHeight,
   filterSessionRows,
   harnessDisplayName,
   isSendKey,
@@ -339,6 +340,15 @@ describe("messenger activity", () => {
     expect(operationLabel("observe")).toBe("Opening chat…");
     expect(operationLabel("interrupt")).toBe("Stopping…");
     expect(operationLabel(null)).toBeNull();
+  });
+});
+
+describe("composerHeight", () => {
+  it("rests at one messenger line, grows with content, and caps tall drafts", () => {
+    expect(composerHeight(12)).toBe(34);
+    expect(composerHeight(86)).toBe(86);
+    expect(composerHeight(400)).toBe(150);
+    expect(composerHeight(Number.NaN)).toBe(34);
   });
 });
 
