@@ -38,6 +38,7 @@ import {
 } from "./projection.js";
 import { homedir } from "node:os";
 import { performance } from "node:perf_hooks";
+import type { MessengerPersistence } from "./persistence.js";
 import {
   MAX_SESSION_ROWS,
   attachmentFor,
@@ -210,6 +211,8 @@ export interface DaemonOptions {
   }) => AgentController) | undefined;
   projection?: ProjectionOptions | undefined;
   log?: ((message: string) => void) | undefined;
+  /** Durable messenger chrome. The CLI supplies a private local file store; tests may inject memory. */
+  persistence?: MessengerPersistence | false | undefined;
 }
 
 /**
@@ -366,6 +369,16 @@ export function parseLoadEarlierIntent(payload: unknown): boolean {
   return Boolean(payload && typeof payload === "object" && (payload as { action?: unknown }).action === "loadEarlier" && Object.keys(payload).length === 1);
 }
 
+export interface DraftIntent { text: string }
+
+/** Drafts are scoped to the daemon-selected conversation; the page supplies neither key nor path. */
+export function parseDraftIntent(payload: unknown): DraftIntent | null {
+  if (!payload || typeof payload !== "object" || Object.keys(payload).some((key) => key !== "action" && key !== "text")) return null;
+  const { action, text } = payload as { action?: unknown; text?: unknown };
+  if (action !== "draft" || typeof text !== "string" || text.length > 50_000) return null;
+  return { text };
+}
+
 export interface NewChatIntent {
   harness: HarnessId;
   text: string;
@@ -483,6 +496,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   });
   log(`widget host attached in ${Math.round(performance.now() - hostAttachStartedAt)}ms`);
 
+  const persistence = options.persistence === false ? null : options.persistence ?? null;
+  const persisted = persistence
+    ? await persistence.load().catch((error: unknown) => {
+        log(`messenger state load failed (continuing): ${message(error)}`);
+        return { attention: [], drafts: {} };
+      })
+    : { attention: [], drafts: {} };
+
   let stopped = false;
   let lastPushed: WidgetState | null = null;
   let lastQueuedFingerprint: string | null = null;
@@ -510,7 +531,32 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     string,
     Pick<SessionRow, "messages" | "runtimeStatus"> & { announcedMessages: number | null }
   >();
-  const attention = new Map<string, SessionAttentionKind>();
+  const attention = new Map<string, SessionAttention>(persisted.attention.map((item) => [item.key, item]));
+  const drafts = new Map<string, string>(Object.entries(persisted.drafts));
+  let persistenceTimer: ReturnType<typeof setTimeout> | null = null;
+  let persistenceInFlight: Promise<void> = Promise.resolve();
+  const flushPersistence = (): Promise<void> => {
+    if (!persistence) return Promise.resolve();
+    if (persistenceTimer) clearTimeout(persistenceTimer);
+    persistenceTimer = null;
+    const state = { attention: [...attention.values()], drafts: Object.fromEntries(drafts) };
+    persistenceInFlight = persistenceInFlight
+      .catch(() => undefined)
+      .then(() => persistence.save(state))
+      .catch((error: unknown) => log(`messenger state save failed (continuing): ${message(error)}`));
+    return persistenceInFlight;
+  };
+  const schedulePersistence = (): void => {
+    if (!persistence || persistenceTimer) return;
+    persistenceTimer = setTimeout(() => { void flushPersistence(); }, 300);
+    persistenceTimer.unref?.();
+  };
+  const markAttention = (key: string, kind: SessionAttentionKind, preview?: string): void => {
+    const next: SessionAttention = { key, kind, ...(preview ? { preview: preview.slice(0, 240) } : {}) };
+    if (JSON.stringify(attention.get(key)) === JSON.stringify(next)) return;
+    attention.set(key, next);
+    schedulePersistence();
+  };
   let priorRuntimeActive = false;
   let priorRuntimeKey: string | null = null;
 
@@ -559,7 +605,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       // others, hold message growth until the transcript has gone quiet: tool-stream churn should
       // never make the launcher's badge climb every five seconds.
       if (prior.runtimeStatus === "busy" && row.runtimeStatus === "idle") {
-        attention.set(row.key, "finished");
+        markAttention(row.key, "finished");
         announcedMessages = row.messages;
       } else if (
         row.runtimeStatus !== "busy" &&
@@ -569,7 +615,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         row.updatedAt !== null &&
         observedAt - row.updatedAt >= DEFAULT_ATTENTION_SETTLE_MS
       ) {
-        attention.set(row.key, "unseen");
+        markAttention(row.key, "unseen");
         announcedMessages = row.messages;
       } else if (row.messages !== null && prior.messages !== null && row.messages < prior.messages) {
         // A rewritten/compacted session establishes a new baseline; it is not negative unread.
@@ -582,15 +628,19 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       snapshot.turn.state !== "idle" || snapshot.requests.some((request) => request.status === "pending");
     const runtimeKey = attached?.key || priorRuntimeKey;
     if (priorRuntimeActive && !runtimeActive && priorRuntimeKey) {
-      attention.set(priorRuntimeKey, snapshot.error ? "failed" : "finished");
+      const lastAssistant = [...snapshot.conversation].reverse().find(
+        (entry) => entry.kind === "message" && entry.role === "assistant" && entry.text.trim() !== "",
+      );
+      const preview = lastAssistant?.kind === "message"
+        ? lastAssistant.text.replace(/\s+/g, " ").trim()
+        : undefined;
+      markAttention(priorRuntimeKey, snapshot.error ? "failed" : "finished", preview);
     }
     priorRuntimeActive = runtimeActive;
     priorRuntimeKey = runtimeActive ? runtimeKey : null;
 
     const visible = new Set(sessions.map((row) => row.key));
-    return [...attention]
-      .filter(([key]) => visible.has(key))
-      .map(([key, kind]) => ({ key, kind }));
+    return [...attention.values()].filter((item) => visible.has(item.key));
   };
 
   const pushNow = (force = false): Promise<void> => {
@@ -639,6 +689,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       activeDescriptor?.message_count !== undefined &&
       activeDescriptor.message_count > loadedMessages
     );
+    const draftKey = activeForeignKey ?? (activeDescriptor ? sessionKey(activeDescriptor.locator) : null);
     const state: WidgetState = {
       ...projected,
       pill: startup === "ready" ? projected.pill : { tone: "off", label: startupLabel },
@@ -650,6 +701,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       error: actionError ?? projected.error,
       recoverable: actionError !== null || projected.recoverable,
       history: { sessionLimit, hasMoreSessions, transcriptLimit, hasEarlier },
+      savedDraft: draftKey ? drafts.get(draftKey) ?? "" : "",
       attention: observeAttention(snapshot, sessions, attached, observedAt),
     };
     lastPushed = state;
@@ -905,9 +957,25 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       await pushNow();
       return;
     }
+    const draft = parseDraftIntent(intent.payload);
+    if (draft !== null) {
+      const snapshot = activeController().getSnapshot();
+      const ref = activeRef(snapshot);
+      const descriptor = ref?.sessionId ? descriptors.find((candidate) => matchesActive(candidate, ref)) : undefined;
+      const key = activeForeignKey ?? (descriptor ? sessionKey(descriptor.locator) : null);
+      if (key) {
+        if (draft.text === "") drafts.delete(key);
+        else drafts.set(key, draft.text);
+        schedulePersistence();
+      }
+      return;
+    }
     const acknowledged = parseAcknowledgeIntent(intent.payload);
     if (acknowledged !== null) {
-      if (attention.delete(acknowledged)) await pushNow();
+      if (attention.delete(acknowledged)) {
+        schedulePersistence();
+        await pushNow();
+      }
       return;
     }
     if (parseRefreshIntent(intent.payload)) {
@@ -1137,6 +1205,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       stopped = true;
       if (timer) clearTimeout(timer);
       timer = null;
+      await flushPersistence();
       stopRepush();
       stopDiscovery();
       stopIntentPump();

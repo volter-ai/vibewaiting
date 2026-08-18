@@ -27,6 +27,8 @@ export type SessionAttentionKind = "unseen" | "finished" | "failed";
 export interface SessionAttention {
   key: string;
   kind: SessionAttentionKind;
+  /** Last assistant text when the daemon directly observed it; absent for inventory-only notices. */
+  preview?: string;
 }
 
 export interface WidgetHarness {
@@ -190,6 +192,8 @@ export interface WidgetState {
     transcriptLimit: number;
     hasEarlier: boolean;
   };
+  /** Draft for only the currently attached conversation, restored by the daemon's durable store. */
+  savedDraft: string;
   /** Durable attention is owned by the daemon, not inferred from a red inventory badge in the page. */
   attention: SessionAttention[];
   /**
@@ -483,6 +487,7 @@ export function project(snapshot: SupercodeClientSnapshot, options: ProjectionOp
       transcriptLimit: options.maxEntries ?? DEFAULT_MAX_ENTRIES,
       hasEarlier: false,
     },
+    savedDraft: "",
     attention: [],
     sessions: [],
     attached: null,

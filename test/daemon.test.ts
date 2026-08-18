@@ -15,6 +15,7 @@ import {
   parseInterruptIntent,
   parseJoinIntent,
   parseDetachIntent,
+  parseDraftIntent,
   parseLoadEarlierIntent,
   parseLoadSessionsIntent,
   parseMountedIntent,
@@ -34,6 +35,7 @@ import type { WidgetState } from "../src/projection.js";
 import { sessionKey } from "../src/sessions.js";
 import { FakeHarnessClient, FakeWidgetHost, descriptor, localHarness, waitFor } from "./fakes.js";
 import { SupercodeController, type SupercodeClientSnapshot } from "@volter-ai-dev/supercode-client";
+import type { MessengerPersistence, PersistedMessengerState } from "../src/persistence.js";
 
 const running: Daemon[] = [];
 
@@ -145,6 +147,27 @@ describe("history intents", () => {
     expect(parseLoadEarlierIntent({ action: "loadEarlier", path: "/tmp/private" })).toBe(false);
   });
 });
+
+describe("draft intent", () => {
+  it("is bounded and target-free", () => {
+    expect(parseDraftIntent({ action: "draft", text: "keep this" })).toEqual({ text: "keep this" });
+    expect(parseDraftIntent({ action: "draft", text: "" })).toEqual({ text: "" });
+    expect(parseDraftIntent({ action: "draft", text: "x", key: "page-target" })).toBeNull();
+    expect(parseDraftIntent({ action: "draft", text: "x".repeat(50_001) })).toBeNull();
+  });
+});
+
+class MemoryPersistence implements MessengerPersistence {
+  state: PersistedMessengerState = { attention: [], drafts: {} };
+  saves = 0;
+  async load(): Promise<PersistedMessengerState> {
+    return structuredClone(this.state);
+  }
+  async save(state: PersistedMessengerState): Promise<void> {
+    this.state = structuredClone(state);
+    this.saves += 1;
+  }
+}
 
 describe("parseMountedIntent", () => {
   it("accepts only the target-free iframe mount handshake", () => {
@@ -357,6 +380,7 @@ describe("startDaemon", () => {
       "owned",
       "pill",
       "recoverable",
+      "savedDraft",
       "sessions",
       "startup",
       "strategy",
@@ -572,6 +596,7 @@ const BRIDGE = descriptor({
 async function sessionRig(
   sessions: FakeHarnessClient["sessions"] = [OWN, ATLAS, BRIDGE],
   suppliedClient?: FakeHarnessClient,
+  persistence?: MessengerPersistence,
 ): Promise<Rig & { logs: string[] }> {
   const client = suppliedClient ?? new FakeHarnessClient({ sessions });
   const logs: string[] = [];
@@ -586,6 +611,7 @@ async function sessionRig(
     now: () => 2_000_000,
     attachHost: async () => host,
     log: (m) => logs.push(m),
+    ...(persistence ? { persistence } : {}),
   });
   running.push(daemon);
   return { daemon, host, client, logs, attached: [], lastPush: () => host.pushes.at(-1) as WidgetState };
@@ -685,9 +711,38 @@ describe("the Sessions list", () => {
     await waitFor(() => lastPush().busy === false);
 
     const key = sessionKey(OWN.locator);
-    expect(lastPush().attention).toContainEqual({ key, kind: "finished" });
+    expect(lastPush().attention).toContainEqual(expect.objectContaining({ key, kind: "finished" }));
     await host.fireIntent(INTENT_QUEUE, { action: "ack", key });
     expect(lastPush().attention).toEqual([]);
+  });
+
+  it("restores durable completion attention with a last-assistant preview", async () => {
+    const store = new MemoryPersistence();
+    const first = await sessionRig([OWN], undefined, store);
+    await first.host.fireIntent(INTENT_QUEUE, { action: "send", text: "do the durable work" });
+    first.client.runtime.assistantMessage("Finished the durable parser migration.");
+    // Completion reconciliation reloads the harness-native store; make the fake store reflect the
+    // runtime event exactly as a real harness does before it announces turn completion.
+    first.client.sessions[0]!.text = "Finished the durable parser migration.";
+    first.client.runtime.turnCompleted();
+    await waitFor(() => first.lastPush().busy === false);
+    expect(first.lastPush().transcript.at(-1)?.text).toBe("Finished the durable parser migration.");
+    expect(first.lastPush().attention[0]).toMatchObject({
+      key: sessionKey(OWN.locator),
+      kind: "finished",
+      preview: "Finished the durable parser migration.",
+    });
+    await first.daemon.stop();
+
+    const second = await sessionRig([OWN], undefined, store);
+    expect(second.lastPush().attention[0]).toMatchObject({
+      key: sessionKey(OWN.locator),
+      kind: "finished",
+      preview: "Finished the durable parser migration.",
+    });
+    await second.host.fireIntent(INTENT_QUEUE, { action: "ack", key: sessionKey(OWN.locator) });
+    await second.daemon.stop();
+    expect(store.state.attention).toEqual([]);
   });
 
   it("uses an explicit foreign busy-to-idle transition as immediate completion", async () => {
@@ -718,6 +773,21 @@ describe("attaching", () => {
     // The global inbox already supplied ATLAS's exact locator. Opening it must not rescan every
     // transcript in that workspace just so the mirror controller can rediscover the same locator.
     expect(client.discoverQueries.some((query) => query.workspace === ATLAS.cwd)).toBe(false);
+  });
+
+  it("restores a per-conversation draft after the daemon and iframe are replaced", async () => {
+    const store = new MemoryPersistence();
+    const first = await sessionRig([OWN, ATLAS], undefined, store);
+    await first.host.fireIntent(INTENT_QUEUE, { action: "attach", key: sessionKey(ATLAS.locator) });
+    await first.host.fireIntent(INTENT_QUEUE, { action: "draft", text: "Remember this unfinished thought" });
+    await first.daemon.stop();
+
+    const second = await sessionRig([OWN, ATLAS], undefined, store);
+    await second.host.fireIntent(INTENT_QUEUE, { action: "attach", key: sessionKey(ATLAS.locator) });
+    expect(second.lastPush().savedDraft).toBe("Remember this unfinished thought");
+    await second.host.fireIntent(INTENT_QUEUE, { action: "draft", text: "" });
+    await second.daemon.stop();
+    expect(store.state.drafts).toEqual({});
   });
 
   it("expands a passive transcript in bounded windows while preserving one follower", async () => {

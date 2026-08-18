@@ -287,6 +287,7 @@ function SessionListRow({
   activity,
   openingLabel,
   error,
+  preview,
   onOpen,
 }: {
   row: SessionRow;
@@ -294,6 +295,7 @@ function SessionListRow({
   openingLabel: string | null;
   /** The last attach failure for THIS row, shown in place of its subtitle until it clears. */
   error: string | null;
+  preview: string | null;
   onOpen: () => void;
 }): JSX.Element {
   const opening = openingLabel !== null;
@@ -324,9 +326,9 @@ function SessionListRow({
             {error}
           </span>
         ) : (
-          <span class="vw-ssub">
+          <span class="vw-ssub" title={preview ?? undefined}>
             {status ? <span class="vw-row-status" data-activity={activity}>{status}</span> : <span class="vw-sharness">{harnessDisplayName(row.harness)}</span>}
-            {sessionDetail(row) !== "" ? <span class="vw-sdetail">{sessionDetail(row)}</span> : null}
+            {(preview ?? sessionDetail(row)) !== "" ? <span class="vw-sdetail">{preview ?? sessionDetail(row)}</span> : null}
           </span>
         )}
       </span>
@@ -409,6 +411,7 @@ function SessionList({
             activity={sessionActivity(state, row)}
             openingLabel={awaiting?.key === row.key ? openingMessage(now - awaiting.startedAt) : null}
             error={failure !== null && failure.key === row.key ? failure.message : null}
+            preview={state.attention.find((item) => item.key === row.key)?.preview ?? null}
             onOpen={(): void => onOpen(row)}
           />
         ))}
@@ -442,7 +445,7 @@ function chatMemory(state: WidgetState): RememberedChat {
   const key = chatMemoryKey(state);
   let memory = rememberedChats.get(key);
   if (!memory) {
-    memory = { draft: "", pending: null, queued: [], scrollTop: null, stick: true };
+    memory = { draft: state.savedDraft, pending: null, queued: [], scrollTop: null, stick: true };
     rememberedChats.set(key, memory);
   }
   return memory;
@@ -482,6 +485,15 @@ function Chat({ state, onBack, onNew, onClose }: { state: WidgetState; onBack: (
     memory.pending = pending;
     memory.queued = queued;
   }, [draft, memory, pending, queued]);
+
+  // Persist after the user pauses typing. The payload is target-free: the daemon scopes it to the
+  // conversation it selected, and an empty string clears the durable draft after send.
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      widget.sendIntent(INTENT_QUEUE, { action: "draft", text: draft });
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [draft, memoryKey]);
 
   useLayoutEffect(() => {
     const element = textarea.current;

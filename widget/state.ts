@@ -57,6 +57,7 @@ export const EMPTY_STATE: WidgetState = {
   recoverable: false,
   harnesses: [],
   history: { sessionLimit: 0, hasMoreSessions: false, transcriptLimit: 120, hasEarlier: false },
+  savedDraft: "",
   attention: [],
   sessions: [],
   attached: null,
@@ -311,9 +312,9 @@ function readHarness(raw: unknown): WidgetHarness | null {
 
 function readAttention(raw: unknown): SessionAttention | null {
   if (!isRecord(raw)) return null;
-  const { key, kind } = raw;
+  const { key, kind, preview } = raw;
   if (typeof key !== "string" || typeof kind !== "string" || !ATTENTION_KINDS.has(kind as SessionAttentionKind)) return null;
-  return { key, kind: kind as SessionAttentionKind };
+  return { key, kind: kind as SessionAttentionKind, ...(typeof preview === "string" && preview !== "" ? { preview } : {}) };
 }
 
 /** Normalize the merged patch accumulator into a `WidgetState` — never throws, never renders `undefined`. */
@@ -366,6 +367,7 @@ export function readWidgetState(raw: unknown): WidgetState {
           hasEarlier: raw["history"]["hasEarlier"] === true,
         }
       : EMPTY_STATE.history,
+    savedDraft: typeof raw["savedDraft"] === "string" ? raw["savedDraft"] : "",
     attention: Array.isArray(raw["attention"])
       ? raw["attention"].map(readAttention).filter((a): a is SessionAttention => a !== null)
       : [],

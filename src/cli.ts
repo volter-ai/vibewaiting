@@ -11,6 +11,7 @@ import type { HarnessId } from "@volter-ai-dev/supercode-harness-sdk";
 import { LucarneClient } from "lucarne";
 import type { Session } from "lucarne";
 import { startDaemon, type Daemon } from "./daemon.js";
+import { FileMessengerPersistence } from "./persistence.js";
 
 const DEFAULT_ENGINE_URL = "http://127.0.0.1:7800";
 
@@ -135,6 +136,7 @@ async function main(): Promise<void> {
       harness: args.harness,
       policy: args.policy,
       client: harnessClient,
+      persistence: new FileMessengerPersistence(),
       log: (m) => process.stdout.write(`${m}\n`),
     });
   } catch (e) {
