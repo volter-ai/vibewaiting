@@ -3,16 +3,20 @@ import {
   EMPTY_STATE,
   attachOutcome,
   attachSettled,
+  activityLabel,
   filterSessionRows,
   harnessDisplayName,
   isSendKey,
   listRows,
   nearBottom,
   openingMessage,
+  operationLabel,
+  orderedSessionRows,
   pendingResolved,
   pillFor,
   readWidgetState,
   roleLabel,
+  sessionActivity,
   sessionDetail,
   sessionDisplayName,
   startupMessage,
@@ -213,6 +217,7 @@ describe("session rows in a patch", () => {
           messages: 42,
           active: true,
           live: true,
+          runtimeStatus: "busy",
         },
         { harness: "codex", name: "no key" },
         "not an object",
@@ -278,13 +283,16 @@ describe("chat-list labels and search", () => {
     messages: 42,
     active: false,
     live: false,
+    runtimeStatus: null,
   };
   const modelOnly = { ...titled, key: "c1", harness: "claude-code", name: "vgai-engine", title: "claude-opus-5" };
+  const idOnly = { ...titled, key: "c2", harness: "claude-code", name: "vibewaiting", title: "8e8af396" };
 
   it("puts a meaningful conversation title first but keeps model ids as metadata", () => {
     expect(sessionDisplayName(titled)).toBe("Fix nested prefab remapping");
     expect(sessionDetail(titled)).toBe("unity-fps-arc · 42 msgs");
     expect(sessionDisplayName(modelOnly)).toBe("vgai-engine");
+    expect(sessionDisplayName(idOnly)).toBe("vibewaiting");
     expect(sessionDetail(modelOnly)).toBe("claude-opus-5 · 42 msgs");
     expect(harnessDisplayName("claude-code")).toBe("Claude Code");
   });
@@ -294,6 +302,41 @@ describe("chat-list labels and search", () => {
     expect(filterSessionRows([titled, modelOnly], "vgai").map((row) => row.key)).toEqual(["c1"]);
     expect(filterSessionRows([titled, modelOnly], "claude").map((row) => row.key)).toEqual(["c1"]);
     expect(filterSessionRows([titled, modelOnly], "")).toHaveLength(2);
+  });
+});
+
+describe("messenger activity", () => {
+  const row = (key: string, updatedAt: number, active = false) => ({
+    key,
+    harness: "codex",
+    name: key,
+    cwd: `/tmp/${key}`,
+    title: "",
+    age: "now",
+    updatedAt,
+    messages: 1,
+    active,
+    live: false,
+    runtimeStatus: null,
+  });
+
+  it("uses one honest vocabulary and orders attention before mere recency", () => {
+    const state = {
+      ...EMPTY_STATE,
+      startup: "ready" as const,
+      sessions: [row("recent", 30), row("unread", 10), row("working", 20, true)],
+      busy: true,
+      attention: [{ key: "unread", kind: "unseen" as const }],
+    };
+    expect(sessionActivity(state, state.sessions[2]!)).toBe("working");
+    expect(activityLabel(sessionActivity(state, state.sessions[1]!))).toBe("New activity");
+    expect(orderedSessionRows(state).map((item) => item.key)).toEqual(["working", "unread", "recent"]);
+  });
+
+  it("turns controller operation ids into calm, specific progress copy", () => {
+    expect(operationLabel("observe")).toBe("Opening chat…");
+    expect(operationLabel("interrupt")).toBe("Stopping…");
+    expect(operationLabel(null)).toBeNull();
   });
 });
 
@@ -341,30 +384,17 @@ describe("openingMessage", () => {
 });
 
 describe("pillFor", () => {
-  const base = { ...EMPTY_STATE, pill: { tone: "live" as const, label: "claude-code ready" } };
+  const base = { ...EMPTY_STATE, startup: "ready" as const, pill: { tone: "live" as const, label: "claude-code ready" } };
 
-  it("reports the attached session's own status", () => {
+  it("is a calm launcher when the attached session is idle", () => {
     const state = { ...base, attached: { key: "k", harness: "claude-code", name: "atlas", cwd: "~/a", title: "" } };
-    expect(pillFor(state)).toEqual({ tone: "live", label: "Claude Code ready" });
+    expect(pillFor(state)).toEqual({ tone: "off", label: "Agent chats" });
   });
 
-  it("counts what is waiting when nothing is attached", () => {
-    const row = {
-      key: "k",
-      harness: "codex",
-      name: "atlas",
-      cwd: "~/a",
-      title: "t",
-      age: "now",
-      updatedAt: 1,
-      messages: 1,
-      active: false,
-      live: true,
-    };
-    expect(pillFor({ ...base, sessions: [row] })).toEqual({ tone: "live", label: "1 session" });
-    expect(pillFor({ ...base, sessions: [row, { ...row, key: "k2" }] })).toEqual({ tone: "live", label: "2 sessions" });
-    // Nothing attached and nothing found: the host's own words stand.
-    expect(pillFor(base)).toEqual({ tone: "live", label: "claude-code ready" });
+  it("reports actual attention, work, and input instead of inventory counts", () => {
+    expect(pillFor({ ...base, attention: [{ key: "k", kind: "unseen" }] })).toEqual({ tone: "warn", label: "1 unread chat" });
+    expect(pillFor({ ...base, busy: true, harness: "codex" })).toEqual({ tone: "live", label: "Codex is working" });
+    expect(pillFor({ ...base, needsInput: true, harness: "codex" })).toEqual({ tone: "warn", label: "Codex needs input" });
   });
 });
 
@@ -380,6 +410,7 @@ describe("listRows", () => {
     messages: 3,
     active: false,
     live: false,
+    runtimeStatus: null,
   };
 
   it("is just what discovery found, once the attached session is among it", () => {

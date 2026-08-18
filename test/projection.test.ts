@@ -378,6 +378,8 @@ describe("project", () => {
         { id: "b", role: "assistant", text: "hey", ts: null, truncated: false },
       ],
       busy: false,
+      operation: null,
+      needsInput: false,
       harness: "codex",
       mode: "control",
       canSend: true,
@@ -386,6 +388,9 @@ describe("project", () => {
       workspace: "/w",
       taskPlan: { source: "none", items: [], residueCount: 0, observedAt: null },
       error: null,
+      recoverable: false,
+      harnesses: [],
+      attention: [],
       // Machine-wide facts the snapshot cannot know: the daemon merges them over this result.
       sessions: [],
       attached: null,

@@ -1,8 +1,9 @@
-// The iframe app — ONE panel, the minified-messenger shape: a list of every coding session on the
-// machine, and one session's chat behind a tap.
+// The iframe app — ONE panel in the minimized-messenger shape: the active conversation opens
+// first, with the machine-wide inbox and new-chat composer one tap away.
 //
-//   list  ──tap a row──▶  chat (transcript + composer)
-//         ◀──── ‹ back ───
+//   inbox  ──tap a row──▶  opening ──host confirms──▶ chat
+//     ▲                         │                         │
+//     └─────────────────────────┴────── ‹ back ──────────┘
 //
 // It is bundled into a single self-contained srcdoc document by `widget/build.mjs`
 // (`lucarne/widget/build`), so there is no module loading, no network, and no framework CDN inside
@@ -10,8 +11,8 @@
 // out as one named intent (`send` from the composer, `attach` from a row).
 //
 // The view is LOCAL state: which screen you are on is not a fact about the machine, so the host is
-// never told and a re-push never yanks you between screens. The one crossing point is the attach
-// handshake — the list waits for the host to confirm the new session before sliding to the chat.
+// never told and a re-push never yanks you between screens. Attach begins an immediate loading
+// surface; the old transcript is never shown under the new conversation's name.
 import { createWidget } from "lucarne/widget/runtime";
 import { mountPanel } from "lucarne/widget/preact";
 import MarkdownIt from "markdown-it";
@@ -20,15 +21,21 @@ import type { JSX } from "preact";
 import {
   ATTACH_ERROR_LINGER_MS,
   attachOutcome,
+  attachSettled,
   filterSessionRows,
   harnessDisplayName,
   isSendKey,
-  listRows,
   nearBottom,
+  orderedSessionRows,
+  operationLabel,
   pendingResolved,
   pillFor,
   readWidgetState,
   roleLabel,
+  activityLabel,
+  attentionFor,
+  messageTime,
+  sessionActivity,
   sessionDetail,
   sessionDisplayName,
   openingMessage,
@@ -47,11 +54,43 @@ import {
   toolTarget,
   type ToolCategory,
 } from "./presentation.js";
+import { HarnessLogo } from "./harness-logo.js";
 
 const NS = "vibewaiting";
 const INTENT_QUEUE = "agent";
 
 const widget = createWidget({ ns: NS, version: 1 });
+
+// CSS viewport units inside the widget describe the iframe itself. While collapsed that viewport
+// is only the launcher's size, so `100vw` creates a circular trap: a 46px iframe asks the host for
+// a 46px panel and can never grow. A srcdoc iframe inherits the embedding page's origin; read that
+// real viewport when available, clamp the messenger to it, and let Lucarne's normal size handshake
+// fit the host to the resulting fixed dimensions.
+function syncPanelViewport(requestResize = true): void {
+  let pageWidth = 420 + 16;
+  let pageHeight = 480 + 16;
+  try {
+    pageWidth = window.parent.innerWidth;
+    pageHeight = window.parent.innerHeight;
+  } catch {
+    // A stricter embed still gets the safe desktop dimensions below.
+  }
+  const width = Math.max(280, Math.min(420, pageWidth - 16));
+  const height = Math.max(280, Math.min(480, pageHeight - 16));
+  document.documentElement.style.setProperty("--vw-panel-width", `${width}px`);
+  document.documentElement.style.setProperty("--vw-panel-height", `${height}px`);
+  if (requestResize) widget.requestResize();
+}
+
+syncPanelViewport(false);
+try {
+  const pageWindow = window.parent;
+  const onPageResize = (): void => syncPanelViewport();
+  pageWindow.addEventListener("resize", onPageResize);
+  window.addEventListener("unload", () => pageWindow.removeEventListener("resize", onPageResize), { once: true });
+} catch {
+  // Cross-origin embedders simply retain the fallback dimensions.
+}
 
 const markdown = new MarkdownIt({ html: false, linkify: true, breaks: false });
 const defaultLinkOpen = markdown.renderer.rules.link_open;
@@ -164,23 +203,35 @@ function RequestCard({ entry, canRespond }: { entry: TranscriptEntry; canRespond
   );
 }
 
-function MessageRow({ entry, pending }: { entry: TranscriptEntry; pending?: boolean | undefined }): JSX.Element {
+function MessageRow({
+  entry,
+  pending,
+  failed,
+  onRetry,
+}: {
+  entry: TranscriptEntry;
+  pending?: boolean | undefined;
+  failed?: boolean | undefined;
+  onRetry?: (() => void) | undefined;
+}): JSX.Element {
   const [copied, setCopied] = useState(false);
   const copy = (): void => {
     void navigator.clipboard?.writeText(entry.text).then(() => setCopied(true)).catch(() => undefined);
     setTimeout(() => setCopied(false), 1500);
   };
   return (
-    <article class={`vw-message vw-${entry.role}${pending ? " vw-pending" : ""}`} aria-label={pending ? "user message sending" : `${roleLabel(entry.role)} message`}>
+    <article class={`vw-message vw-${entry.role}${pending ? " vw-pending" : ""}${failed ? " vw-message-failed" : ""}`} aria-label={failed ? "user message failed" : pending ? "user message sending" : `${roleLabel(entry.role)} message`}>
       <MarkdownContent value={entry.text} />
       {entry.truncated ? <span class="vw-cut">[truncated]</span> : null}
       {entry.role === "assistant" ? <button class="vw-copy" type="button" aria-label={copied ? "Response copied" : "Copy response"} onClick={copy}>{copied ? "✓" : "Copy"}</button> : null}
-      {pending ? <span class="vw-sending">sending…</span> : null}
+      {entry.ts !== null ? <time class="vw-message-time" dateTime={new Date(entry.ts).toISOString()}>{messageTime(entry.ts)}</time> : null}
+      {pending && !failed ? <span class="vw-sending">Sending…</span> : null}
+      {failed ? <span class="vw-send-failed">Not sent{onRetry ? <button type="button" onClick={onRetry}>Retry</button> : null}</span> : null}
     </article>
   );
 }
 
-function TranscriptRow({ entry, pending, canRespond }: { entry: TranscriptEntry; pending?: boolean | undefined; canRespond: boolean }): JSX.Element | null {
+function TranscriptRow({ entry, pending, failed, onRetry, canRespond }: { entry: TranscriptEntry; pending?: boolean | undefined; failed?: boolean | undefined; onRetry?: (() => void) | undefined; canRespond: boolean }): JSX.Element | null {
   if (entry.role === "system") return null;
   if (entry.role === "reasoning") {
     return (
@@ -193,34 +244,35 @@ function TranscriptRow({ entry, pending, canRespond }: { entry: TranscriptEntry;
   if (entry.role === "request") return <RequestCard entry={entry} canRespond={canRespond} />;
   if (entry.role === "notice") return <div class="vw-notice">{entry.text}</div>;
   if (entry.role === "tool") return <ToolRow entry={entry} workspace="" />;
-  return <MessageRow entry={entry} pending={pending} />;
+  return <MessageRow entry={entry} pending={pending} failed={failed} onRetry={onRetry} />;
 }
 
 function SessionListRow({
   row,
+  activity,
   openingLabel,
   error,
   onOpen,
 }: {
   row: SessionRow;
+  activity: ReturnType<typeof sessionActivity>;
   openingLabel: string | null;
   /** The last attach failure for THIS row, shown in place of its subtitle until it clears. */
   error: string | null;
   onOpen: () => void;
 }): JSX.Element {
   const opening = openingLabel !== null;
-  // The dot is LIVENESS — is anyone working in this session right now — and nothing else. Which
-  // session the panel is following is said by the row highlight and the chevron, because a dot that
-  // lit for exactly one row read as "every other session is dead" (which is what it was saying).
+  const status = activityLabel(activity);
+  const harnessLabel = harnessDisplayName(row.harness);
   return (
     <button
       class={`vw-srow${row.active ? " vw-active" : ""}${opening ? " vw-srow-opening" : ""}`}
       type="button"
       onClick={onOpen}
       aria-busy={opening}
-      title={`${row.harness} · ${row.cwd}${row.live ? " · active now" : ""}`}
+      title={`${harnessDisplayName(row.harness)} · ${row.cwd}${status ? ` · ${status}` : ""}`}
     >
-      <span class={`vw-dot${row.live ? " vw-live" : ""}`} title={row.live ? "active now" : "idle"} />
+      <HarnessLogo id={row.harness} label={harnessLabel} activity={activity} size={32} />
       <span class="vw-scol">
         <span class="vw-sline">
           <span class="vw-sname">{sessionDisplayName(row)}</span>
@@ -239,7 +291,7 @@ function SessionListRow({
           </span>
         ) : (
           <span class="vw-ssub">
-            <span class="vw-sharness">{harnessDisplayName(row.harness)}</span>
+            {status ? <span class="vw-row-status" data-activity={activity}>{status}</span> : <span class="vw-sharness">{harnessDisplayName(row.harness)}</span>}
             {sessionDetail(row) !== "" ? <span class="vw-sdetail">{sessionDetail(row)}</span> : null}
           </span>
         )}
@@ -273,6 +325,8 @@ function SessionList({
   failure,
   query,
   onQuery,
+  onNew,
+  onClose,
   onOpen,
 }: {
   state: WidgetState;
@@ -282,39 +336,49 @@ function SessionList({
   failure: { key: string; message: string } | null;
   query: string;
   onQuery: (query: string) => void;
+  onNew: () => void;
+  onClose: () => void;
   onOpen: (row: SessionRow) => void;
 }): JSX.Element {
-  const allRows = listRows(state);
+  const allRows = orderedSessionRows(state);
   const rows = filterSessionRows(allRows, query);
   const loading = state.startup !== "ready";
   return (
-    <div class="vw-list">
-      {loading ? <StartupStatus state={state} compact={rows.length > 0} /> : null}
-      {!loading && allRows.length > 4 ? (
-        <label class="vw-search">
-          <span aria-hidden="true">⌕</span>
-          <input
-            type="search"
-            aria-label="Search chats"
-            placeholder="Search chats"
-            value={query}
-            onInput={(event): void => onQuery(event.currentTarget.value)}
+    <div class="vw-screen">
+      <div class="vw-app-head">
+        <span class="vw-head-copy"><strong>Chats</strong><small>{state.attention.length ? `${state.attention.length} unread` : `${allRows.length} recent`}</small></span>
+        <button class="vw-icon" type="button" aria-label="New chat" title="New chat" disabled={state.busy || !state.harnesses.some((harness) => harness.startable)} onClick={onNew}>＋</button>
+        <button class="vw-icon" type="button" aria-label="Close chat" title="Close chat" onClick={onClose}>×</button>
+      </div>
+      <div class="vw-list">
+        {loading ? <StartupStatus state={state} compact={rows.length > 0} /> : null}
+        {!loading && allRows.length > 4 ? (
+          <label class="vw-search">
+            <span aria-hidden="true">⌕</span>
+            <input
+              type="search"
+              aria-label="Search chats"
+              placeholder="Search chats"
+              value={query}
+              onInput={(event): void => onQuery(event.currentTarget.value)}
+            />
+            <small role="status" aria-label={`${rows.length} chats`}>{rows.length}</small>
+          </label>
+        ) : null}
+        {!loading && rows.length === 0 ? (
+          <div class="vw-empty">{query.trim() ? "No chats match your search." : state.error ?? "No coding chats found."}</div>
+        ) : null}
+        {rows.map((row) => (
+          <SessionListRow
+            key={row.key}
+            row={row}
+            activity={sessionActivity(state, row)}
+            openingLabel={awaiting?.key === row.key ? openingMessage(now - awaiting.startedAt) : null}
+            error={failure !== null && failure.key === row.key ? failure.message : null}
+            onOpen={(): void => onOpen(row)}
           />
-          <small role="status" aria-label={`${rows.length} chats`}>{rows.length}</small>
-        </label>
-      ) : null}
-      {!loading && rows.length === 0 ? (
-        <div class="vw-empty">{query.trim() ? "No chats match your search." : state.error ?? "No coding chats found."}</div>
-      ) : null}
-      {rows.map((row) => (
-        <SessionListRow
-          key={row.key}
-          row={row}
-          openingLabel={awaiting?.key === row.key ? openingMessage(now - awaiting.startedAt) : null}
-          error={failure !== null && failure.key === row.key ? failure.message : null}
-          onOpen={(): void => onOpen(row)}
-        />
-      ))}
+        ))}
+      </div>
     </div>
   );
 }
@@ -328,7 +392,7 @@ interface RememberedChat {
 }
 
 const rememberedChats = new Map<string, RememberedChat>();
-const rememberedUi: { view: View; query: string } = { view: "list", query: "" };
+const rememberedUi: { view: View; query: string } = { view: "chat", query: "" };
 let mountedChatKey: string | null = null;
 
 function chatMemoryKey(state: WidgetState): string {
@@ -345,17 +409,33 @@ function chatMemory(state: WidgetState): RememberedChat {
   return memory;
 }
 
-function Chat({ state, onBack }: { state: WidgetState; onBack: () => void }): JSX.Element {
+function Chat({ state, onBack, onNew, onClose }: { state: WidgetState; onBack: () => void; onNew: () => void; onClose: () => void }): JSX.Element {
   const memory = chatMemory(state);
   const memoryKey = chatMemoryKey(state);
   const [draft, setDraft] = useState(memory.draft);
   const [pending, setPending] = useState<string | null>(memory.pending);
   const [queued, setQueued] = useState<string[]>(memory.queued);
   const scroller = useRef<HTMLDivElement | null>(null);
+  const content = useRef<HTMLDivElement | null>(null);
   const textarea = useRef<HTMLTextAreaElement | null>(null);
   const stick = useRef(memory.stick);
+  const pinnedUntil = useRef(0);
+  const [atBottom, setAtBottom] = useState(memory.stick);
   const restoredScroll = useRef(false);
   const focusedComposer = useRef(false);
+  const [dismissedError, setDismissedError] = useState<string | null>(null);
+  const currentAttention = state.attached?.key ? attentionFor(state, state.attached.key) : null;
+
+  useEffect(() => {
+    const key = state.attached?.key;
+    // A completion can arrive while this exact chat is already open. Acknowledging only on
+    // navigation would leave the launcher claiming there is unread work the reader just watched.
+    if (key && currentAttention) widget.sendIntent(INTENT_QUEUE, { action: "ack", key });
+  }, [currentAttention, state.attached?.key]);
+
+  useEffect(() => {
+    if (state.error !== dismissedError) setDismissedError(null);
+  }, [state.error]);
 
   useEffect(() => {
     memory.draft = draft;
@@ -396,11 +476,28 @@ function Chat({ state, onBack }: { state: WidgetState; onBack: () => void }): JS
     if (!el) return;
     if (!restoredScroll.current) {
       el.scrollTop = memory.scrollTop ?? el.scrollHeight;
+      pinnedUntil.current = performance.now() + 120;
       restoredScroll.current = true;
       return;
     }
-    if (stick.current) el.scrollTop = el.scrollHeight;
+    if (stick.current) {
+      pinnedUntil.current = performance.now() + 120;
+      el.scrollTop = el.scrollHeight;
+    }
   });
+
+  useEffect(() => {
+    const el = scroller.current;
+    const inner = content.current;
+    if (!el || !inner || typeof ResizeObserver === "undefined") return undefined;
+    const observer = new ResizeObserver(() => {
+      if (!stick.current) return;
+      pinnedUntil.current = performance.now() + 120;
+      el.scrollTop = el.scrollHeight;
+    });
+    observer.observe(inner);
+    return () => observer.disconnect();
+  }, [memoryKey]);
 
   useLayoutEffect(() => {
     const el = textarea.current;
@@ -418,10 +515,24 @@ function Chat({ state, onBack }: { state: WidgetState; onBack: () => void }): JS
   const onScroll = (): void => {
     const el = scroller.current;
     if (el) {
-      stick.current = nearBottom(el);
+      const bottom = nearBottom(el);
+      if (!bottom && performance.now() < pinnedUntil.current) return;
+      stick.current = bottom;
+      setAtBottom(bottom);
       memory.stick = stick.current;
       memory.scrollTop = el.scrollTop;
     }
+  };
+
+  const pin = (): void => {
+    const el = scroller.current;
+    stick.current = true;
+    memory.stick = true;
+    setAtBottom(true);
+    if (!el) return;
+    pinnedUntil.current = performance.now() + 120;
+    el.scrollTop = el.scrollHeight;
+    memory.scrollTop = el.scrollTop;
   };
 
   const send = (): void => {
@@ -441,8 +552,7 @@ function Chat({ state, onBack }: { state: WidgetState; onBack: () => void }): JS
     memory.pending = text;
     setPending(text);
     setDraft("");
-    stick.current = true;
-    memory.stick = true;
+    pin();
   };
 
   const interrupt = (): void => {
@@ -457,48 +567,84 @@ function Chat({ state, onBack }: { state: WidgetState; onBack: () => void }): JS
 
   const empty = state.transcript.length === 0 && pending === null;
   const attached = state.attached;
+  const harnessName = harnessDisplayName(attached?.harness ?? state.harness);
   // Read-only is the controller's own honest capability for a session someone else is driving; the
   // composer says so rather than offering a send that can only fail.
   const readOnly = state.mode === "mirror" && !state.canSend;
   const blocks = conversationBlocks(state.transcript);
+  const status = state.needsInput
+    ? "Needs input"
+    : state.busy
+      ? "Working"
+      : readOnly
+        ? "Read-only"
+        : "Ready";
+  const op = operationLabel(state.operation);
+  const visibleError = state.error !== null && state.error !== dismissedError ? state.error : null;
+  const headerTitle = attached ? sessionDisplayName(attached) : harnessName || "Agent chat";
+  const headerStatus = state.startup === "ready"
+    ? `${harnessName || "Coding agent"} · ${status}`
+    : startupMessage(state.startup, state.harness).title;
 
   return (
     <div class="vw-chat">
-      <div class="vw-head">
-        <button class="vw-back" type="button" onClick={onBack} title="All chats" aria-label="Back to chats">
+      <div class="vw-app-head vw-chat-head">
+        <button class="vw-icon" type="button" onClick={onBack} title="All chats" aria-label="Back to chats">
           ‹
         </button>
-        <span class="vw-hname">{attached ? sessionDisplayName(attached) : harnessDisplayName(state.harness)}</span>
-        <span class="vw-hsub">{harnessDisplayName(attached?.harness ?? state.harness)}</span>
-        {readOnly ? <span class="vw-ro">read-only</span> : null}
+        <HarnessLogo id={attached?.harness ?? state.harness} label={harnessName || "Agent"} size={28} />
+        <span class="vw-head-copy">
+          <strong>{headerTitle}</strong>
+          <small data-state={state.needsInput ? "needs-input" : state.busy ? "working" : readOnly ? "mirror" : "ready"}>{headerStatus}</small>
+        </span>
+        <button class="vw-icon" type="button" aria-label="New chat" title="New chat" disabled={state.busy || !state.harnesses.some((harness) => harness.startable)} onClick={onNew}>＋</button>
+        <button class="vw-icon" type="button" aria-label="Close chat" title="Close chat" onClick={onClose}>×</button>
       </div>
+      {op ? <div class="vw-operation" role="status"><span class="vw-spinner vw-spinner-small" aria-hidden="true" />{op}</div> : null}
+      {visibleError ? (
+        <div class="vw-error" role="alert">
+          <span>{visibleError}</span>
+          {state.recoverable ? <button type="button" onClick={(): void => { widget.sendIntent(INTENT_QUEUE, { action: "refresh" }); }}>Retry</button> : null}
+          <button type="button" aria-label="Dismiss agent error" onClick={(): void => setDismissedError(visibleError)}>×</button>
+        </div>
+      ) : null}
       <div class="vw-scroll" ref={scroller} onScroll={onScroll} tabIndex={0} aria-label="Conversation">
-        {empty && state.startup !== "ready" ? <StartupStatus state={state} /> : null}
-        {empty && state.startup === "ready" ? (
-          <div class="vw-empty">{state.error ?? (state.harness ? `${harnessDisplayName(state.harness)} is listening. Say something.` : "No transcript yet.")}</div>
-        ) : null}
-        {blocks.map((block) =>
-          block.kind === "tool-group"
-            ? <ToolGroup key={block.id} tools={block.tools} workspace={state.workspace} />
-            : <TranscriptRow key={block.id} entry={block.entry} canRespond={state.canRespond} />,
-        )}
-        {pending !== null ? (
-          <TranscriptRow
-            key="vw-pending"
-            entry={{ id: "vw-pending", role: "user", text: pending, ts: null, truncated: false }}
-            pending
-            canRespond={false}
-          />
-        ) : null}
-        {state.busy ? (
-          <div class="vw-typing" role="status" aria-label={`${harnessDisplayName(state.harness)} is working`}>
-            <span class="vw-typing-mark" aria-hidden="true">✦</span>
-            <span class="vw-typing-dots" aria-hidden="true"><i /><i /><i /></span>
-            <span>{harnessDisplayName(state.harness)} is working</span>
-          </div>
-        ) : null}
+        <div ref={content}>
+          {empty && state.startup !== "ready" ? <StartupStatus state={state} /> : null}
+          {empty && state.startup === "ready" ? (
+            <div class="vw-empty">{state.error ?? (state.harness ? `${harnessDisplayName(state.harness)} is listening. Say something.` : "No transcript yet.")}</div>
+          ) : null}
+          {blocks.map((block) =>
+            block.kind === "tool-group"
+              ? <ToolGroup key={block.id} tools={block.tools} workspace={state.workspace} />
+              : <TranscriptRow key={block.id} entry={block.entry} canRespond={state.canRespond} />,
+          )}
+          {pending !== null ? (
+            <TranscriptRow
+              key="vw-pending"
+              entry={{ id: "vw-pending", role: "user", text: pending, ts: null, truncated: false }}
+              pending
+              failed={state.error !== null && !state.busy}
+              onRetry={(): void => {
+                memory.pending = null;
+                setPending(null);
+                memory.draft = pending;
+                setDraft(pending);
+                textarea.current?.focus();
+              }}
+              canRespond={false}
+            />
+          ) : null}
+          {state.busy ? (
+            <div class="vw-typing" role="status" aria-label={`${harnessDisplayName(state.harness)} is working`}>
+              <span class="vw-typing-mark" aria-hidden="true">✦</span>
+              <span class="vw-typing-dots" aria-hidden="true"><i /><i /><i /></span>
+              <span>{harnessDisplayName(state.harness)} is working</span>
+            </div>
+          ) : null}
+        </div>
       </div>
-      {state.error !== null && !empty ? <div class="vw-error">{state.error}</div> : null}
+      {!atBottom ? <button class="vw-latest" type="button" onClick={pin}>↓ Latest</button> : null}
       <div class="vw-composer">
         {queued.length ? (
           <div class="vw-queue" role="status">
@@ -548,16 +694,129 @@ function Chat({ state, onBack }: { state: WidgetState; onBack: () => void }): JS
   );
 }
 
+let rememberedNewDraft = "";
+let rememberedNewHarness = "";
+
+function NewChat({
+  state,
+  onBack,
+  onClose,
+  onStarted,
+}: {
+  state: WidgetState;
+  onBack: () => void;
+  onClose: () => void;
+  onStarted: () => void;
+}): JSX.Element {
+  const startable = state.harnesses.filter((harness) => harness.startable);
+  const initialHarness = rememberedNewHarness || startable.find((item) => item.id === state.harness)?.id || startable[0]?.id || "";
+  const [harness, setHarness] = useState(initialHarness);
+  const [draft, setDraft] = useState(rememberedNewDraft);
+  const [starting, setStarting] = useState<string | null>(null);
+  const textarea = useRef<HTMLTextAreaElement | null>(null);
+
+  useEffect(() => textarea.current?.focus(), []);
+  useEffect(() => {
+    rememberedNewHarness = harness;
+    rememberedNewDraft = draft;
+  }, [draft, harness]);
+  useEffect(() => {
+    if (!starting) return;
+    if (pendingResolved(starting, state.transcript) || (state.mode === "control" && state.harness === harness && state.busy)) {
+      rememberedNewDraft = "";
+      setDraft("");
+      onStarted();
+    } else if (state.error && !state.operation && !state.busy) {
+      setStarting(null);
+    }
+  }, [harness, onStarted, starting, state.busy, state.error, state.harness, state.mode, state.operation, state.transcript]);
+
+  const send = (): void => {
+    const text = draft.trim();
+    if (!text || !harness || starting) return;
+    setStarting(text);
+    widget.sendIntent(INTENT_QUEUE, { action: "new", harness, text });
+  };
+
+  return (
+    <div class="vw-chat vw-new-chat">
+      <div class="vw-app-head">
+        <button class="vw-icon" type="button" aria-label="Cancel new chat" title="Back" onClick={onBack}>‹</button>
+        <span class="vw-head-copy"><strong>New chat</strong><small>No session is created until you send</small></span>
+        <button class="vw-icon" type="button" aria-label="Close chat" title="Close chat" onClick={onClose}>×</button>
+      </div>
+      <div class="vw-new-body">
+        <span class="vw-new-mark" aria-hidden="true">✦</span>
+        <strong>What should the agent build or fix?</strong>
+        <span>Choose a coding harness and send the first message.</span>
+      </div>
+      {state.error && starting ? <div class="vw-error" role="alert"><span>{state.error}</span></div> : null}
+      <div class="vw-composer">
+      <div class="vw-new-picker">
+          <HarnessLogo id={harness} label={state.harnesses.find((item) => item.id === harness)?.label ?? harness} size={24} />
+          <label for="vw-new-harness">Coding harness</label>
+          <select id="vw-new-harness" value={harness} disabled={Boolean(starting)} onChange={(event): void => setHarness(event.currentTarget.value)}>
+            {state.harnesses.map((item) => <option key={item.id} value={item.id} disabled={!item.startable}>{item.label}{item.startable ? "" : " · unavailable"}</option>)}
+          </select>
+        </div>
+        <div class="vw-envelope">
+          <textarea
+            ref={textarea}
+            class="vw-input"
+            rows={3}
+            aria-label="Message coding agent"
+            placeholder={startable.length ? "What should the agent do?" : "No coding harness is available"}
+            value={draft}
+            disabled={!startable.length || Boolean(starting)}
+            onInput={(event): void => setDraft(event.currentTarget.value)}
+            onKeyDown={(event): void => {
+              if (!isSendKey(event)) return;
+              event.preventDefault();
+              send();
+            }}
+          />
+          <div class="vw-composer-foot">
+            <span class="vw-agent-id">{state.harnesses.find((item) => item.id === harness)?.label ?? "Agent"}</span>
+            <button class="vw-send" type="button" aria-label="Start chat" disabled={!draft.trim() || !harness || Boolean(starting)} onClick={send}>{starting ? <span class="vw-spinner" aria-hidden="true" /> : "↑"}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function OpeningChat({ row, elapsed, onBack, onClose }: { row: SessionRow; elapsed: number; onBack: () => void; onClose: () => void }): JSX.Element {
+  return (
+    <div class="vw-chat">
+      <div class="vw-app-head">
+        <button class="vw-icon" type="button" aria-label="Back to chats" onClick={onBack}>‹</button>
+        <HarnessLogo id={row.harness} label={harnessDisplayName(row.harness)} size={28} />
+        <span class="vw-head-copy"><strong>{sessionDisplayName(row)}</strong><small>{harnessDisplayName(row.harness)} · Opening</small></span>
+        <button class="vw-icon" type="button" aria-label="Close chat" onClick={onClose}>×</button>
+      </div>
+      <div class="vw-opening" role="status" aria-busy="true">
+        <span class="vw-startup-orbit" aria-hidden="true"><span /></span>
+        <strong>{openingMessage(elapsed)}</strong>
+        <span>{elapsed < 4_000 ? "Connecting to the conversation…" : "Loading the latest transcript window…"}</span>
+      </div>
+    </div>
+  );
+}
+
 function MessengerPanel({ state }: { state: unknown }): JSX.Element {
   const s = readWidgetState(state);
-  const [view, setView] = useState<View>(() => rememberedUi.view === "chat" && s.attached !== null ? "chat" : "list");
+  const [view, setView] = useState<View>(() => rememberedUi.view);
   const [query, setQuery] = useState(rememberedUi.query);
-  const [awaiting, setAwaiting] = useState<{ key: string; startedAt: number } | null>(null);
+  const [awaiting, setAwaiting] = useState<{ key: string; startedAt: number; row: SessionRow } | null>(null);
   const [openingNow, setOpeningNow] = useState(() => Date.now());
   // The failure is copied into local state on arrival so the row can stop showing it without the
   // host having to retract anything — the host's `attachError` is a fact about the last attach and
   // stays true until the next one.
   const [failure, setFailure] = useState<{ key: string; message: string } | null>(null);
+  const viewRef = useRef(view);
+  const hasAttachedRef = useRef(s.attached !== null);
+  viewRef.current = view;
+  hasAttachedRef.current = s.attached !== null;
 
   useEffect(() => {
     rememberedUi.view = view;
@@ -566,7 +825,10 @@ function MessengerPanel({ state }: { state: unknown }): JSX.Element {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === "Escape") widget.close();
+      if (event.key !== "Escape") return;
+      if (viewRef.current === "new") setView(hasAttachedRef.current ? "chat" : "list");
+      else if (viewRef.current === "list" && hasAttachedRef.current) setView("chat");
+      else widget.close();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
@@ -582,6 +844,7 @@ function MessengerPanel({ state }: { state: unknown }): JSX.Element {
     } else if (outcome === "failed" && s.attachError !== null) {
       setAwaiting(null);
       setFailure(s.attachError);
+      setView("list");
     }
   });
 
@@ -602,6 +865,7 @@ function MessengerPanel({ state }: { state: unknown }): JSX.Element {
   const open = (row: SessionRow): void => {
     setFailure(null);
     if (s.attached?.key === row.key) {
+      if (row.key) widget.sendIntent(INTENT_QUEUE, { action: "ack", key: row.key });
       setView("chat");
       return;
     }
@@ -612,21 +876,31 @@ function MessengerPanel({ state }: { state: unknown }): JSX.Element {
         setView("chat");
       } else {
         widget.sendIntent(INTENT_QUEUE, { action: "release" });
-        setAwaiting({ key: "", startedAt: Date.now() });
+        setAwaiting({ key: "", startedAt: Date.now(), row });
+        setView("chat");
       }
       return;
     }
     widget.sendIntent(INTENT_QUEUE, { action: "attach", key: row.key });
-    setAwaiting({ key: row.key, startedAt: Date.now() });
+    setAwaiting({ key: row.key, startedAt: Date.now(), row });
+    setView("chat");
   };
 
+  if (view === "new") {
+    return <NewChat state={s} onBack={(): void => setView(s.attached ? "chat" : "list")} onClose={(): void => widget.close()} onStarted={(): void => setView("chat")} />;
+  }
   if (view === "chat") {
+    if (awaiting !== null && !attachSettled(awaiting.key, s.attached)) {
+      return <OpeningChat row={awaiting.row} elapsed={openingNow - awaiting.startedAt} onBack={(): void => { setAwaiting(null); setView("list"); }} onClose={(): void => widget.close()} />;
+    }
     return (
       <Chat
         state={s}
         onBack={(): void => {
           setView("list");
         }}
+        onNew={(): void => setView("new")}
+        onClose={(): void => widget.close()}
       />
     );
   }
@@ -638,6 +912,8 @@ function MessengerPanel({ state }: { state: unknown }): JSX.Element {
       failure={failure}
       query={query}
       onQuery={setQuery}
+      onNew={(): void => setView("new")}
+      onClose={(): void => widget.close()}
       onOpen={open}
     />
   );
@@ -645,15 +921,14 @@ function MessengerPanel({ state }: { state: unknown }): JSX.Element {
 
 // The last tone the host reported — the shell asks for it whenever it redraws the pill's dot.
 let lastTone: WidgetState["pill"]["tone"] = "off";
+let unreadCount = 0;
 widget.registerPanel({
   id: "agent",
   title: "Chats",
   render: mountPanel(MessengerPanel),
   default: true,
   indicator: () => lastTone,
-  // A total-session count looks exactly like an unread badge. We do not have unread semantics yet,
-  // so showing no badge is more honest and calmer than a permanent red-herring count.
-  badge: () => 0,
+  badge: () => unreadCount,
 });
 
 /**
@@ -682,6 +957,7 @@ widget.onPatch((patch) => {
   advanceMinimizedQueue(state);
   const pill = pillFor(state);
   lastTone = pill.tone;
+  unreadCount = state.attention.length + (state.needsInput ? 1 : 0);
   widget.setPill({ tone: pill.tone, label: pill.label });
 });
 

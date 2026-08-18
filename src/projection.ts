@@ -22,6 +22,21 @@ export interface WidgetPill {
   label: string;
 }
 
+export type SessionAttentionKind = "unseen" | "finished" | "failed";
+
+export interface SessionAttention {
+  key: string;
+  kind: SessionAttentionKind;
+}
+
+export interface WidgetHarness {
+  id: string;
+  label: string;
+  startable: boolean;
+  installed: boolean;
+  reason: string | null;
+}
+
 /** Daemon bootstrap milestones shown explicitly so a quiet network wait never reads as a freeze. */
 export type StartupPhase = "connecting" | "starting" | "discovering" | "ready";
 
@@ -130,6 +145,10 @@ export interface WidgetState {
   transcript: TranscriptEntry[];
   /** A turn is in flight (running / interrupting / reconciling) — the composer shows it, never blocks on it. */
   busy: boolean;
+  /** The controller operation currently crossing the host boundary, when one exists. */
+  operation: string | null;
+  /** A native approval or choice is waiting for this conversation. */
+  needsInput: boolean;
   /** The active harness id (`claude-code`, `codex`, …), or `""` when nothing is selected yet. */
   harness: string;
   /** Controller lifecycle mode; unlike `canSend`, this does not temporarily change while a turn runs. */
@@ -146,6 +165,12 @@ export interface WidgetState {
   taskPlan: TranscriptTaskPlan;
   /** The controller's last structured error message, or `null`. */
   error: string | null;
+  /** Whether retrying the last controller failure is meaningful. */
+  recoverable: boolean;
+  /** Harnesses available for a lazy-created new chat. */
+  harnesses: WidgetHarness[];
+  /** Durable attention is owned by the daemon, not inferred from a red inventory badge in the page. */
+  attention: SessionAttention[];
   /**
    * Every live/recent coding session on this machine, freshest first — the Sessions panel's whole
    * content. It does NOT come from the snapshot (which only knows the active controller's own
@@ -398,6 +423,8 @@ export function project(snapshot: SupercodeClientSnapshot, options: ProjectionOp
     startup: "ready",
     transcript: projectTranscript(snapshot.conversation, options),
     busy: isBusy(snapshot),
+    operation: snapshot.operation,
+    needsInput: snapshot.requests.some((request) => request.status === "pending"),
     harness: snapshot.activeHarness ?? "",
     mode: snapshot.connection.mode,
     canSend: snapshot.availableActions.send,
@@ -414,6 +441,15 @@ export function project(snapshot: SupercodeClientSnapshot, options: ProjectionOp
       observedAt: snapshot.taskPlan.observedAt,
     },
     error: snapshot.error?.message ?? null,
+    recoverable: snapshot.error?.recoverable === true,
+    harnesses: snapshot.harnesses.map((harness) => ({
+      id: harness.id,
+      label: harness.display_name,
+      startable: harness.availableActions.start,
+      installed: harness.installed,
+      reason: harness.reason,
+    })),
+    attention: [],
     sessions: [],
     attached: null,
     owned: null,

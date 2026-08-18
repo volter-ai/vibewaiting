@@ -1,11 +1,38 @@
 // App-specific layout and presentation. All color comes from Lucarne's adaptive shell tokens, so
 // this keeps VGAI's information architecture without inheriting VGAI's editor backdrop/theme.
 export const PANEL_CSS = `
-.vw-chat { display:flex; flex-direction:column; height:min(76vh,720px); min-height:360px }
+/* One app, one messenger: remove Lucarne's redundant single-tab toolbar and let the app header
+   carry navigation/close semantics. The resting surface is the conventional circular launcher. */
+.panel { width:var(--vw-panel-width,420px) }
+.panel > header { display:none }
+.pill,.panel { animation-duration:.18s }
+.pill { position:relative; width:46px; height:46px; justify-content:center; padding:0; border-color:var(--bd2) }
+.pill .brand::before { content:"✦"; font-size:18px; color:var(--acc) }
+.pill .lead { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap }
+.pill .triad { position:absolute; inset:0; margin:0; padding:0; pointer-events:none }
+.pill .triad .oi.dot { position:absolute; right:0; bottom:0; width:9px; height:9px; border:2px solid var(--bg) }
+.pill .triad .oi.badge { position:absolute; top:-3px; right:-3px; min-width:18px; height:18px; border-radius:9px; background:var(--block); box-shadow:0 1px 4px rgba(0,0,0,.28) }
+.pill.live { box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 18%,transparent) }
+.vw-screen,.vw-chat { display:flex; flex-direction:column; height:var(--vw-panel-height,480px); min-height:280px }
+.vw-chat { position:relative }
+
+/* app header */
+.vw-app-head { min-height:48px; display:flex; align-items:center; gap:6px; padding:5px 8px 5px 10px;
+  border-bottom:1px solid var(--hair) }
+.vw-head-copy { min-width:0; flex:1; display:flex; flex-direction:column; line-height:1.18 }
+.vw-head-copy strong { overflow:hidden; color:var(--fg); font-size:13px; font-weight:650; text-overflow:ellipsis; white-space:nowrap }
+.vw-head-copy small { overflow:hidden; color:var(--mut); font-size:10px; text-overflow:ellipsis; white-space:nowrap }
+.vw-head-copy small[data-state="working"] { color:var(--acc) }
+.vw-head-copy small[data-state="needs-input"] { color:var(--ask) }
+.vw-icon { display:inline-grid; place-items:center; width:28px; height:28px; flex:none; padding:0; border:0;
+  border-radius:8px; background:transparent; color:var(--mut); font:16px/1 inherit; cursor:pointer }
+.vw-icon:hover { background:var(--fill); color:var(--fg) }
+.vw-icon:disabled { opacity:.35; cursor:default }
+.vw-icon:focus-visible,.vw-latest:focus-visible,.vw-send:focus-visible,.vw-stop:focus-visible { outline:2px solid var(--acc); outline-offset:-2px }
 
 /* session list */
-.vw-list { display:flex; flex-direction:column; overflow-y:auto; overscroll-behavior:contain;
-  max-height:520px; min-height:90px; padding:2px 6px 8px }
+.vw-list { min-height:0; flex:1; display:flex; flex-direction:column; overflow-y:auto; overscroll-behavior:contain;
+  padding:6px 6px 10px }
 .vw-list::-webkit-scrollbar,.vw-scroll::-webkit-scrollbar { width:8px }
 .vw-list::-webkit-scrollbar-thumb,.vw-scroll::-webkit-scrollbar-thumb { background:var(--fill-2); border-radius:4px }
 .vw-search { position:sticky; top:0; z-index:2; display:flex; align-items:center; gap:7px; margin:2px 2px 6px;
@@ -14,12 +41,22 @@ export const PANEL_CSS = `
 .vw-search input { min-width:0; flex:1; border:0; outline:0; background:transparent; color:var(--fg); font:inherit; font-size:12px }
 .vw-search input::placeholder { color:var(--mut) }
 .vw-search small { min-width:16px; text-align:right; color:var(--mut); font-size:9.5px; font-variant-numeric:tabular-nums }
-.vw-srow { display:flex; align-items:center; gap:9px; width:100%; background:transparent; border:0; border-radius:9px;
-  padding:8px; text-align:left; color:var(--fg); font:inherit; cursor:pointer }
+.vw-srow { display:flex; align-items:center; gap:10px; width:100%; min-height:58px; background:transparent; border:0; border-radius:10px;
+  padding:7px 8px; text-align:left; color:var(--fg); font:inherit; cursor:pointer }
 .vw-srow:hover,.vw-srow.vw-active { background:var(--fill) }
 .vw-srow:focus-visible,.vw-back:focus-visible,.vw-copy:focus-visible { outline:2px solid var(--acc); outline-offset:-2px }
-.vw-dot { flex:none; width:7px; height:7px; border-radius:50%; background:var(--fill-2); border:1px solid var(--bd) }
-.vw-dot.vw-live { background:var(--ok); border-color:var(--ok) }
+.vw-harness-logo { position:relative; display:inline-grid; place-items:center; width:var(--vw-logo-size); height:var(--vw-logo-size); flex:none;
+  border:1px solid var(--bd); border-radius:50%; background:#111; color:#f7f7f5; font-size:calc(var(--vw-logo-size) * .36); font-weight:700; text-transform:uppercase }
+.vw-harness-logo svg { width:68%; height:68%; fill:currentColor }
+.vw-harness-logo[data-harness="claude-code"],.vw-harness-logo[data-harness="claude"] { color:#d97757; background:#09090b }
+.vw-harness-logo[data-harness="codex"] { color:#111; background:#f7f7f5 }
+.vw-harness-logo[data-harness="pi"] { color:#111; background:#f0f0ed }
+.vw-harness-logo i { position:absolute; right:-2px; bottom:-2px; width:10px; height:10px; border:2px solid var(--bg); border-radius:50%; background:var(--mut) }
+.vw-harness-logo[data-activity="working"] i { background:var(--acc); animation:vw-breathe 1.4s ease-in-out infinite }
+.vw-harness-logo[data-activity="needs-input"] i { background:var(--ask) }
+.vw-harness-logo[data-activity="failed"] i { background:var(--block) }
+.vw-harness-logo[data-activity="finished"] i,.vw-harness-logo[data-activity="unseen"] i { background:var(--ok) }
+.vw-harness-logo[data-activity="recent"] i { background:var(--mut) }
 .vw-scol { display:flex; flex-direction:column; gap:2px; min-width:0; flex:1 }
 .vw-sline { display:flex; align-items:baseline; justify-content:space-between; gap:8px }
 .vw-sname { min-width:0; font-size:12.5px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
@@ -27,6 +64,9 @@ export const PANEL_CSS = `
 .vw-follow { flex:none; margin-right:auto; color:var(--acc); font-size:9.5px; text-transform:uppercase; letter-spacing:.04em }
 .vw-ssub { display:flex; align-items:baseline; gap:6px; min-width:0; color:var(--mut); font-size:11px }
 .vw-sharness { flex:none; text-transform:uppercase; letter-spacing:.04em; font-size:9.5px; background:var(--fill-2); border-radius:5px; padding:1px 5px }
+.vw-row-status { flex:none; font-size:9px; font-weight:700; text-transform:uppercase; letter-spacing:.035em; color:var(--mut) }
+.vw-row-status[data-activity="working"],.vw-row-status[data-activity="finished"],.vw-row-status[data-activity="unseen"] { color:var(--acc) }
+.vw-row-status[data-activity="needs-input"] { color:var(--ask) }.vw-row-status[data-activity="failed"] { color:var(--block) }
 .vw-sdetail { white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
 .vw-sfail { display:block; color:var(--block); white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
 .vw-srow-opening { background:var(--fill) }
@@ -51,17 +91,9 @@ export const PANEL_CSS = `
   .vw-startup-orbit::before,.vw-startup-orbit span,.vw-startup-track .vw-step-current::after,.vw-spinner,.vw-typing-dots i { animation:none }
 }
 
-/* chat header */
-.vw-head { display:flex; align-items:center; gap:7px; padding:4px 10px 8px }
-.vw-back { flex:none; background:var(--fill); color:var(--fg); border:1px solid var(--bd); border-radius:7px;
-  width:22px; height:22px; line-height:1; font:inherit; font-size:15px; cursor:pointer; padding:0 }
-.vw-back:hover { background:var(--fill-2); border-color:var(--acc) }
-.vw-hname { font-size:12.5px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
-.vw-hsub { flex:none; color:var(--mut); font-size:10px; text-transform:uppercase; letter-spacing:.04em }
-.vw-ro { flex:none; margin-left:auto; color:var(--ask); font-size:10px; text-transform:uppercase; letter-spacing:.04em }
 /* transcript */
-.vw-scroll { flex:1; min-height:0; overflow-y:auto; overscroll-behavior:contain; padding:4px 12px 14px;
-  display:flex; flex-direction:column; gap:10px }
+.vw-scroll { flex:1; min-height:0; overflow-y:auto; overscroll-behavior:contain; padding:12px 16px 18px }
+.vw-scroll > div { display:flex; flex-direction:column; gap:10px }
 .vw-empty { color:var(--mut); padding:18px 2px; text-align:center }
 .vw-cut { color:var(--mut); font-style:italic }
 .vw-message { position:relative; margin:2px 0 8px; overflow-wrap:anywhere }
@@ -69,6 +101,13 @@ export const PANEL_CSS = `
 .vw-assistant { padding-bottom:3px }
 .vw-pending { opacity:.55 }
 .vw-sending { display:block; color:var(--mut); font-size:10px; margin-top:3px }
+.vw-message-time { display:inline-block; margin-left:6px; color:var(--mut); font-size:9.5px; opacity:0; transition:opacity 120ms ease }
+.vw-message:hover .vw-message-time,.vw-message:focus-within .vw-message-time { opacity:1 }
+.vw-message-failed { opacity:1; border-color:var(--block) }
+.vw-send-failed { display:flex; align-items:center; gap:6px; margin-top:4px; color:var(--block); font-size:10px }
+.vw-send-failed button { border:0; padding:0; background:transparent; color:var(--acc); font:inherit; cursor:pointer }
+.vw-latest { position:absolute; right:14px; bottom:112px; z-index:4; padding:5px 9px; border:1px solid var(--bd2);
+  border-radius:999px; background:var(--bg2); color:var(--fg); box-shadow:0 2px 8px rgba(0,0,0,.24); font:11px inherit; cursor:pointer }
 
 /* GFM-rich Markdown. markdown-it has raw HTML disabled. */
 .vw-markdown { color:var(--fg); font-size:12.5px; line-height:1.55 }
@@ -136,7 +175,10 @@ export const PANEL_CSS = `
 .vw-spinner { width:8px; height:8px; border:1px solid var(--bd2); border-top-color:var(--acc); border-radius:50%; animation:vw-spin .75s linear infinite }
 .vw-spinner-small { display:inline-block; flex:none; width:7px; height:7px }
 @keyframes vw-spin { to { transform:rotate(360deg) } }
-.vw-error { margin:0 12px 6px; padding:6px 8px; border-radius:8px; background:var(--fill); color:var(--block); font-size:11.5px }
+.vw-operation { display:flex; align-items:center; gap:6px; padding:5px 12px; border-bottom:1px solid var(--hair); color:var(--mut); font-size:10.5px }
+.vw-error { margin:6px 12px 0; padding:7px 8px; display:flex; align-items:center; gap:7px; border:1px solid color-mix(in srgb,var(--block) 45%,transparent); border-radius:8px; color:var(--block); font-size:11px }
+.vw-error > span { min-width:0; flex:1; overflow:hidden; text-overflow:ellipsis }
+.vw-error button { border:0; padding:2px 4px; background:transparent; color:inherit; font:inherit; cursor:pointer }
 
 /* composer + compact mirror status */
 .vw-composer { border-top:1px solid var(--hair); padding:8px 12px 12px; display:flex; flex-direction:column; gap:6px }
@@ -159,4 +201,11 @@ export const PANEL_CSS = `
 .vw-readonly { display:flex; align-items:center; gap:7px; min-height:34px; padding:6px 8px; border:1px solid var(--hair);
   border-radius:9px; background:var(--fill); color:var(--mut); font-size:10.5px; line-height:1.35 }
 .vw-readonly > span:first-child { color:var(--ask); font-size:9px }.vw-readonly strong { color:var(--fg) }
+.vw-opening { flex:1; display:grid; place-items:center; align-content:center; gap:7px; padding:24px; color:var(--mut); text-align:center }
+.vw-opening .vw-startup-orbit { grid-row:auto }.vw-opening strong { color:var(--fg); font-size:13px }.vw-opening > span:last-child { font-size:11px }
+.vw-new-body { min-height:0; flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px; padding:28px; color:var(--mut); text-align:center }
+.vw-new-body strong { color:var(--fg); font-size:14px }.vw-new-body > span:last-child { max-width:29ch; font-size:11px }
+.vw-new-mark { display:grid; place-items:center; width:38px; height:38px; margin-bottom:5px; border-radius:50%; background:var(--fill); color:var(--acc); font-size:17px }
+.vw-new-picker { display:flex; align-items:center; gap:8px; padding:0 2px; color:var(--mut); font-size:10.5px }
+.vw-new-picker label { flex:1 }.vw-new-picker select { max-width:180px; padding:4px 7px; border:1px solid var(--bd); border-radius:7px; background:var(--fill); color:var(--fg); font:inherit }
 `;
