@@ -31,6 +31,7 @@ export const PANEL_CSS = `
 .pill[data-mode="error"] .triad .oi.dot { border-color:var(--bg); background:var(--block); color:#fff }
 .pill[data-mode="error"] .triad .oi.dot::before { content:"×"; font-size:14px; font-weight:700; line-height:1 }
 .pill:is([data-mode="connecting"],[data-mode="working"],[data-mode="needs-input"],[data-mode="error"]) .triad .oi.badge { display:none }
+.vw-dialog { outline:0 }
 .vw-screen,.vw-chat { display:flex; flex-direction:column; height:var(--vw-panel-height,480px); min-height:280px }
 .vw-chat { position:relative }
 

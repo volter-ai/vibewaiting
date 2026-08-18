@@ -14,7 +14,6 @@
 // never told and a re-push never yanks you between screens. Attach begins an immediate loading
 // surface; the old transcript is never shown under the new conversation's name.
 import { createWidget } from "lucarne/widget/runtime";
-import { mountPanel } from "lucarne/widget/preact";
 import MarkdownIt from "markdown-it";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import { render as renderPreact } from "preact";
@@ -819,26 +818,19 @@ function MessengerPanel({ state }: { state: unknown }): JSX.Element {
   // host having to retract anything — the host's `attachError` is a fact about the last attach and
   // stays true until the next one.
   const [failure, setFailure] = useState<{ key: string; message: string } | null>(null);
-  const viewRef = useRef(view);
-  const hasAttachedRef = useRef(s.attached !== null);
-  viewRef.current = view;
-  hasAttachedRef.current = s.attached !== null;
+  const dialog = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     rememberedUi.view = view;
     rememberedUi.query = query;
   }, [query, view]);
 
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key !== "Escape") return;
-      if (viewRef.current === "new") setView(hasAttachedRef.current ? "chat" : "list");
-      else if (viewRef.current === "list" && hasAttachedRef.current) setView("chat");
-      else widget.close();
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  // Opening and screen changes always leave a meaningful focus target inside the dialog. Keeping
+  // this on the stable wrapper avoids unexpectedly focusing a destructive row or composer action.
+  useLayoutEffect(() => {
+    const element = dialog.current;
+    if (element && !element.contains(document.activeElement)) element.focus({ preventScroll: true });
+  }, [awaiting?.key, view]);
 
   // The awaited attach settled — either into that session's chat, or into a reason under its row.
   useEffect(() => {
@@ -892,37 +884,102 @@ function MessengerPanel({ state }: { state: unknown }): JSX.Element {
     setView("chat");
   };
 
-  if (view === "new") {
-    return <NewChat state={s} onBack={(): void => setView(s.attached ? "chat" : "list")} onClose={(): void => widget.close()} onStarted={(): void => setView("chat")} />;
-  }
-  if (view === "chat") {
-    if (awaiting !== null && !attachSettled(awaiting.key, s.attached)) {
-      return <OpeningChat row={awaiting.row} elapsed={openingNow - awaiting.startedAt} onBack={(): void => { setAwaiting(null); setView("list"); }} onClose={(): void => widget.close()} />;
+  const onDialogKeyDown = (event: JSX.TargetedKeyboardEvent<HTMLDivElement>): void => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      if (view === "new") setView(s.attached ? "chat" : "list");
+      else if (view === "list" && s.attached) setView("chat");
+      else closeMessenger();
+      return;
     }
-    return (
-      <Chat
+    if (event.key !== "Tab" || dialog.current === null) return;
+    const focusable = [...dialog.current.querySelectorAll<HTMLElement>(
+      "a[href],button:not([disabled]),input:not([disabled]),textarea:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex='-1'])",
+    )].filter((element) => !element.hidden && element.getAttribute("aria-hidden") !== "true");
+    if (focusable.length === 0) {
+      event.preventDefault();
+      dialog.current.focus({ preventScroll: true });
+      return;
+    }
+    const active = document.activeElement;
+    if (event.shiftKey && (active === dialog.current || active === focusable[0])) {
+      event.preventDefault();
+      focusable.at(-1)?.focus({ preventScroll: true });
+    } else if (!event.shiftKey && active === focusable.at(-1)) {
+      event.preventDefault();
+      focusable[0]?.focus({ preventScroll: true });
+    }
+  };
+
+  let content: JSX.Element;
+  if (view === "new") {
+    content = <NewChat state={s} onBack={(): void => setView(s.attached ? "chat" : "list")} onClose={closeMessenger} onStarted={(): void => setView("chat")} />;
+  } else if (view === "chat") {
+    if (awaiting !== null && !attachSettled(awaiting.key, s.attached)) {
+      content = <OpeningChat row={awaiting.row} elapsed={openingNow - awaiting.startedAt} onBack={(): void => { setAwaiting(null); setView("list"); }} onClose={closeMessenger} />;
+    } else {
+      content = (
+        <Chat
+          state={s}
+          onBack={(): void => {
+            setView("list");
+          }}
+          onNew={(): void => setView("new")}
+          onClose={closeMessenger}
+        />
+      );
+    }
+  } else {
+    content = (
+      <SessionList
         state={s}
-        onBack={(): void => {
-          setView("list");
-        }}
+        awaiting={awaiting}
+        now={openingNow}
+        failure={failure}
+        query={query}
+        onQuery={setQuery}
         onNew={(): void => setView("new")}
-        onClose={(): void => widget.close()}
+        onClose={closeMessenger}
+        onOpen={open}
       />
     );
   }
+
   return (
-    <SessionList
-      state={s}
-      awaiting={awaiting}
-      now={openingNow}
-      failure={failure}
-      query={query}
-      onQuery={setQuery}
-      onNew={(): void => setView("new")}
-      onClose={(): void => widget.close()}
-      onOpen={open}
-    />
+    <div
+      ref={dialog}
+      class="vw-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Agent chats"
+      tabIndex={-1}
+      onKeyDown={onDialogKeyDown}
+    >
+      {content}
+    </div>
   );
+}
+
+// Lucarne replaces the panel container with its pill instead of asking Preact to unmount it. Own
+// that framework boundary here so every effect/observer/timer is cleaned before the DOM disappears,
+// and so reopening never accumulates stale panel instances.
+let mountedPanelContainer: HTMLElement | null = null;
+let restoreLauncherFocus = false;
+
+function renderMessengerPanel(element: HTMLElement, state: unknown): void {
+  if (mountedPanelContainer !== null && mountedPanelContainer !== element) {
+    renderPreact(null, mountedPanelContainer);
+  }
+  mountedPanelContainer = element;
+  renderPreact(<MessengerPanel state={state} />, element);
+}
+
+function closeMessenger(): void {
+  if (mountedPanelContainer !== null) renderPreact(null, mountedPanelContainer);
+  mountedPanelContainer = null;
+  restoreLauncherFocus = true;
+  widget.close();
 }
 
 // The last tone the host reported — the shell asks for it whenever it redraws the pill's dot.
@@ -934,7 +991,7 @@ let collapsedRenderKey: string | null = null;
 widget.registerPanel({
   id: "agent",
   title: "Chats",
-  render: mountPanel(MessengerPanel),
+  render: renderMessengerPanel,
   default: true,
   indicator: () => lastTone,
   badge: () => unreadCount,
@@ -997,6 +1054,10 @@ function syncCollapsedChrome(): void {
     );
   }
   fitCollapsedHost();
+  if (restoreLauncherFocus && !pill.hidden) {
+    restoreLauncherFocus = false;
+    pill.focus({ preventScroll: true });
+  }
 }
 
 const shellWrap = document.querySelector(".wrap");
