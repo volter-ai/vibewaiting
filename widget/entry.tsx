@@ -15,7 +15,7 @@
 // surface; the old transcript is never shown under the new conversation's name.
 import { createWidget } from "lucarne/widget/runtime";
 import MarkdownIt from "markdown-it";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import { render as renderPreact } from "preact";
 import type { JSX } from "preact";
 import {
@@ -131,23 +131,42 @@ function ToolRow({ entry, workspace }: { entry: TranscriptEntry; workspace: stri
   const category = toolCategory(entry);
   const fullTarget = toolTarget(entry.arguments);
   const target = compactToolTarget(fullTarget, workspace);
-  const details = Boolean(entry.arguments || entry.resultText);
+  const hasDetails = Boolean(entry.arguments || entry.resultText);
+  const important = status === "pending";
+  const [expanded, setExpanded] = useState(important);
+  const detailId = useId();
+  useEffect(() => {
+    if (important) setExpanded(true);
+  }, [important]);
+  const head = (
+    <>
+      <span class="vw-tool-glyph" aria-hidden="true">{categoryGlyph(category)}</span>
+      <span class="vw-tool-name">{toolLabel(entry.label)}</span>
+      {target ? <span class="vw-tool-target" title={fullTarget}>{target}</span> : null}
+      <span class="vw-spacer" />
+      <span class="vw-tool-state" aria-label={status}>{status === "pending" ? "◌" : status === "error" ? "×" : "✓"}</span>
+    </>
+  );
   return (
-    <details class={`vw-tool-row vw-tool-${status}`}>
-      <summary class="vw-tool-row-head">
-        <span class="vw-tool-glyph" aria-hidden="true">{categoryGlyph(category)}</span>
-        <span class="vw-tool-name">{toolLabel(entry.label)}</span>
-        {target ? <span class="vw-tool-target" title={fullTarget}>{target}</span> : null}
-        <span class="vw-spacer" />
-        <span class="vw-tool-state" aria-label={status}>{status === "pending" ? "◌" : status === "error" ? "×" : "✓"}</span>
-      </summary>
-      {details ? (
-        <div class="vw-tool-detail">
+    <div class={`vw-tool-row vw-tool-${status}`}>
+      {hasDetails ? (
+        <button
+          class="vw-tool-row-head"
+          type="button"
+          aria-expanded={expanded}
+          aria-controls={detailId}
+          onClick={(): void => setExpanded((open) => !open)}
+        >
+          {head}
+        </button>
+      ) : <div class="vw-tool-row-head">{head}</div>}
+      {hasDetails ? (
+        <div id={detailId} class="vw-tool-detail" hidden={!expanded}>
           {entry.arguments ? <pre class="vw-tool-code"><b>Input</b>{"\n"}{entry.arguments}</pre> : null}
           {entry.resultText ? <pre class={`vw-tool-code vw-tool-result${status === "error" ? " vw-danger" : ""}`}><b>Output</b>{"\n"}{entry.resultText}{entry.truncated ? "\n[truncated]" : ""}</pre> : null}
         </div>
       ) : null}
-    </details>
+    </div>
   );
 }
 
@@ -156,25 +175,29 @@ function ToolGroup({ tools, workspace }: { tools: TranscriptEntry[]; workspace: 
   // conversation into a build log. Only the work happening NOW expands itself.
   const important = tools.some((tool) => tool.status === "pending");
   const [expanded, setExpanded] = useState(important);
+  const detailId = useId();
   useEffect(() => {
     if (important) setExpanded(true);
   }, [important]);
   const completed = tools.filter((tool) => tool.status === "completed").length;
   const hasError = tools.some((tool) => tool.status === "error");
+  const summary = toolGroupSummary(tools);
   return (
-    <details
-      class="vw-tool-group"
-      open={expanded}
-      onToggle={(event): void => setExpanded(event.currentTarget.open)}
-    >
-      <summary class="vw-tool-group-head">
+    <section class="vw-tool-group" aria-label={summary}>
+      <button
+        class="vw-tool-group-head"
+        type="button"
+        aria-expanded={expanded}
+        aria-controls={detailId}
+        onClick={(): void => setExpanded((open) => !open)}
+      >
         <span class={`vw-fold-mark${expanded ? " vw-open" : ""}`}>›</span>
-        <strong>{toolGroupSummary(tools)}</strong>
+        <strong>{summary}</strong>
         <span class="vw-spacer" />
         <span class={hasError ? "vw-danger" : ""}>{completed}/{tools.length}</span>
-      </summary>
-      {expanded ? <div>{tools.map((tool) => <ToolRow key={tool.id} entry={tool} workspace={workspace} />)}</div> : null}
-    </details>
+      </button>
+      <div id={detailId} hidden={!expanded}>{tools.map((tool) => <ToolRow key={tool.id} entry={tool} workspace={workspace} />)}</div>
+    </section>
   );
 }
 
