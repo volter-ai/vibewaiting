@@ -17,6 +17,7 @@ import type {
   NormalizedSession,
   ObservedRuntimeEvent,
   RuntimeCapabilities,
+  RuntimeResumeParams,
   RuntimeStartParams,
   SessionDescriptor,
   SessionLocator,
@@ -58,15 +59,24 @@ export function localHarness(id: HarnessId, over: Partial<LocalHarness> = {}): L
 /** A live runtime the test scripts by hand: it records input and emits the events it is told to. */
 export class FakeRuntime extends EventEmitter {
   readonly connection = "fake-connection";
-  readonly handle = {
-    harness: "claude-code" as HarnessId,
-    runtime_id: "runtime-1",
-    endpoint: { kind: "local_process" as const, pid: 1234, command: ["fake"], protocol: "acp" },
+  readonly handle: {
+    harness: HarnessId;
+    runtime_id: string;
+    endpoint: { kind: "local_process"; pid: number; command: string[]; protocol: "acp" };
   };
   closed = false;
   readonly sent: string[] = [];
   interrupts = 0;
   #sequence = 0;
+
+  constructor(harness: HarnessId = "claude-code", runtimeId = "runtime-1") {
+    super();
+    this.handle = {
+      harness,
+      runtime_id: runtimeId,
+      endpoint: { kind: "local_process", pid: 1234, command: ["fake"], protocol: "acp" },
+    };
+  }
 
   async sendInput(text: string): Promise<{ turn_id: string | null }> {
     if (this.closed) throw new Error("runtime closed");
@@ -91,7 +101,7 @@ export class FakeRuntime extends EventEmitter {
   /** Emit one runtime event exactly as the SDK's managed runtime would (identity fields added here). */
   emitEvent(event: NormalizedRuntimeEvent): void {
     this.#sequence += 1;
-    this.emit("event", { ...event, sessionId: "session-1", sequence: this.#sequence } as ObservedRuntimeEvent);
+    this.emit("event", { ...event, sessionId: this.handle.runtime_id, sequence: this.#sequence } as ObservedRuntimeEvent);
   }
 
   assistantMessage(text: string): void {
@@ -166,6 +176,8 @@ export class FakeHarnessClient implements HarnessClientAdapter {
   readonly runtime: FakeRuntime;
   readonly harnesses: LocalHarness[];
   readonly startedWith: RuntimeStartParams[] = [];
+  readonly resumedWith: RuntimeResumeParams[] = [];
+  readonly resumedRuntimes: FakeRuntime[] = [];
   /** Persisted sessions on this fake box — what `discover` returns and `session()` can load/follow. */
   sessions: Array<SessionDescriptor & { text?: string }>;
   /** Every discovery query seen, so a test can prove the GLOBAL scan carries no workspace. */
@@ -226,8 +238,11 @@ export class FakeHarnessClient implements HarnessClientAdapter {
     return this.runtime as unknown as never;
   }
 
-  async resumeManagedRuntime(): Promise<never> {
-    throw new Error("FakeHarnessClient.resumeManagedRuntime is not part of this test");
+  async resumeManagedRuntime(params: RuntimeResumeParams): Promise<never> {
+    this.resumedWith.push(params);
+    const runtime = new FakeRuntime(params.harness, params.runtime_id);
+    this.resumedRuntimes.push(runtime);
+    return runtime as unknown as never;
   }
 
   async attachManagedRuntime(): Promise<never> {

@@ -15,6 +15,7 @@ import {
   parseNewChatIntent,
   parseRefreshIntent,
   parseReleaseIntent,
+  parseResumeIntent,
   parseRespondIntent,
   parseSendIntent,
   startDaemon,
@@ -102,6 +103,15 @@ describe("parseAttachIntent", () => {
     expect(parseAttachIntent({ action: "attach" })).toBeNull();
     expect(parseAttachIntent({ action: "send", text: "hi" })).toBeNull();
     expect(parseAttachIntent(null)).toBeNull();
+  });
+});
+
+describe("parseResumeIntent", () => {
+  it("accepts only the target-free Continue here action", () => {
+    expect(parseResumeIntent({ action: "resume" })).toBe(true);
+    expect(parseResumeIntent({ action: "resume", key: "page-must-not-pick-a-target" })).toBe(false);
+    expect(parseResumeIntent({ action: "attach" })).toBe(false);
+    expect(parseResumeIntent(null)).toBe(false);
   });
 });
 
@@ -288,12 +298,15 @@ describe("startDaemon", () => {
       "attached",
       "attention",
       "busy",
+      "canBranch",
       "canInterrupt",
       "canRespond",
+      "canResume",
       "canSend",
       "error",
       "harness",
       "harnesses",
+      "messaging",
       "mode",
       "needsInput",
       "operation",
@@ -507,8 +520,11 @@ const BRIDGE = descriptor({
   updatedAtMs: 1_500_000,
 });
 
-async function sessionRig(sessions = [OWN, ATLAS, BRIDGE]): Promise<Rig & { logs: string[] }> {
-  const client = new FakeHarnessClient({ sessions });
+async function sessionRig(
+  sessions: FakeHarnessClient["sessions"] = [OWN, ATLAS, BRIDGE],
+  suppliedClient?: FakeHarnessClient,
+): Promise<Rig & { logs: string[] }> {
+  const client = suppliedClient ?? new FakeHarnessClient({ sessions });
   const logs: string[] = [];
   const host = new FakeWidgetHost();
   const daemon = await startDaemon({
@@ -681,6 +697,86 @@ describe("attaching", () => {
     expect(client.messages).toEqual([{ locator: LIVE_ATLAS.locator, text: "please wrap up" }]);
     // The follower, not the sender, owns the real transcript entry.
     expect(lastPush().transcript.some((entry) => entry.text === "please wrap up")).toBe(false);
+  });
+
+  it("continues an inactive persisted session under local control", async () => {
+    const { daemon, client, host, lastPush } = await sessionRig();
+    await host.fireIntent(INTENT_QUEUE, { action: "attach", key: sessionKey(ATLAS.locator) });
+    await daemon.flush();
+
+    expect(lastPush()).toMatchObject({ mode: "mirror", canResume: true, canSend: false });
+    await host.fireIntent(INTENT_QUEUE, { action: "resume" });
+    await daemon.flush();
+
+    expect(client.resumedWith).toEqual([
+      expect.objectContaining({ harness: "claude-code", runtime_id: ATLAS.locator.session_id, cwd: ATLAS.cwd }),
+    ]);
+    expect(client.activeFollows).toBe(0);
+    expect(lastPush()).toMatchObject({
+      mode: "control",
+      canResume: false,
+      canSend: true,
+      attached: { name: "atlas", harness: "claude-code" },
+    });
+    // The daemon's original runtime remains another healthy conversation, not collateral damage.
+    expect(client.runtime.closed).toBe(false);
+  });
+
+  it("keeps a continued conversation alive while another chat is viewed", async () => {
+    const { daemon, client, host, lastPush } = await sessionRig();
+    const atlasKey = sessionKey(ATLAS.locator);
+    await host.fireIntent(INTENT_QUEUE, { action: "attach", key: atlasKey });
+    await host.fireIntent(INTENT_QUEUE, { action: "resume" });
+    const continued = daemon.activeController();
+    await host.fireIntent(INTENT_QUEUE, { action: "send", text: "continue the work" });
+    expect(client.resumedRuntimes[0]?.sent).toEqual(["continue the work"]);
+
+    await host.fireIntent(INTENT_QUEUE, { action: "release" });
+    expect(daemon.activeController()).toBe(daemon.controller);
+    expect(client.resumedRuntimes[0]?.closed).toBe(false);
+    client.resumedRuntimes[0]?.assistantMessage("background result");
+    await waitFor(() => continued.getSnapshot().conversation.some(
+      (entry) => entry.kind === "message" && entry.text === "background result",
+    ));
+
+    await host.fireIntent(INTENT_QUEUE, { action: "attach", key: atlasKey });
+    await daemon.flush();
+    expect(daemon.activeController()).toBe(continued);
+    expect(lastPush()).toMatchObject({ mode: "control", attached: { name: "atlas" } });
+    expect(lastPush().transcript.some((entry) => entry.text === "background result")).toBe(true);
+  });
+
+  it("closes every retained continued runtime when the daemon stops", async () => {
+    const { daemon, client, host } = await sessionRig();
+    await host.fireIntent(INTENT_QUEUE, { action: "attach", key: sessionKey(ATLAS.locator) });
+    await host.fireIntent(INTENT_QUEUE, { action: "resume" });
+    await host.fireIntent(INTENT_QUEUE, { action: "release" });
+
+    await daemon.stop();
+    running.length = 0;
+    expect(client.resumedRuntimes[0]?.closed).toBe(true);
+  });
+
+  it("refuses to native-resume a process-reported live session", async () => {
+    const liveGrok = descriptor({
+      harness: "grok",
+      sessionId: "grok-live",
+      cwd: "/home/dev/volter/grok-live",
+      liveStatus: "busy",
+      text: "still running elsewhere",
+    });
+    const client = new FakeHarnessClient({
+      harnesses: [localHarness("claude-code"), localHarness("grok")],
+      sessions: [OWN, liveGrok],
+    });
+    const { daemon, host, lastPush } = await sessionRig(client.sessions, client);
+    await host.fireIntent(INTENT_QUEUE, { action: "attach", key: sessionKey(liveGrok.locator) });
+    await host.fireIntent(INTENT_QUEUE, { action: "resume" });
+    await daemon.flush();
+
+    expect(client.resumedWith).toEqual([]);
+    expect(lastPush()).toMatchObject({ mode: "mirror", canSend: false });
+    expect(lastPush().error).toContain("active in another agent window");
   });
 
   it("never leaves a follower behind when two rows are tapped in a row", async () => {

@@ -155,6 +155,12 @@ export interface WidgetState {
   mode: "none" | "control" | "mirror";
   /** The controller's own honest capability; the composer uses it to prevent guaranteed refusals. */
   canSend: boolean;
+  /** A persisted mirror can be resumed natively by its own harness. */
+  canResume: boolean;
+  /** A mirror can be continued as an independent branch without taking over its source runtime. */
+  canBranch: boolean;
+  /** A mirror is messageable because Supercode proved a live peer endpoint, not because we own it. */
+  messaging: "live_peer" | null;
   /** True only while the active controlled runtime can accept a native interrupt. */
   canInterrupt: boolean;
   /** True while a pending native request can be answered from this controller. */
@@ -428,6 +434,9 @@ export function project(snapshot: SupercodeClientSnapshot, options: ProjectionOp
     harness: snapshot.activeHarness ?? "",
     mode: snapshot.connection.mode,
     canSend: snapshot.availableActions.send,
+    canResume: snapshot.availableActions.resume,
+    canBranch: snapshot.availableActions.branch,
+    messaging: snapshot.connection.messaging,
     canInterrupt: snapshot.availableActions.interrupt,
     canRespond: snapshot.availableActions.respond,
     workspace: snapshot.workspace,

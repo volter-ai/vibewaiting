@@ -228,7 +228,12 @@ export const PANEL_CSS = `
 .vw-queue button { border:0; background:transparent; color:var(--mut); cursor:pointer }
 .vw-readonly { display:flex; align-items:center; gap:7px; min-height:34px; padding:6px 8px; border:1px solid var(--hair);
   border-radius:9px; background:var(--fill); color:var(--mut); font-size:10.5px; line-height:1.35 }
-.vw-readonly > span:first-child { color:var(--ask); font-size:9px }.vw-readonly strong { color:var(--fg) }
+.vw-readonly > span:first-child { color:var(--ask); font-size:9px }.vw-readonly > span:nth-child(2) { min-width:0; flex:1 }
+.vw-readonly strong { color:var(--fg) }
+.vw-continue { flex:none; min-height:27px; padding:4px 8px; border:1px solid var(--acc); border-radius:7px;
+  background:var(--acc); color:var(--on-acc); font:600 10.5px/1 inherit; cursor:pointer; white-space:nowrap }
+.vw-continue:disabled { opacity:.45; cursor:default }
+.vw-continue:focus-visible { outline:2px solid var(--acc); outline-offset:2px }
 .vw-opening { flex:1; display:grid; place-items:center; align-content:center; gap:7px; padding:24px; color:var(--mut); text-align:center }
 .vw-opening .vw-startup-orbit { grid-row:auto }.vw-opening strong { color:var(--fg); font-size:13px }.vw-opening > span:last-child { font-size:11px }
 .vw-new-body { min-height:0; flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px; padding:28px; color:var(--mut); text-align:center }

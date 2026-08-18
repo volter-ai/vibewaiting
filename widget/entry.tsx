@@ -606,16 +606,23 @@ function Chat({ state, onBack, onNew, onClose }: { state: WidgetState; onBack: (
   const empty = state.transcript.length === 0 && pending === null;
   const attached = state.attached;
   const harnessName = harnessDisplayName(attached?.harness ?? state.harness);
+  const attachedRow = attached?.key ? state.sessions.find((row) => row.key === attached.key) : null;
+  const explicitlyLiveElsewhere = state.mode === "mirror" &&
+    (attachedRow?.runtimeStatus === "busy" || attachedRow?.runtimeStatus === "idle");
+  const livePeer = state.mode === "mirror" && state.messaging === "live_peer";
   // Read-only is the controller's own honest capability for a session someone else is driving; the
   // composer says so rather than offering a send that can only fail.
   const readOnly = state.mode === "mirror" && !state.canSend;
+  const canContinueHere = readOnly && state.canResume && !explicitlyLiveElsewhere;
   const blocks = conversationBlocks(state.transcript);
   const status = state.needsInput
     ? "Needs input"
     : state.busy
       ? "Working"
+      : livePeer
+        ? "Live elsewhere"
       : readOnly
-        ? "Read-only"
+        ? explicitlyLiveElsewhere ? "Active elsewhere" : "Read-only"
         : "Ready";
   const op = operationLabel(state.operation);
   const visibleError = state.error !== null && state.error !== dismissedError ? state.error : null;
@@ -696,9 +703,28 @@ function Chat({ state, onBack, onNew, onClose }: { state: WidgetState; onBack: (
             </div>
           ) : null}
           {readOnly ? (
-            <div class="vw-readonly" aria-label="Read-only chat">
+            <div class="vw-readonly" aria-label={canContinueHere ? "Continue read-only chat" : "Read-only chat"}>
               <span aria-hidden="true">◉</span>
-              <span><strong>Read-only</strong> · controlled in another agent window</span>
+              <span>
+                <strong>{explicitlyLiveElsewhere ? "Active elsewhere" : "Read-only"}</strong>
+                {canContinueHere
+                  ? ` · resume this ${harnessName} session here`
+                  : explicitlyLiveElsewhere
+                    ? " · wait, message live, or start a separate continuation"
+                    : " · this harness cannot resume the persisted session"}
+              </span>
+              {canContinueHere ? (
+                <button
+                  class="vw-continue"
+                  type="button"
+                  disabled={state.operation !== null}
+                  onClick={(): void => {
+                    widget.sendIntent(INTENT_QUEUE, { action: "resume" });
+                  }}
+                >
+                  Continue here
+                </button>
+              ) : null}
             </div>
           ) : (
             <div class="vw-envelope vw-envelope-compact">

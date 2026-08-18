@@ -258,7 +258,7 @@ export interface Daemon {
   readonly host: WidgetBridge;
   /** The controller this daemon STARTED. It keeps its runtime for the daemon's whole life. */
   readonly controller: AgentController;
-  /** Whichever controller the Agent panel is currently showing — the owned one, or a foreign mirror. */
+  /** Whichever controller the Agent panel is currently showing — the daemon-owned one or a foreign conversation. */
   activeController(): AgentController;
   /** The state of the last push (`null` before the first one) — the daemon's own observable output. */
   lastPushed(): WidgetState | null;
@@ -310,6 +310,12 @@ export function parseInterruptIntent(payload: unknown): boolean {
 export function parseReleaseIntent(payload: unknown): boolean {
   if (!payload || typeof payload !== "object") return false;
   return (payload as { action?: unknown }).action === "release";
+}
+
+/** Continue the mirror currently selected by the daemon. The page never supplies a session key. */
+export function parseResumeIntent(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object") return false;
+  return (payload as { action?: unknown }).action === "resume" && !("key" in payload);
 }
 
 export interface NewChatIntent {
@@ -462,10 +468,20 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
    */
   let attachError: AttachError | null = null;
 
-  /** The non-owning controller following a foreign session, when the panel is on one. */
-  let mirror: AgentController | null = null;
-  let unsubscribeMirror: (() => void) | null = null;
-  const activeController = (): AgentController => mirror ?? controller;
+  /**
+   * Foreign conversations start as cheap mirrors. Once one is resumed it owns a real runtime and
+   * must survive navigation to another chat, just like a background conversation in a messenger.
+   * Passive mirrors are still closed when left so their transcript followers cannot accumulate.
+   */
+  interface ForeignControllerSlot {
+    controller: AgentController;
+    unsubscribe: () => void;
+  }
+  const foreignControllers = new Map<string, ForeignControllerSlot>();
+  let activeForeignKey: string | null = null;
+  const activeForeign = (): ForeignControllerSlot | null =>
+    activeForeignKey === null ? null : foreignControllers.get(activeForeignKey) ?? null;
+  const activeController = (): AgentController => activeForeign()?.controller ?? controller;
 
   const observeAttention = (
     snapshot: SupercodeClientSnapshot,
@@ -607,14 +623,19 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         mirrorView: PASSIVE_MIRROR_VIEW,
       }));
 
-  /** Close the current mirror (which aborts its follower) and fall back to the owned controller. */
-  const releaseMirror = async (): Promise<void> => {
-    const previous = mirror;
-    const unsub = unsubscribeMirror;
-    mirror = null;
-    unsubscribeMirror = null;
-    unsub?.();
-    if (previous) await previous.close().catch((e: unknown) => log(`detach failed: ${message(e)}`));
+  /**
+   * Leave the selected foreign conversation. A passive mirror is disposable; a resumed/branched
+   * controller is retained so switching chats never kills work the user explicitly continued.
+   */
+  const releaseForeignView = async (): Promise<void> => {
+    const key = activeForeignKey;
+    const previous = activeForeign();
+    activeForeignKey = null;
+    if (!previous || key === null) return;
+    if (previous.controller.getSnapshot().connection.mode === "control") return;
+    foreignControllers.delete(key);
+    previous.unsubscribe();
+    await previous.controller.close().catch((e: unknown) => log(`detach failed: ${message(e)}`));
   };
 
   // Attaches are SERIALIZED and generation-checked: a double click must not leave two followers
@@ -649,9 +670,20 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       );
       return;
     }
-    await releaseMirror();
+    if (activeForeignKey === key) {
+      await pushNow();
+      return;
+    }
+    await releaseForeignView();
     if (matchesActive(descriptor, activeRef(controller.getSnapshot()))) {
       log(`following this daemon's own ${descriptor.locator.harness} session again`);
+      await pushNow();
+      return;
+    }
+    const retained = foreignControllers.get(key);
+    if (retained) {
+      activeForeignKey = key;
+      log(`returning to locally controlled ${descriptor.locator.harness} session`);
       await pushNow();
       return;
     }
@@ -697,8 +729,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       await candidate.close().catch(() => undefined);
       return;
     }
-    mirror = candidate;
-    unsubscribeMirror = candidate.subscribe(schedulePush);
+    activeForeignKey = key;
+    foreignControllers.set(key, { controller: candidate, unsubscribe: candidate.subscribe(schedulePush) });
     const attachedAt = performance.now();
     log(
       `following ${descriptor.locator.harness} in ${workspace} (read-only mirror; ` +
@@ -737,7 +769,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       actionError = null;
       attachSeq += 1;
       try {
-        await releaseMirror();
+        await releaseForeignView();
         await controller.dispatch({ type: "start", harness: newChat.harness });
         await controller.dispatch({ type: "send", text: newChat.text });
       } catch (e) {
@@ -773,9 +805,40 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       return;
     }
     if (parseReleaseIntent(intent.payload)) {
-      await releaseMirror();
+      await releaseForeignView();
       attachError = null;
       actionError = null;
+      await pushNow();
+      return;
+    }
+    if (parseResumeIntent(intent.payload)) {
+      actionError = null;
+      const foreign = activeForeign();
+      const snapshot = foreign?.controller.getSnapshot();
+      const key = snapshot?.activeSessionKey ?? null;
+      const activeSession = snapshot?.sessions.find((session) => session.key === key);
+      try {
+        if (!foreign || !snapshot || snapshot.connection.mode !== "mirror" || key === null) {
+          throw new Error("open a persisted read-only conversation before continuing it here");
+        }
+        // Native resume starts another writer. A process-reported live state is authoritative, so
+        // never race it; live-peer messaging remains available where the harness supports that.
+        if (activeSession?.liveStatus === "busy" || activeSession?.liveStatus === "idle") {
+          throw new Error("this session is active in another agent window; message it live or start a separate continuation");
+        }
+        if (!snapshot.availableActions.resume) {
+          throw new Error(`${snapshot.activeHarness ?? "this harness"} cannot resume this persisted session`);
+        }
+        const resumeStartedAt = performance.now();
+        await foreign.controller.dispatch({ type: "resume", sessionKey: key });
+        log(
+          `resumed ${snapshot.activeHarness ?? "coding agent"} session under local control in ` +
+          `${Math.round(performance.now() - resumeStartedAt)}ms`,
+        );
+      } catch (e) {
+        actionError = message(e);
+        log(`resume failed: ${actionError}`);
+      }
       await pushNow();
       return;
     }
@@ -853,7 +916,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       stopIntentPump();
       unsubscribe();
       await attachChain.catch(() => undefined);
-      await releaseMirror();
+      activeForeignKey = null;
+      const foreign = [...foreignControllers.values()];
+      foreignControllers.clear();
+      for (const slot of foreign) slot.unsubscribe();
+      await Promise.all(
+        foreign.map((slot) => slot.controller.close().catch((e: unknown) => log(`detach failed: ${message(e)}`))),
+      );
       await inFlight.catch(() => undefined);
       await host.remove().catch((e: unknown) => log(`widget removal failed: ${(e as Error)?.message ?? String(e)}`));
       // `ownsClient: true` (above) makes this close the harness transport too — the caller that
