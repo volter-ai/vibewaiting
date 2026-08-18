@@ -1,96 +1,36 @@
-// The iframe app — ONE panel in the minimized-messenger shape: unread conversations open into the
-// inbox that the badge announced; otherwise the last screen is restored.
-//
-//   inbox  ──tap a row──▶  opening ──host confirms──▶ chat
-//     ▲                         │                         │
-//     └─────────────────────────┴────── ‹ back ──────────┘
-//
-// It is bundled into a single self-contained srcdoc document by `widget/build.mjs`
-// (`lucarne/widget/build`), so there is no module loading, no network, and no framework CDN inside
-// the page it mounts on. Everything it knows arrives as pushed patches; everything it wants goes
-// out as one named intent (`send` from the composer, `attach` from a row).
-//
-// The view is LOCAL state: which screen you are on is not a fact about the machine, so the host is
-// never told and a re-push never yanks you between screens. Attach begins an immediate loading
-// surface; the old transcript is never shown under the new conversation's name.
+// Vibewaiting is intentionally only the composition seam between Lucarne's embeddable shell and
+// Supercode's reusable default UI. Agent semantics, components, transcript presentation, logos,
+// continuation controls, and presentation memory live in @volter-ai-dev/supercode-ui. This file
+// owns only iframe sizing, Lucarne intents, collapsed launcher chrome, and host focus lifecycle.
+import { SupercodeMessenger } from "@volter-ai-dev/supercode-ui/preact/messenger";
+import { HarnessLogo, hasHarnessLogo } from "@volter-ai-dev/supercode-ui/preact/logo";
+import { normalizeUiState } from "@volter-ai-dev/supercode-ui/core";
+import type { SupercodeUiIntent, SupercodeUiState, UiAdapter } from "@volter-ai-dev/supercode-ui";
 import { createWidget } from "lucarne/widget/runtime";
-import MarkdownIt from "markdown-it";
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import { render as renderPreact } from "preact";
 import type { JSX } from "preact";
-import {
-  ATTACH_ERROR_LINGER_MS,
-  attachOutcome,
-  attachSettled,
-  composerHeight,
-  filterSessionRows,
-  harnessDisplayName,
-  isSendKey,
-  nearBottom,
-  orderedSessionRows,
-  operationLabel,
-  panelLandingView,
-  pendingResolved,
-  pillFor,
-  pillModeFor,
-  readWidgetState,
-  roleLabel,
-  activityLabel,
-  attentionFor,
-  messageTime,
-  sessionActivity,
-  sessionDetail,
-  sessionDisplayName,
-  openingMessage,
-  startupMessage,
-  type SessionRow,
-  type PillMode,
-  type TranscriptEntry,
-  type View,
-  type WidgetState,
-} from "./state.js";
-import {
-  compactToolTarget,
-  conversationBlocks,
-  toolCategory,
-  toolGroupSummary,
-  toolLabel,
-  toolTarget,
-  type ToolCategory,
-} from "./presentation.js";
-import { HarnessLogo, hasHarnessLogo } from "./harness-logo.js";
+
+type PillMode = "connecting" | "idle" | "unread" | "working" | "needs-input" | "error";
 
 const NS = "vibewaiting";
 const INTENT_QUEUE = "agent";
-
 const widget = createWidget({ ns: NS, version: 1 });
 
-// Sticky injection creates a fresh iframe after every navigation. Announce that mount so the
-// daemon delivers one current snapshot immediately; this replaces the old 2s full-transcript
-// heartbeat and makes an idle widget appear populated without continuously replaying its state.
-widget.sendIntent(INTENT_QUEUE, { action: "mounted" });
-
-// CSS viewport units inside the widget describe the iframe itself. While collapsed that viewport
-// is only the launcher's size, so `100vw` creates a circular trap: a 46px iframe asks the host for
-// a 46px panel and can never grow. A srcdoc iframe inherits the embedding page's origin; read that
-// real viewport when available, clamp the messenger to it, and let Lucarne's normal size handshake
-// fit the host to the resulting fixed dimensions.
 function syncPanelViewport(requestResize = true): void {
-  let pageWidth = 420 + 16;
-  let pageHeight = 480 + 16;
+  let pageWidth = 436;
+  let pageHeight = 496;
   try {
     pageWidth = window.parent.innerWidth;
     pageHeight = window.parent.innerHeight;
   } catch {
-    // A stricter embed still gets the safe desktop dimensions below.
+    // Cross-origin hosts retain the safe desktop defaults.
   }
-  // Preserve a real 16px margin on BOTH axes after the host's own border is added. Subtracting
-  // only the right/bottom inset made a 390px viewport produce a 376px outer panel at right:16,
-  // which placed its left rim at -2px and visibly clipped the mobile widget.
   const width = Math.max(240, Math.min(420, pageWidth - 32));
   const height = Math.max(280, Math.min(480, pageHeight - 32));
   document.documentElement.style.setProperty("--vw-panel-width", `${width}px`);
   document.documentElement.style.setProperty("--vw-panel-height", `${height}px`);
+  document.documentElement.style.setProperty("--scui-width", `${width}px`);
+  document.documentElement.style.setProperty("--scui-height", `${height}px`);
   if (requestResize) widget.requestResize();
 }
 
@@ -99,1102 +39,13 @@ try {
   const pageWindow = window.parent;
   const onPageResize = (): void => syncPanelViewport();
   pageWindow.addEventListener("resize", onPageResize);
-  window.addEventListener("unload", () => pageWindow.removeEventListener("resize", onPageResize), { once: true });
+  window.addEventListener("pagehide", () => pageWindow.removeEventListener("resize", onPageResize), { once: true });
 } catch {
-  // Cross-origin embedders simply retain the fallback dimensions.
+  // Cross-origin embedders retain fixed safe dimensions.
 }
 
-const markdown = new MarkdownIt({ html: false, linkify: true, breaks: false });
-const defaultLinkOpen = markdown.renderer.rules.link_open;
-markdown.renderer.rules.link_open = (tokens, index, options, env, self): string => {
-  const token = tokens[index];
-  token?.attrSet("target", "_blank");
-  token?.attrSet("rel", "noreferrer noopener");
-  return defaultLinkOpen
-    ? defaultLinkOpen(tokens, index, options, env, self)
-    : self.renderToken(tokens, index, options);
-};
-
-function MarkdownContent({ value }: { value: string }): JSX.Element {
-  const html = useMemo(() => markdown.render(value), [value]);
-  return <div class="vw-markdown" dangerouslySetInnerHTML={{ __html: html }} />;
-}
-
-function categoryGlyph(category: ToolCategory): string {
-  if (category === "read") return "▤";
-  if (category === "search") return "⌕";
-  if (category === "edit") return "✎";
-  if (category === "command") return ">_";
-  if (category === "test") return "◇";
-  if (category === "web") return "◎";
-  if (category === "agent") return "♙";
-  return "◆";
-}
-
-function ToolRow({ entry, workspace }: { entry: TranscriptEntry; workspace: string }): JSX.Element {
-  const status = entry.status ?? "completed";
-  const category = toolCategory(entry);
-  const fullTarget = toolTarget(entry.arguments);
-  const target = compactToolTarget(fullTarget, workspace);
-  const hasDetails = Boolean(entry.arguments || entry.resultText);
-  const important = status === "pending";
-  const [expanded, setExpanded] = useState(important);
-  const detailId = useId();
-  useEffect(() => {
-    if (important) setExpanded(true);
-  }, [important]);
-  const head = (
-    <>
-      <span class="vw-tool-glyph" aria-hidden="true">{categoryGlyph(category)}</span>
-      <span class="vw-tool-name">{toolLabel(entry.label)}</span>
-      {target ? <span class="vw-tool-target" title={fullTarget}>{target}</span> : null}
-      <span class="vw-spacer" />
-      <span class="vw-tool-state" aria-label={status}>{status === "pending" ? "◌" : status === "error" ? "×" : "✓"}</span>
-    </>
-  );
-  return (
-    <div class={`vw-tool-row vw-tool-${status}`}>
-      {hasDetails ? (
-        <button
-          class="vw-tool-row-head"
-          type="button"
-          aria-expanded={expanded}
-          aria-controls={detailId}
-          onClick={(): void => setExpanded((open) => !open)}
-        >
-          {head}
-        </button>
-      ) : <div class="vw-tool-row-head">{head}</div>}
-      {hasDetails ? (
-        <div id={detailId} class="vw-tool-detail" hidden={!expanded}>
-          {expanded && entry.arguments ? <pre class="vw-tool-code"><b>Input</b>{"\n"}{entry.arguments}</pre> : null}
-          {expanded && entry.resultText ? <pre class={`vw-tool-code vw-tool-result${status === "error" ? " vw-danger" : ""}`}><b>Output</b>{"\n"}{entry.resultText}{entry.truncated ? "\n[truncated]" : ""}</pre> : null}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function ToolGroup({ tools, workspace }: { tools: TranscriptEntry[]; workspace: string }): JSX.Element {
-  // Historical edits/tests are useful on demand, but opening every old activity group turns a
-  // conversation into a build log. Only the work happening NOW expands itself.
-  const important = tools.some((tool) => tool.status === "pending");
-  const [expanded, setExpanded] = useState(important);
-  const detailId = useId();
-  useEffect(() => {
-    if (important) setExpanded(true);
-  }, [important]);
-  const completed = tools.filter((tool) => tool.status === "completed").length;
-  const hasError = tools.some((tool) => tool.status === "error");
-  const summary = toolGroupSummary(tools);
-  return (
-    <section class="vw-tool-group" aria-label={summary}>
-      <button
-        class="vw-tool-group-head"
-        type="button"
-        aria-expanded={expanded}
-        aria-controls={detailId}
-        onClick={(): void => setExpanded((open) => !open)}
-      >
-        <span class={`vw-fold-mark${expanded ? " vw-open" : ""}`}>›</span>
-        <strong>{summary}</strong>
-        <span class="vw-spacer" />
-        <span class={hasError ? "vw-danger" : ""}>{completed}/{tools.length}</span>
-      </button>
-      <div id={detailId} hidden={!expanded}>{expanded ? tools.map((tool) => <ToolRow key={tool.id} entry={tool} workspace={workspace} />) : null}</div>
-    </section>
-  );
-}
-
-function RequestCard({ entry, canRespond }: { entry: TranscriptEntry; canRespond: boolean }): JSX.Element {
-  const request = entry.request;
-  if (!request) return <div class="vw-notice">{entry.text}</div>;
-  if (request.status === "responded") {
-    return <div class="vw-request-done">✓ Request answered · {request.resolution?.name ?? request.requestKind}</div>;
-  }
-  const respond = (optionId: string | null): void => {
-    widget.sendIntent(INTENT_QUEUE, { action: "respond", requestId: request.requestId, optionId });
-  };
-  return (
-    <section class="vw-request-card" aria-label={`${request.requestKind} needs input`}>
-      <strong>Agent needs input</strong>
-      <span class="vw-request-kind">{request.requestKind}</span>
-      {request.payloadText && request.payloadText !== "{}" ? <pre>{request.payloadText}</pre> : null}
-      <div class="vw-request-actions">
-        {request.options.map((option) => (
-          <button
-            key={option.optionId}
-            type="button"
-            class={option.kind.startsWith("reject") ? "vw-request-reject" : ""}
-            disabled={!canRespond}
-            onClick={(): void => respond(option.optionId)}
-          >
-            {option.name}
-          </button>
-        ))}
-        {request.cancellable ? <button type="button" disabled={!canRespond} onClick={(): void => respond(null)}>Cancel</button> : null}
-      </div>
-    </section>
-  );
-}
-
-function MessageRow({
-  entry,
-  pending,
-  failed,
-  onRetry,
-}: {
-  entry: TranscriptEntry;
-  pending?: boolean | undefined;
-  failed?: boolean | undefined;
-  onRetry?: (() => void) | undefined;
-}): JSX.Element {
-  const [copied, setCopied] = useState(false);
-  const copy = (): void => {
-    void navigator.clipboard?.writeText(entry.text).then(() => setCopied(true)).catch(() => undefined);
-    setTimeout(() => setCopied(false), 1500);
-  };
-  return (
-    <article class={`vw-message vw-${entry.role}${pending ? " vw-pending" : ""}${failed ? " vw-message-failed" : ""}`} aria-label={failed ? "user message failed" : pending ? "user message sending" : `${roleLabel(entry.role)} message`}>
-      <MarkdownContent value={entry.text} />
-      {entry.context?.length ? (
-        <details class="vw-message-context">
-          <summary>{entry.context.length} context {entry.context.length === 1 ? "item" : "items"}</summary>
-          <div>
-            {entry.context.map((item, index) => (
-              <p key={item.id ?? `${item.label}:${index}`}><strong>{item.label}</strong><span>{item.detail}</span></p>
-            ))}
-          </div>
-        </details>
-      ) : null}
-      {entry.truncated ? <span class="vw-cut">[truncated]</span> : null}
-      {entry.role === "assistant" ? <button class="vw-copy" type="button" aria-label={copied ? "Response copied" : "Copy response"} onClick={copy}>{copied ? "✓" : "Copy"}</button> : null}
-      {entry.ts !== null ? <time class="vw-message-time" dateTime={new Date(entry.ts).toISOString()}>{messageTime(entry.ts)}</time> : null}
-      {pending && !failed ? <span class="vw-sending">Sending…</span> : null}
-      {failed ? <span class="vw-send-failed">Not sent{onRetry ? <button type="button" onClick={onRetry}>Retry</button> : null}</span> : null}
-    </article>
-  );
-}
-
-function SessionDetails({ semantics }: { semantics: WidgetState["semantics"] }): JSX.Element | null {
-  const noteworthy = semantics.subagents.length > 0 || semantics.residueCount > 0 || semantics.parseErrors > 0;
-  if (!noteworthy) return null;
-  const summary = [
-    semantics.subagents.length ? `${semantics.subagents.length} subagent${semantics.subagents.length === 1 ? "" : "s"}` : "",
-    semantics.residueCount ? `${semantics.residueCount} fidelity note${semantics.residueCount === 1 ? "" : "s"}` : "",
-    semantics.parseErrors ? `${semantics.parseErrors} parse error${semantics.parseErrors === 1 ? "" : "s"}` : "",
-  ].filter(Boolean).join(" · ");
-  return (
-    <details class="vw-session-details">
-      <summary><span class="vw-fold-mark" aria-hidden="true">›</span>{summary}</summary>
-      <div class="vw-session-details-body">
-        {semantics.fidelity ? <p><strong>Fidelity</strong><span>{semantics.fidelity.replace("_", " ")}</span></p> : null}
-        {semantics.subagents.map((subagent) => (
-          <p key={subagent.id}><strong>{subagent.model ?? subagent.source}</strong><span>{subagent.messages} messages · {subagent.fidelity.replace("_", " ")}</span></p>
-        ))}
-        {semantics.residue.map((item, index) => <p key={`${index}:${item}`}><strong>Note</strong><span>{item}</span></p>)}
-        {semantics.residueCount > semantics.residue.length ? <p><span>{semantics.residueCount - semantics.residue.length} more notes retained upstream</span></p> : null}
-      </div>
-    </details>
-  );
-}
-
-function terminalCommand(handoff: NonNullable<WidgetState["terminalHandoff"]>): string {
-  const quote = (value: string): string => /^[A-Za-z0-9_./:@%+=,-]+$/.test(value)
-    ? value
-    : `'${value.replace(/'/g, `'"'"'`)}'`;
-  return [handoff.program, ...handoff.arguments].map(quote).join(" ");
-}
-
-function TranscriptRow({ entry, pending, failed, onRetry, canRespond }: { entry: TranscriptEntry; pending?: boolean | undefined; failed?: boolean | undefined; onRetry?: (() => void) | undefined; canRespond: boolean }): JSX.Element | null {
-  if (entry.role === "system") return null;
-  if (entry.role === "reasoning") {
-    return (
-      <details class="vw-reasoning" open={entry.streaming === true || undefined}>
-        <summary><span class="vw-fold-mark">›</span>{entry.streaming ? "Thinking…" : "Reasoning"}</summary>
-        <div class="vw-reasoning-body">{entry.text}{entry.truncated ? <span class="vw-cut"> [truncated]</span> : null}</div>
-      </details>
-    );
-  }
-  if (entry.role === "request") return <RequestCard entry={entry} canRespond={canRespond} />;
-  if (entry.role === "notice") return <div class="vw-notice">{entry.text}</div>;
-  if (entry.role === "tool") return <ToolRow entry={entry} workspace="" />;
-  return <MessageRow entry={entry} pending={pending} failed={failed} onRetry={onRetry} />;
-}
-
-function SessionListRow({
-  row,
-  activity,
-  openingLabel,
-  error,
-  preview,
-  onOpen,
-}: {
-  row: SessionRow;
-  activity: ReturnType<typeof sessionActivity>;
-  openingLabel: string | null;
-  /** The last attach failure for THIS row, shown in place of its subtitle until it clears. */
-  error: string | null;
-  preview: string | null;
-  onOpen: () => void;
-}): JSX.Element {
-  const opening = openingLabel !== null;
-  const status = activityLabel(activity);
-  return (
-    <button
-      class={`vw-srow${row.active ? " vw-active" : ""}${opening ? " vw-srow-opening" : ""}`}
-      type="button"
-      onClick={onOpen}
-      aria-busy={opening}
-      title={`${harnessDisplayName(row.harness)} · ${row.cwd}${status ? ` · ${status}` : ""}`}
-    >
-      <HarnessLogo id={row.harness} activity={activity} size={32} />
-      <span class="vw-scol">
-        <span class="vw-sline">
-          <span class="vw-sname">{sessionDisplayName(row)}</span>
-          {row.active ? (
-            <span class="vw-follow" title="the panel is following this session">
-              › following
-            </span>
-          ) : null}
-          <span class="vw-sage">
-            {opening ? <><span class="vw-spinner vw-spinner-small" aria-hidden="true" />{openingLabel}</> : row.age}
-          </span>
-        </span>
-        {error !== null ? (
-          <span class="vw-ssub vw-sfail" title={error}>
-            {error}
-          </span>
-        ) : (
-          <span class="vw-ssub" title={preview ?? undefined}>
-            {status ? <span class="vw-row-status" data-activity={activity}>{status}</span> : <span class="vw-sharness">{harnessDisplayName(row.harness)}</span>}
-            {(preview ?? sessionDetail(row)) !== "" ? <span class="vw-sdetail">{preview ?? sessionDetail(row)}</span> : null}
-          </span>
-        )}
-      </span>
-    </button>
-  );
-}
-
-function StartupStatus({ state, compact = false }: { state: WidgetState; compact?: boolean }): JSX.Element {
-  const copy = startupMessage(state.startup, state.harness);
-  return (
-    <section class={`vw-startup${compact ? " vw-startup-compact" : ""}`} role="status" aria-live="polite" aria-busy="true">
-      <span class="vw-startup-orbit" aria-hidden="true"><span /></span>
-      <span class="vw-startup-copy">
-        <strong>{copy.title}</strong>
-        <span>{copy.detail}</span>
-      </span>
-      <span class="vw-startup-track" aria-hidden="true">
-        {[0, 1, 2].map((step) => (
-          <span key={step} class={step < copy.step ? "vw-step-done" : step === copy.step ? "vw-step-current" : ""} />
-        ))}
-      </span>
-    </section>
-  );
-}
-
-function SessionList({
-  state,
-  awaiting,
-  now,
-  failure,
-  query,
-  onQuery,
-  onNew,
-  onClose,
-  onOpen,
-}: {
-  state: WidgetState;
-  awaiting: { key: string; startedAt: number } | null;
-  now: number;
-  /** The attach that failed, still worth showing under its row. */
-  failure: { key: string; message: string } | null;
-  query: string;
-  onQuery: (query: string) => void;
-  onNew: () => void;
-  onClose: () => void;
-  onOpen: (row: SessionRow) => void;
-}): JSX.Element {
-  const allRows = orderedSessionRows(state);
-  const rows = filterSessionRows(allRows, query);
-  const loading = state.startup !== "ready";
-  return (
-    <div class="vw-screen">
-      <div class="vw-app-head">
-        <span class="vw-head-copy"><strong>Chats</strong><small>{state.attention.length ? `${state.attention.length} unread` : `${allRows.length} recent`}</small></span>
-        <button class="vw-icon" type="button" aria-label="New chat" title="New chat" disabled={state.busy || !state.harnesses.some((harness) => harness.startable)} onClick={onNew}>＋</button>
-        <button class="vw-icon" type="button" aria-label="Close chat" title="Close chat" onClick={onClose}>×</button>
-      </div>
-      <div class="vw-list">
-        {loading ? <StartupStatus state={state} compact={rows.length > 0} /> : null}
-        {!loading && allRows.length > 4 ? (
-          <label class="vw-search">
-            <span aria-hidden="true">⌕</span>
-            <input
-              type="search"
-              aria-label="Search chats"
-              placeholder="Search chats"
-              value={query}
-              onInput={(event): void => onQuery(event.currentTarget.value)}
-            />
-            <small role="status" aria-label={`${rows.length} chats`}>{rows.length}</small>
-          </label>
-        ) : null}
-        {!loading && rows.length === 0 ? (
-          <div class="vw-empty">{query.trim() ? "No chats match your search." : state.error ?? "No coding chats found."}</div>
-        ) : null}
-        {rows.map((row) => (
-          <SessionListRow
-            key={row.key}
-            row={row}
-            activity={sessionActivity(state, row)}
-            openingLabel={awaiting?.key === row.key ? openingMessage(now - awaiting.startedAt) : null}
-            error={failure !== null && failure.key === row.key ? failure.message : null}
-            preview={state.attention.find((item) => item.key === row.key)?.preview ?? null}
-            onOpen={(): void => onOpen(row)}
-          />
-        ))}
-        {!loading && state.history.hasMoreSessions ? (
-          <button class="vw-load-more" type="button" onClick={(): void => { widget.sendIntent(INTENT_QUEUE, { action: "loadSessions" }); }}>
-            {query.trim() ? "Search 30 older chats" : "Load 30 older chats"}
-          </button>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
-interface RememberedChat {
-  draft: string;
-  pending: string | null;
-  queued: string[];
-  scrollTop: number | null;
-  stick: boolean;
-}
-
-const rememberedChats = new Map<string, RememberedChat>();
-const rememberedUi: { view: View; query: string } = { view: "chat", query: "" };
-let mountedChatKey: string | null = null;
-
-function chatMemoryKey(state: WidgetState): string {
-  return state.attached?.key || `${state.harness}:${state.workspace}`;
-}
-
-function chatMemory(state: WidgetState): RememberedChat {
-  const key = chatMemoryKey(state);
-  let memory = rememberedChats.get(key);
-  if (!memory) {
-    memory = { draft: state.savedDraft, pending: null, queued: [], scrollTop: null, stick: true };
-    rememberedChats.set(key, memory);
-  }
-  return memory;
-}
-
-function Chat({ state, onBack, onNew, onClose }: { state: WidgetState; onBack: () => void; onNew: () => void; onClose: () => void }): JSX.Element {
-  const memory = chatMemory(state);
-  const memoryKey = chatMemoryKey(state);
-  const [draft, setDraft] = useState(memory.draft);
-  const [pending, setPending] = useState<string | null>(memory.pending);
-  const [queued, setQueued] = useState<string[]>(memory.queued);
-  const scroller = useRef<HTMLDivElement | null>(null);
-  const content = useRef<HTMLDivElement | null>(null);
-  const textarea = useRef<HTMLTextAreaElement | null>(null);
-  const stick = useRef(memory.stick);
-  const pinnedUntil = useRef(0);
-  const earlierAnchor = useRef<{ height: number; top: number; entries: number } | null>(null);
-  const [atBottom, setAtBottom] = useState(memory.stick);
-  const restoredScroll = useRef(false);
-  const focusedComposer = useRef(false);
-  const [dismissedError, setDismissedError] = useState<string | null>(null);
-  const [terminalCopied, setTerminalCopied] = useState(false);
-  const [exportPathCopied, setExportPathCopied] = useState(false);
-  const currentAttention = state.attached?.key ? attentionFor(state, state.attached.key) : null;
-
-  useEffect(() => {
-    const key = state.attached?.key;
-    // A completion can arrive while this exact chat is already open. Acknowledging only on
-    // navigation would leave the launcher claiming there is unread work the reader just watched.
-    if (key && currentAttention) widget.sendIntent(INTENT_QUEUE, { action: "ack", key });
-  }, [currentAttention, state.attached?.key]);
-
-  useEffect(() => {
-    if (state.error !== dismissedError) setDismissedError(null);
-  }, [state.error]);
-
-  useEffect(() => {
-    memory.draft = draft;
-    memory.pending = pending;
-    memory.queued = queued;
-  }, [draft, memory, pending, queued]);
-
-  // Persist after the user pauses typing. The payload is target-free: the daemon scopes it to the
-  // conversation it selected, and an empty string clears the durable draft after send.
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      widget.sendIntent(INTENT_QUEUE, { action: "draft", text: draft });
-    }, 350);
-    return () => clearTimeout(timer);
-  }, [draft, memoryKey]);
-
-  useLayoutEffect(() => {
-    const element = textarea.current;
-    if (!element) return;
-    element.style.height = "0px";
-    const height = composerHeight(element.scrollHeight);
-    element.style.height = `${height}px`;
-    element.style.overflowY = element.scrollHeight > height ? "auto" : "hidden";
-  }, [draft]);
-
-  useEffect(() => {
-    mountedChatKey = memoryKey;
-    return () => {
-      if (mountedChatKey === memoryKey) mountedChatKey = null;
-    };
-  }, [memoryKey]);
-
-  // The pending echo clears as soon as the real transcript carries the prompt.
-  useEffect(() => {
-    if (pending !== null && pendingResolved(pending, state.transcript)) {
-      memory.pending = null;
-      setPending(null);
-    }
-  });
-
-  useEffect(() => {
-    if (state.busy || !state.canSend || pending !== null || queued.length === 0) return;
-    const [next, ...rest] = queued;
-    if (!next) return;
-    memory.queued = rest;
-    setQueued(rest);
-    widget.sendIntent(INTENT_QUEUE, { action: "send", text: next });
-    memory.pending = next;
-    setPending(next);
-    stick.current = true;
-  }, [state.busy, state.canSend, pending, queued]);
-
-  // Auto-scroll AFTER layout, and only when the reader hadn't scrolled up to read something.
-  useLayoutEffect(() => {
-    const el = scroller.current;
-    if (!el) return;
-    const anchor = earlierAnchor.current;
-    if (anchor && (state.transcript.length > anchor.entries || !state.history.hasEarlier)) {
-      el.scrollTop = anchor.top + (el.scrollHeight - anchor.height);
-      memory.scrollTop = el.scrollTop;
-      earlierAnchor.current = null;
-      return;
-    }
-    if (!restoredScroll.current) {
-      el.scrollTop = memory.scrollTop ?? el.scrollHeight;
-      pinnedUntil.current = performance.now() + 120;
-      restoredScroll.current = true;
-      return;
-    }
-    if (stick.current) {
-      pinnedUntil.current = performance.now() + 120;
-      el.scrollTop = el.scrollHeight;
-    }
-  });
-
-  useEffect(() => {
-    const el = scroller.current;
-    const inner = content.current;
-    if (!el || !inner || typeof ResizeObserver === "undefined") return undefined;
-    const observer = new ResizeObserver(() => {
-      if (!stick.current) return;
-      pinnedUntil.current = performance.now() + 120;
-      el.scrollTop = el.scrollHeight;
-    });
-    observer.observe(inner);
-    return () => observer.disconnect();
-  }, [memoryKey]);
-
-  useLayoutEffect(() => {
-    const el = textarea.current;
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, 150)}px`;
-  }, [draft]);
-
-  useEffect(() => {
-    if (focusedComposer.current || !state.canSend || state.startup !== "ready") return;
-    textarea.current?.focus();
-    focusedComposer.current = true;
-  }, [state.canSend, state.startup]);
-
-  const onScroll = (): void => {
-    const el = scroller.current;
-    if (el) {
-      const bottom = nearBottom(el);
-      if (!bottom && performance.now() < pinnedUntil.current) return;
-      stick.current = bottom;
-      setAtBottom(bottom);
-      memory.stick = stick.current;
-      memory.scrollTop = el.scrollTop;
-    }
-  };
-
-  const pin = (): void => {
-    const el = scroller.current;
-    stick.current = true;
-    memory.stick = true;
-    setAtBottom(true);
-    if (!el) return;
-    pinnedUntil.current = performance.now() + 120;
-    el.scrollTop = el.scrollHeight;
-    memory.scrollTop = el.scrollTop;
-  };
-
-  const send = (): void => {
-    const text = draft.trim();
-    if (text === "") return;
-    if (state.busy) {
-      setQueued((messages) => {
-        const next = [...messages, text];
-        memory.queued = next;
-        return next;
-      });
-      setDraft("");
-      return;
-    }
-    if (!state.canSend) return;
-    widget.sendIntent(INTENT_QUEUE, { action: "send", text });
-    memory.pending = text;
-    setPending(text);
-    setDraft("");
-    pin();
-  };
-
-  const interrupt = (): void => {
-    widget.sendIntent(INTENT_QUEUE, { action: "interrupt" });
-  };
-
-  const onKeyDown = (e: JSX.TargetedKeyboardEvent<HTMLTextAreaElement>): void => {
-    if (!isSendKey(e)) return;
-    e.preventDefault();
-    send();
-  };
-
-  const empty = state.transcript.length === 0 && pending === null;
-  const attached = state.attached;
-  const harnessName = harnessDisplayName(attached?.harness ?? state.harness);
-  const attachedRow = attached?.key ? state.sessions.find((row) => row.key === attached.key) : null;
-  const explicitlyLiveElsewhere = state.mode === "mirror" &&
-    (attachedRow?.runtimeStatus === "busy" || attachedRow?.runtimeStatus === "idle");
-  const livePeer = state.mode === "mirror" && state.messaging === "live_peer";
-  // Read-only is the controller's own honest capability for a session someone else is driving; the
-  // composer says so rather than offering a send that can only fail.
-  const readOnly = state.mode === "mirror" && !state.canSend;
-  const canContinueHere = readOnly && state.canResume && !explicitlyLiveElsewhere;
-  const canJoinLive = readOnly && state.canAttach;
-  const canForkHere = readOnly && state.canBranch;
-  const continuationTargets = state.harnesses.filter((candidate) => candidate.startable);
-  const showConversationMenu = state.canDetach || state.canBranch || canJoinLive || state.canOpenTerminal || Boolean(state.canExport && state.exportBackTarget);
-  const branch = (targetHarness?: string): void => {
-    widget.sendIntent(INTENT_QUEUE, { action: "branch", ...(targetHarness ? { targetHarness } : {}) });
-  };
-  const blocks = conversationBlocks(state.transcript);
-  const status = state.needsInput
-    ? "Needs input"
-    : state.busy
-      ? "Working"
-      : livePeer
-        ? "Live elsewhere"
-      : readOnly
-        ? explicitlyLiveElsewhere ? "Active elsewhere" : "Read-only"
-        : "Ready";
-  const op = operationLabel(state.operation);
-  const visibleError = state.error !== null && state.error !== dismissedError ? state.error : null;
-  const headerTitle = attached ? sessionDisplayName(attached) : harnessName || "Agent chat";
-  const headerStatus = state.startup === "ready"
-    ? `${harnessName || "Coding agent"} · ${status}`
-    : startupMessage(state.startup, state.harness).title;
-
-  return (
-    <div class="vw-chat">
-      <div class="vw-app-head vw-chat-head">
-        <button class="vw-icon" type="button" onClick={onBack} title="All chats" aria-label="Back to chats">
-          ‹
-        </button>
-        <HarnessLogo id={attached?.harness ?? state.harness} size={28} />
-        <span class="vw-head-copy">
-          <strong>{headerTitle}</strong>
-          <small data-state={state.needsInput ? "needs-input" : state.busy ? "working" : readOnly ? "mirror" : "ready"}>{headerStatus}</small>
-        </span>
-        {showConversationMenu ? (
-          <details class="vw-chat-menu">
-            <summary class="vw-icon" aria-label="Conversation actions" title="Conversation actions">•••</summary>
-            <div class="vw-chat-menu-popover">
-              {state.canDetach ? <button type="button" onClick={(): void => { widget.sendIntent(INTENT_QUEUE, { action: "detach" }); }}>Detach to read-only</button> : null}
-              {state.canOpenTerminal ? <button type="button" onClick={(): void => { widget.sendIntent(INTENT_QUEUE, { action: "terminal" }); }}>Prepare terminal handoff</button> : null}
-              {state.canExport && state.exportBackTarget ? (
-                <button type="button" onClick={(): void => { widget.sendIntent(INTENT_QUEUE, { action: "export", targetHarness: state.exportBackTarget }); }}>
-                  Export back to {harnessDisplayName(state.exportBackTarget)}
-                </button>
-              ) : null}
-              {canJoinLive ? <button type="button" onClick={(): void => { widget.sendIntent(INTENT_QUEUE, { action: "join" }); }}>Join live session</button> : null}
-              {state.canBranch ? continuationTargets.map((candidate) => (
-                <button key={candidate.id} type="button" onClick={(): void => branch(candidate.id)}>
-                  {candidate.id === state.harness ? `Fork in ${candidate.label}` : `Continue with ${candidate.label}`}
-                </button>
-              )) : null}
-            </div>
-          </details>
-        ) : null}
-        <button class="vw-icon" type="button" aria-label="New chat" title="New chat" disabled={state.busy || !state.harnesses.some((harness) => harness.startable)} onClick={onNew}>＋</button>
-        <button class="vw-icon" type="button" aria-label="Close chat" title="Close chat" onClick={onClose}>×</button>
-      </div>
-      {op ? <div class="vw-operation" role="status"><span class="vw-spinner vw-spinner-small" aria-hidden="true" />{op}</div> : null}
-      {visibleError ? (
-        <div class="vw-error" role="alert">
-          <span>{visibleError}</span>
-          {state.recoverable ? <button type="button" onClick={(): void => { widget.sendIntent(INTENT_QUEUE, { action: "refresh" }); }}>Retry</button> : null}
-          <button type="button" aria-label="Dismiss agent error" onClick={(): void => setDismissedError(visibleError)}>×</button>
-        </div>
-      ) : null}
-      {state.terminalHandoff ? (
-        <div class="vw-terminal-handoff" role="status">
-          <span><strong>Terminal handoff ready</strong><small>{state.terminalHandoff.cwd}</small></span>
-          <button
-            type="button"
-            onClick={(): void => {
-              void navigator.clipboard?.writeText(terminalCommand(state.terminalHandoff!)).then(() => {
-                setTerminalCopied(true);
-                setTimeout(() => setTerminalCopied(false), 1500);
-              }).catch(() => undefined);
-            }}
-          >
-            {terminalCopied ? "Copied" : "Copy command"}
-          </button>
-        </div>
-      ) : null}
-      {state.exportReceipt ? (
-        <div class="vw-terminal-handoff" role="status">
-          <span>
-            <strong>Lossless export ready · {harnessDisplayName(state.exportReceipt.targetHarness)}</strong>
-            <small>{state.exportReceipt.path} · {state.exportReceipt.files} {state.exportReceipt.files === 1 ? "file" : "files"}</small>
-          </span>
-          <button
-            type="button"
-            onClick={(): void => {
-              void navigator.clipboard?.writeText(state.exportReceipt!.path).then(() => {
-                setExportPathCopied(true);
-                setTimeout(() => setExportPathCopied(false), 1500);
-              }).catch(() => undefined);
-            }}
-          >
-            {exportPathCopied ? "Copied" : "Copy path"}
-          </button>
-        </div>
-      ) : null}
-      <div class="vw-scroll" ref={scroller} onScroll={onScroll} tabIndex={0} aria-label="Conversation">
-        <div ref={content}>
-          <SessionDetails semantics={state.semantics} />
-          {state.history.hasEarlier ? (
-            <button
-              class="vw-load-earlier"
-              type="button"
-              disabled={state.operation !== null}
-              onClick={(): void => {
-                const element = scroller.current;
-                if (element) {
-                  earlierAnchor.current = {
-                    height: element.scrollHeight,
-                    top: element.scrollTop,
-                    entries: state.transcript.length,
-                  };
-                  stick.current = false;
-                  memory.stick = false;
-                }
-                widget.sendIntent(INTENT_QUEUE, { action: "loadEarlier" });
-              }}
-            >
-              Load earlier messages
-            </button>
-          ) : null}
-          {empty && state.startup !== "ready" ? <StartupStatus state={state} /> : null}
-          {empty && state.startup === "ready" ? (
-            <div class="vw-empty">{state.error ?? (state.harness ? `${harnessDisplayName(state.harness)} is listening. Say something.` : "No transcript yet.")}</div>
-          ) : null}
-          {blocks.map((block) =>
-            block.kind === "tool-group"
-              ? <ToolGroup key={block.id} tools={block.tools} workspace={state.workspace} />
-              : <TranscriptRow key={block.id} entry={block.entry} canRespond={state.canRespond} />,
-          )}
-          {pending !== null ? (
-            <TranscriptRow
-              key="vw-pending"
-              entry={{ id: "vw-pending", role: "user", text: pending, ts: null, truncated: false }}
-              pending
-              failed={state.error !== null && !state.busy}
-              onRetry={(): void => {
-                memory.pending = null;
-                setPending(null);
-                memory.draft = pending;
-                setDraft(pending);
-                textarea.current?.focus();
-              }}
-              canRespond={false}
-            />
-          ) : null}
-          {state.busy ? (
-            <div class="vw-typing" role="status" aria-label={`${harnessDisplayName(state.harness)} is working`}>
-              <span class="vw-typing-mark" aria-hidden="true">✦</span>
-              <span class="vw-typing-dots" aria-hidden="true"><i /><i /><i /></span>
-              <span>{harnessDisplayName(state.harness)} is working</span>
-            </div>
-          ) : null}
-        </div>
-      </div>
-      <div class="vw-compose-shell">
-        {!atBottom ? <button class="vw-latest" type="button" onClick={pin}>↓ Latest</button> : null}
-        <div class="vw-composer vw-composer-compact">
-          {queued.length ? (
-            <div class="vw-queue" role="status">
-              <strong>{queued.length} queued</strong>
-              {queued.map((message, index) => <div key={`${index}:${message}`}><span>{message}</span><button type="button" aria-label={`Remove queued message ${index + 1}`} onClick={(): void => setQueued((items) => {
-                const next = items.filter((_, itemIndex) => itemIndex !== index);
-                memory.queued = next;
-                return next;
-              })}>×</button></div>)}
-            </div>
-          ) : null}
-          {readOnly ? (
-            <div class="vw-readonly" aria-label={canContinueHere || canJoinLive || canForkHere ? "Continue read-only chat" : "Read-only chat"}>
-              <span aria-hidden="true">◉</span>
-              <span>
-                <strong>{explicitlyLiveElsewhere ? "Active elsewhere" : "Read-only"}</strong>
-                {canJoinLive
-                  ? ` · join this ${harnessName} runtime without taking it over`
-                  : canContinueHere
-                  ? ` · resume this ${harnessName} session here`
-                  : canForkHere
-                    ? ` · start an independent continuation without taking over the source`
-                  : explicitlyLiveElsewhere
-                    ? " · wait, message live, or start a separate continuation"
-                    : " · this harness cannot resume the persisted session"}
-              </span>
-              {canJoinLive || canContinueHere || canForkHere ? (
-                <button
-                  class="vw-continue"
-                  type="button"
-                  disabled={state.operation !== null}
-                  onClick={(): void => {
-                    if (canJoinLive) widget.sendIntent(INTENT_QUEUE, { action: "join" });
-                    else if (canContinueHere) widget.sendIntent(INTENT_QUEUE, { action: "resume" });
-                    else branch();
-                  }}
-                >
-                  {canJoinLive ? "Join live" : canContinueHere ? "Continue here" : "Fork here"}
-                </button>
-              ) : null}
-            </div>
-          ) : (
-            <div class="vw-envelope vw-envelope-compact">
-              <textarea
-                ref={textarea}
-                class="vw-input"
-                rows={1}
-                aria-label={`Message ${harnessDisplayName(attached?.harness ?? state.harness ?? "agent")}`}
-                placeholder={state.startup !== "ready" ? "Connecting…" : state.busy ? "Queue a follow-up…" : "Ask your agent…"}
-                value={draft}
-                disabled={state.mode !== "control" && !state.canSend}
-                onInput={(e): void => {
-                  const value = (e.currentTarget as HTMLTextAreaElement).value;
-                  memory.draft = value;
-                  setDraft(value);
-                }}
-                onKeyDown={onKeyDown}
-              />
-              <div class="vw-composer-foot">
-                <span class="vw-actions">
-                  {state.busy ? <button class="vw-stop" type="button" aria-label="Stop agent" onClick={interrupt} disabled={!state.canInterrupt}>■</button> : null}
-                  <button class="vw-send" type="button" aria-label={state.busy ? "Queue message" : "Send message"} onClick={send} disabled={draft.trim() === "" || (!state.busy && !state.canSend)}>
-                    {state.busy ? "+" : "↑"}
-                  </button>
-                </span>
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-let rememberedNewDraft = "";
-let rememberedNewHarness = "";
-
-function NewChat({
-  state,
-  onBack,
-  onClose,
-  onStarted,
-}: {
-  state: WidgetState;
-  onBack: () => void;
-  onClose: () => void;
-  onStarted: () => void;
-}): JSX.Element {
-  const startable = state.harnesses.filter((harness) => harness.startable);
-  const initialHarness = rememberedNewHarness || startable.find((item) => item.id === state.harness)?.id || startable[0]?.id || "";
-  const [harness, setHarness] = useState(initialHarness);
-  const [draft, setDraft] = useState(rememberedNewDraft);
-  const [starting, setStarting] = useState<string | null>(null);
-  const textarea = useRef<HTMLTextAreaElement | null>(null);
-
-  useEffect(() => textarea.current?.focus(), []);
-  useEffect(() => {
-    rememberedNewHarness = harness;
-    rememberedNewDraft = draft;
-  }, [draft, harness]);
-  useEffect(() => {
-    if (!starting) return;
-    if (pendingResolved(starting, state.transcript) || (state.mode === "control" && state.harness === harness && state.busy)) {
-      rememberedNewDraft = "";
-      setDraft("");
-      onStarted();
-    } else if (state.error && !state.operation && !state.busy) {
-      setStarting(null);
-    }
-  }, [harness, onStarted, starting, state.busy, state.error, state.harness, state.mode, state.operation, state.transcript]);
-
-  const send = (): void => {
-    const text = draft.trim();
-    if (!text || !harness || starting) return;
-    setStarting(text);
-    widget.sendIntent(INTENT_QUEUE, { action: "new", harness, text });
-  };
-
-  return (
-    <div class="vw-chat vw-new-chat">
-      <div class="vw-app-head">
-        <button class="vw-icon" type="button" aria-label="Cancel new chat" title="Back" onClick={onBack}>‹</button>
-        <span class="vw-head-copy"><strong>New chat</strong><small>No session is created until you send</small></span>
-        <button class="vw-icon" type="button" aria-label="Close chat" title="Close chat" onClick={onClose}>×</button>
-      </div>
-      <div class="vw-new-body">
-        <span class="vw-new-mark" aria-hidden="true">✦</span>
-        <strong>What should the agent build or fix?</strong>
-        <span>Choose a coding harness and send the first message.</span>
-      </div>
-      {state.error && starting ? <div class="vw-error" role="alert"><span>{state.error}</span></div> : null}
-      <div class="vw-composer">
-      <div class="vw-new-picker">
-          <HarnessLogo id={harness} size={24} />
-          <label for="vw-new-harness">Coding harness</label>
-          <select id="vw-new-harness" value={harness} disabled={Boolean(starting)} onChange={(event): void => setHarness(event.currentTarget.value)}>
-            {state.harnesses.map((item) => <option key={item.id} value={item.id} disabled={!item.startable}>{item.label}{item.startable ? "" : " · unavailable"}</option>)}
-          </select>
-        </div>
-        <div class="vw-envelope">
-          <textarea
-            ref={textarea}
-            class="vw-input"
-            rows={3}
-            aria-label="Message coding agent"
-            placeholder={startable.length ? "What should the agent do?" : "No coding harness is available"}
-            value={draft}
-            disabled={!startable.length || Boolean(starting)}
-            onInput={(event): void => setDraft(event.currentTarget.value)}
-            onKeyDown={(event): void => {
-              if (!isSendKey(event)) return;
-              event.preventDefault();
-              send();
-            }}
-          />
-          <div class="vw-composer-foot">
-            <span class="vw-agent-id">{state.harnesses.find((item) => item.id === harness)?.label ?? "Agent"}</span>
-            <button class="vw-send" type="button" aria-label="Start chat" disabled={!draft.trim() || !harness || Boolean(starting)} onClick={send}>{starting ? <span class="vw-spinner" aria-hidden="true" /> : "↑"}</button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function OpeningChat({ row, elapsed, onBack, onClose }: { row: SessionRow; elapsed: number; onBack: () => void; onClose: () => void }): JSX.Element {
-  return (
-    <div class="vw-chat">
-      <div class="vw-app-head">
-        <button class="vw-icon" type="button" aria-label="Back to chats" onClick={onBack}>‹</button>
-        <HarnessLogo id={row.harness} size={28} />
-        <span class="vw-head-copy"><strong>{sessionDisplayName(row)}</strong><small>{harnessDisplayName(row.harness)} · Opening</small></span>
-        <button class="vw-icon" type="button" aria-label="Close chat" onClick={onClose}>×</button>
-      </div>
-      <div class="vw-opening" role="status" aria-busy="true">
-        <span class="vw-startup-orbit" aria-hidden="true"><span /></span>
-        <strong>{openingMessage(elapsed)}</strong>
-        <span>{elapsed < 4_000 ? "Connecting to the conversation…" : "Loading the latest transcript window…"}</span>
-      </div>
-    </div>
-  );
-}
-
-function MessengerPanel({ state }: { state: unknown }): JSX.Element {
-  const s = readWidgetState(state);
-  const [view, setView] = useState<View>(() => panelLandingView(s, rememberedUi.view));
-  const [query, setQuery] = useState(rememberedUi.query);
-  const [awaiting, setAwaiting] = useState<{ key: string; startedAt: number; row: SessionRow } | null>(null);
-  const [openingNow, setOpeningNow] = useState(() => Date.now());
-  // The failure is copied into local state on arrival so the row can stop showing it without the
-  // host having to retract anything — the host's `attachError` is a fact about the last attach and
-  // stays true until the next one.
-  const [failure, setFailure] = useState<{ key: string; message: string } | null>(null);
-  const dialog = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    rememberedUi.view = view;
-    rememberedUi.query = query;
-  }, [query, view]);
-
-  // Opening and screen changes always leave a meaningful focus target inside the dialog. Keeping
-  // this on the stable wrapper avoids unexpectedly focusing a destructive row or composer action.
-  useLayoutEffect(() => {
-    const element = dialog.current;
-    if (element && !element.contains(document.activeElement)) element.focus({ preventScroll: true });
-  }, [awaiting?.key, view]);
-
-  // The awaited attach settled — either into that session's chat, or into a reason under its row.
-  useEffect(() => {
-    const outcome = attachOutcome(awaiting?.key ?? null, s.attached, s.attachError);
-    if (outcome === "attached") {
-      setAwaiting(null);
-      setFailure(null);
-      setView("chat");
-    } else if (outcome === "failed" && s.attachError !== null) {
-      setAwaiting(null);
-      setFailure(s.attachError);
-      setView("list");
-    }
-  });
-
-  useEffect(() => {
-    if (awaiting === null) return undefined;
-    setOpeningNow(Date.now());
-    const timer = setInterval(() => setOpeningNow(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, [awaiting]);
-
-  // …and the reason fades on its own, so a stale failure never becomes permanent furniture.
-  useEffect(() => {
-    if (failure === null) return undefined;
-    const timer = setTimeout(() => setFailure(null), ATTACH_ERROR_LINGER_MS);
-    return () => clearTimeout(timer);
-  }, [failure]);
-
-  const open = (row: SessionRow): void => {
-    setFailure(null);
-    if (s.attached?.key === row.key) {
-      if (row.key) widget.sendIntent(INTENT_QUEUE, { action: "ack", key: row.key });
-      setView("chat");
-      return;
-    }
-    // The keyless row is the daemon-owned runtime before its first persisted turn. While we are
-    // already on it there is nothing to ask; from a mirror, releasing that mirror restores it.
-    if (row.key === "") {
-      if (s.attached?.key === "") {
-        setView("chat");
-      } else {
-        widget.sendIntent(INTENT_QUEUE, { action: "release" });
-        setAwaiting({ key: "", startedAt: Date.now(), row });
-        setView("chat");
-      }
-      return;
-    }
-    widget.sendIntent(INTENT_QUEUE, { action: "attach", key: row.key });
-    setAwaiting({ key: row.key, startedAt: Date.now(), row });
-    setView("chat");
-  };
-
-  const onDialogKeyDown = (event: JSX.TargetedKeyboardEvent<HTMLDivElement>): void => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      event.stopPropagation();
-      closeMessenger();
-      return;
-    }
-    if (event.key !== "Tab" || dialog.current === null) return;
-    const focusable = [...dialog.current.querySelectorAll<HTMLElement>(
-      "a[href],button:not([disabled]),input:not([disabled]),textarea:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex='-1'])",
-    )].filter((element) => !element.hidden && element.getAttribute("aria-hidden") !== "true");
-    if (focusable.length === 0) {
-      event.preventDefault();
-      dialog.current.focus({ preventScroll: true });
-      return;
-    }
-    const active = document.activeElement;
-    if (event.shiftKey && (active === dialog.current || active === focusable[0])) {
-      event.preventDefault();
-      focusable.at(-1)?.focus({ preventScroll: true });
-    } else if (!event.shiftKey && active === focusable.at(-1)) {
-      event.preventDefault();
-      focusable[0]?.focus({ preventScroll: true });
-    }
-  };
-
-  let content: JSX.Element;
-  if (view === "new") {
-    content = <NewChat state={s} onBack={(): void => setView(s.attached ? "chat" : "list")} onClose={closeMessenger} onStarted={(): void => setView("chat")} />;
-  } else if (view === "chat") {
-    if (awaiting !== null && !attachSettled(awaiting.key, s.attached)) {
-      content = <OpeningChat row={awaiting.row} elapsed={openingNow - awaiting.startedAt} onBack={(): void => { setAwaiting(null); setView("list"); }} onClose={closeMessenger} />;
-    } else {
-      content = (
-        <Chat
-          state={s}
-          onBack={(): void => {
-            setView("list");
-          }}
-          onNew={(): void => setView("new")}
-          onClose={closeMessenger}
-        />
-      );
-    }
-  } else {
-    content = (
-      <SessionList
-        state={s}
-        awaiting={awaiting}
-        now={openingNow}
-        failure={failure}
-        query={query}
-        onQuery={setQuery}
-        onNew={(): void => setView("new")}
-        onClose={closeMessenger}
-        onOpen={open}
-      />
-    );
-  }
-
-  return (
-    <div
-      ref={dialog}
-      class="vw-dialog"
-      role="dialog"
-      aria-modal="true"
-      aria-label="Agent chats"
-      tabIndex={-1}
-      onKeyDown={onDialogKeyDown}
-    >
-      {content}
-    </div>
-  );
-}
-
-// Lucarne replaces the panel container with its pill instead of asking Preact to unmount it. Own
-// that framework boundary here so every effect/observer/timer is cleaned before the DOM disappears,
-// and so reopening never accumulates stale panel instances.
 let mountedPanelContainer: HTMLElement | null = null;
 let restoreLauncherFocus = false;
-
-function renderMessengerPanel(element: HTMLElement, state: unknown): void {
-  if (mountedPanelContainer !== null && mountedPanelContainer !== element) {
-    renderPreact(null, mountedPanelContainer);
-  }
-  mountedPanelContainer = element;
-  renderPreact(<MessengerPanel state={state} />, element);
-}
 
 function closeMessenger(): void {
   if (mountedPanelContainer !== null) renderPreact(null, mountedPanelContainer);
@@ -1203,12 +54,56 @@ function closeMessenger(): void {
   widget.close();
 }
 
-// The last tone the host reported — the shell asks for it whenever it redraws the pill's dot.
-let lastTone: WidgetState["pill"]["tone"] = "off";
+const adapter: UiAdapter = {
+  onIntent(intent: SupercodeUiIntent): void {
+    widget.sendIntent(INTENT_QUEUE, intent);
+  },
+  onClose: closeMessenger,
+  copyText(value: string): Promise<void> | void {
+    return navigator.clipboard?.writeText(value);
+  },
+};
+
+function MessengerDialog({ state }: { state: unknown }): JSX.Element {
+  return (
+    <div
+      class="vw-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Agent chats"
+      tabIndex={-1}
+      onKeyDown={(event): void => {
+        if (event.key !== "Escape") return;
+        event.preventDefault();
+        event.stopPropagation();
+        closeMessenger();
+      }}
+    >
+      <SupercodeMessenger state={state} adapter={adapter} />
+    </div>
+  );
+}
+
+function renderMessengerPanel(element: HTMLElement, state: unknown): void {
+  if (mountedPanelContainer !== null && mountedPanelContainer !== element) renderPreact(null, mountedPanelContainer);
+  const firstMount = mountedPanelContainer !== element;
+  mountedPanelContainer = element;
+  renderPreact(<MessengerDialog state={state} />, element);
+  if (firstMount) {
+    queueMicrotask(() => {
+      const focusTarget = element.querySelector<HTMLElement>("textarea:not(:disabled), input:not(:disabled), button:not(:disabled), [tabindex='0']");
+      focusTarget?.focus({ preventScroll: true });
+    });
+  }
+}
+
+let lastTone: SupercodeUiState["pill"]["tone"] = "off";
 let unreadCount = 0;
 let collapsedMode: PillMode = "connecting";
 let collapsedHarness = "";
+let collapsedLabel = "Open agent chats";
 let collapsedRenderKey: string | null = null;
+
 widget.registerPanel({
   id: "agent",
   title: "Chats",
@@ -1218,17 +113,9 @@ widget.registerPanel({
   badge: () => unreadCount,
 });
 
-// 50px control + 4px visual bleed on each side. The outer host adds its own 1px rim, yielding the
-// conventional 60px messenger footprint without clipping badges, rings, shadows, or focus paint.
 const COLLAPSED_SIZE_PX = 58;
 let collapsedHostObserver: MutationObserver | null = null;
 
-/**
- * Lucarne 1.7.x floors every host width at 80px. That is useful for generic text pills but wrong
- * for a floating messenger launcher. The iframe is same-origin by Lucarne's shell contract, so
- * while (and only while) the pill exists, keep its outer host matched to the square content. The
- * style observer reasserts the size after Lucarne's close-time resize relay reapplies its floor.
- */
 function fitCollapsedHost(): void {
   const pill = document.querySelector<HTMLButtonElement>(".pill");
   const root = window.frameElement?.getRootNode();
@@ -1254,26 +141,16 @@ function fitCollapsedHost(): void {
   }
 }
 
-/**
- * Lucarne owns the pill DOM, but this app owns its identity. Decorate each shell redraw with the
- * same canonical harness mark used throughout the messenger and expose its semantic layout mode
- * to CSS. Observing only the wrap's direct children avoids reacting to our own logo render.
- */
 function syncCollapsedChrome(): void {
   const pill = document.querySelector<HTMLButtonElement>(".pill");
   if (!pill) return;
   pill.dataset.mode = collapsedMode;
   const identityReady = hasHarnessLogo(collapsedHarness);
   pill.hidden = !identityReady;
+  pill.setAttribute("aria-label", collapsedLabel);
+  pill.title = collapsedLabel;
   const brand = pill.querySelector<HTMLElement>(".brand");
-  if (brand) {
-    renderPreact(
-      collapsedHarness
-        ? <HarnessLogo id={collapsedHarness} size={30} />
-        : null,
-      brand,
-    );
-  }
+  if (brand) renderPreact(identityReady ? <HarnessLogo id={collapsedHarness} size={30} /> : null, brand);
   fitCollapsedHost();
   if (restoreLauncherFocus && !pill.hidden) {
     restoreLauncherFocus = false;
@@ -1282,51 +159,43 @@ function syncCollapsedChrome(): void {
 }
 
 const shellWrap = document.querySelector(".wrap");
-if (shellWrap) {
-  new MutationObserver(syncCollapsedChrome).observe(shellWrap, { childList: true });
-}
+if (shellWrap) new MutationObserver(syncCollapsedChrome).observe(shellWrap, { childList: true });
 syncCollapsedChrome();
 
-/**
- * Preact panel content is unmounted while Lucarne draws the collapsed pill. Keep the queue alive at
- * module scope so a follow-up advances when the agent becomes idle even if the messenger is still
- * minimized (the mounted Chat component owns the same transition while it is visible).
- */
-function advanceMinimizedQueue(state: WidgetState): void {
-  const key = chatMemoryKey(state);
-  if (mountedChatKey === key) return;
-  const memory = rememberedChats.get(key);
-  if (!memory) return;
-  if (memory.pending !== null && pendingResolved(memory.pending, state.transcript)) memory.pending = null;
-  if (state.busy || !state.canSend || memory.pending !== null) return;
-  const next = memory.queued.shift();
-  if (!next) return;
-  memory.pending = next;
-  memory.stick = true;
-  widget.sendIntent(INTENT_QUEUE, { action: "send", text: next });
+const accumulatedState: Record<string, unknown> = {};
+
+function pillMode(state: SupercodeUiState): PillMode {
+  if (state.startup !== "ready") return "connecting";
+  if (state.error) return "error";
+  if (state.needsInput) return "needs-input";
+  if (state.busy) return "working";
+  if (state.attention.length) return "unread";
+  return "idle";
 }
 
-// The pill is shell chrome, not panel content — it is the one thing visible while the panel is closed.
 widget.onPatch((patch) => {
-  if (!isRecord(patch) || !("pill" in patch)) return;
-  const state = readWidgetState(patch);
-  advanceMinimizedQueue(state);
-  const pill = pillFor(state);
-  lastTone = pill.tone;
+  if (!isRecord(patch)) return;
+  Object.assign(accumulatedState, patch);
+  const state = normalizeUiState(accumulatedState);
+  lastTone = state.pill.tone;
   unreadCount = state.attention.length + (state.needsInput ? 1 : 0);
-  collapsedMode = pillModeFor(state);
+  collapsedMode = pillMode(state);
+  collapsedLabel = state.pill.label ? `Open agent chats · ${state.pill.label}` : "Open agent chats";
   collapsedHarness = state.attached?.harness
     ?? state.harness
     ?? state.sessions.find((session) => session.active)?.harness
     ?? "";
-  const renderKey = [pill.tone, pill.label, collapsedMode, collapsedHarness, unreadCount].join("\u0000");
-  if (renderKey !== collapsedRenderKey) {
-    collapsedRenderKey = renderKey;
-    widget.setPill({ tone: pill.tone, label: pill.label });
-    syncCollapsedChrome();
-  }
+  const renderKey = [state.pill.tone, state.pill.label, collapsedMode, collapsedHarness, unreadCount].join("\u0000");
+  if (renderKey === collapsedRenderKey) return;
+  collapsedRenderKey = renderKey;
+  widget.setPill({ tone: state.pill.tone, label: state.pill.label });
+  syncCollapsedChrome();
 });
 
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return !!v && typeof v === "object" && !Array.isArray(v);
+// A sticky injection gets a fresh iframe on every navigation. Register the patch listener first,
+// then ask the trusted daemon for exactly one current snapshot so a fast reply cannot be lost.
+widget.sendIntent(INTENT_QUEUE, { action: "mounted" });
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
