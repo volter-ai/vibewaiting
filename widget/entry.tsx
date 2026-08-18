@@ -113,7 +113,9 @@ widget.registerPanel({
   badge: () => unreadCount,
 });
 
-const COLLAPSED_SIZE_PX = 58;
+// A conventional 56px messenger launcher plus 4px of safe area on every side. The safe area is
+// part of the iframe host so badges, focus rings, activity dots, and hover scale never get clipped.
+const COLLAPSED_SIZE_PX = 64;
 let collapsedHostObserver: MutationObserver | null = null;
 
 function fitCollapsedHost(): void {
@@ -123,13 +125,13 @@ function fitCollapsedHost(): void {
   if (!host || !("style" in host)) return;
   const hostElement = host as HTMLElement;
   if (!pill) {
-    if (hostElement.style.borderRadius !== "26px") hostElement.style.borderRadius = "26px";
+    if (hostElement.style.borderRadius !== "32px") hostElement.style.borderRadius = "32px";
     return;
   }
   const size = `${COLLAPSED_SIZE_PX}px`;
   if (hostElement.style.width !== size) hostElement.style.width = size;
   if (hostElement.style.height !== size) hostElement.style.height = size;
-  if (hostElement.style.borderRadius !== "30px") hostElement.style.borderRadius = "30px";
+  if (hostElement.style.borderRadius !== "32px") hostElement.style.borderRadius = "32px";
   const identityReady = hasHarnessLogo(collapsedHarness);
   const visibility = identityReady ? "visible" : "hidden";
   const pointerEvents = identityReady ? "auto" : "none";
@@ -150,7 +152,7 @@ function syncCollapsedChrome(): void {
   pill.setAttribute("aria-label", collapsedLabel);
   pill.title = collapsedLabel;
   const brand = pill.querySelector<HTMLElement>(".brand");
-  if (brand) renderPreact(identityReady ? <HarnessLogo id={collapsedHarness} size={30} /> : null, brand);
+  if (brand) renderPreact(identityReady ? <HarnessLogo id={collapsedHarness} size={34} /> : null, brand);
   fitCollapsedHost();
   if (restoreLauncherFocus && !pill.hidden) {
     restoreLauncherFocus = false;
@@ -182,9 +184,9 @@ widget.onPatch((patch) => {
   collapsedMode = pillMode(state);
   collapsedLabel = state.pill.label ? `Open agent chats · ${state.pill.label}` : "Open agent chats";
   collapsedHarness = state.attached?.harness
-    ?? state.harness
-    ?? state.sessions.find((session) => session.active)?.harness
-    ?? "";
+    || state.harness
+    || state.sessions.find((session) => session.active)?.harness
+    || "";
   const renderKey = [state.pill.tone, state.pill.label, collapsedMode, collapsedHarness, unreadCount].join("\u0000");
   if (renderKey === collapsedRenderKey) return;
   collapsedRenderKey = renderKey;
