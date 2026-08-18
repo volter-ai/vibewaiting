@@ -12,6 +12,7 @@ import {
   openingMessage,
   operationLabel,
   orderedSessionRows,
+  panelLandingView,
   pendingResolved,
   pillFor,
   pillModeFor,
@@ -338,6 +339,19 @@ describe("messenger activity", () => {
     expect(operationLabel("observe")).toBe("Opening chat…");
     expect(operationLabel("interrupt")).toBe("Stopping…");
     expect(operationLabel(null)).toBeNull();
+  });
+});
+
+describe("panelLandingView", () => {
+  it("opens the inbox when the launcher announced unread conversations", () => {
+    const state = { attention: [{ key: "unread", kind: "unseen" as const }] };
+    expect(panelLandingView(state, "chat")).toBe("list");
+    expect(panelLandingView(state, "new")).toBe("list");
+  });
+
+  it("restores the remembered screen without unread conversation attention", () => {
+    expect(panelLandingView({ attention: [] }, "chat")).toBe("chat");
+    expect(panelLandingView({ attention: [] }, "new")).toBe("new");
   });
 });
 
