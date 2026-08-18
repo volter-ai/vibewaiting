@@ -508,6 +508,7 @@ function Chat({ state, onBack, onNew, onClose }: { state: WidgetState; onBack: (
   const focusedComposer = useRef(false);
   const [dismissedError, setDismissedError] = useState<string | null>(null);
   const [terminalCopied, setTerminalCopied] = useState(false);
+  const [exportPathCopied, setExportPathCopied] = useState(false);
   const currentAttention = state.attached?.key ? attentionFor(state, state.attached.key) : null;
 
   useEffect(() => {
@@ -688,7 +689,7 @@ function Chat({ state, onBack, onNew, onClose }: { state: WidgetState; onBack: (
   const canJoinLive = readOnly && state.canAttach;
   const canForkHere = readOnly && state.canBranch;
   const continuationTargets = state.harnesses.filter((candidate) => candidate.startable);
-  const showConversationMenu = state.canDetach || state.canBranch || canJoinLive || state.canOpenTerminal;
+  const showConversationMenu = state.canDetach || state.canBranch || canJoinLive || state.canOpenTerminal || Boolean(state.canExport && state.exportBackTarget);
   const branch = (targetHarness?: string): void => {
     widget.sendIntent(INTENT_QUEUE, { action: "branch", ...(targetHarness ? { targetHarness } : {}) });
   };
@@ -726,6 +727,11 @@ function Chat({ state, onBack, onNew, onClose }: { state: WidgetState; onBack: (
             <div class="vw-chat-menu-popover">
               {state.canDetach ? <button type="button" onClick={(): void => { widget.sendIntent(INTENT_QUEUE, { action: "detach" }); }}>Detach to read-only</button> : null}
               {state.canOpenTerminal ? <button type="button" onClick={(): void => { widget.sendIntent(INTENT_QUEUE, { action: "terminal" }); }}>Prepare terminal handoff</button> : null}
+              {state.canExport && state.exportBackTarget ? (
+                <button type="button" onClick={(): void => { widget.sendIntent(INTENT_QUEUE, { action: "export", targetHarness: state.exportBackTarget }); }}>
+                  Export back to {harnessDisplayName(state.exportBackTarget)}
+                </button>
+              ) : null}
               {canJoinLive ? <button type="button" onClick={(): void => { widget.sendIntent(INTENT_QUEUE, { action: "join" }); }}>Join live session</button> : null}
               {state.canBranch ? continuationTargets.map((candidate) => (
                 <button key={candidate.id} type="button" onClick={(): void => branch(candidate.id)}>
@@ -759,6 +765,25 @@ function Chat({ state, onBack, onNew, onClose }: { state: WidgetState; onBack: (
             }}
           >
             {terminalCopied ? "Copied" : "Copy command"}
+          </button>
+        </div>
+      ) : null}
+      {state.exportReceipt ? (
+        <div class="vw-terminal-handoff" role="status">
+          <span>
+            <strong>Lossless export ready · {harnessDisplayName(state.exportReceipt.targetHarness)}</strong>
+            <small>{state.exportReceipt.path} · {state.exportReceipt.files} {state.exportReceipt.files === 1 ? "file" : "files"}</small>
+          </span>
+          <button
+            type="button"
+            onClick={(): void => {
+              void navigator.clipboard?.writeText(state.exportReceipt!.path).then(() => {
+                setExportPathCopied(true);
+                setTimeout(() => setExportPathCopied(false), 1500);
+              }).catch(() => undefined);
+            }}
+          >
+            {exportPathCopied ? "Copied" : "Copy path"}
           </button>
         </div>
       ) : null}

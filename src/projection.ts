@@ -147,6 +147,14 @@ export interface TerminalHandoff {
   cwd: string;
 }
 
+export interface ExportReceipt {
+  targetHarness: string;
+  fidelity: "byte_lossless" | "value_lossless" | "semantic";
+  path: string;
+  files: number;
+  residueCount: number;
+}
+
 /**
  * The last attach that FAILED, named by the row key the panel echoed in.
  *
@@ -192,6 +200,11 @@ export interface WidgetState {
   strategy: "start" | "resume" | "attach" | "branch" | null;
   /** Native terminal attachment command after an explicit request; environment values stay host-side. */
   terminalHandoff: TerminalHandoff | null;
+  /** Daemon-gated lossless artifact export; reduction remains false until the service exposes it. */
+  canExport: boolean;
+  canReduce: boolean;
+  exportBackTarget: string | null;
+  exportReceipt: ExportReceipt | null;
   /** A mirror is messageable because Supercode proved a live peer endpoint, not because we own it. */
   messaging: "live_peer" | null;
   /** True only while the active controlled runtime can accept a native interrupt. */
@@ -494,6 +507,10 @@ export function project(snapshot: SupercodeClientSnapshot, options: ProjectionOp
           cwd: snapshot.terminalLaunch.cwd,
         }
       : null,
+    canExport: false,
+    canReduce: false,
+    exportBackTarget: null,
+    exportReceipt: null,
     messaging: snapshot.connection.messaging,
     canInterrupt: snapshot.availableActions.interrupt,
     canRespond: snapshot.availableActions.respond,

@@ -16,6 +16,7 @@ import {
   parseJoinIntent,
   parseDetachIntent,
   parseDraftIntent,
+  parseExportIntent,
   parseLoadEarlierIntent,
   parseLoadSessionsIntent,
   parseTerminalIntent,
@@ -37,6 +38,8 @@ import { sessionKey } from "../src/sessions.js";
 import { FakeHarnessClient, FakeWidgetHost, descriptor, localHarness, waitFor } from "./fakes.js";
 import { SupercodeController, type SupercodeClientSnapshot } from "@volter-ai-dev/supercode-client";
 import type { MessengerPersistence, PersistedMessengerState } from "../src/persistence.js";
+import type { ExportReceipt } from "../src/projection.js";
+import type { SessionArtifact } from "@volter-ai-dev/supercode-harness-sdk";
 
 const running: Daemon[] = [];
 
@@ -157,6 +160,15 @@ describe("draft intent", () => {
     expect(parseDraftIntent({ action: "draft", text: "" })).toEqual({ text: "" });
     expect(parseDraftIntent({ action: "draft", text: "x", key: "page-target" })).toBeNull();
     expect(parseDraftIntent({ action: "draft", text: "x".repeat(50_001) })).toBeNull();
+  });
+});
+
+describe("export intent", () => {
+  it("accepts a format choice but no page-chosen session or output path", () => {
+    expect(parseExportIntent({ action: "export", targetHarness: " codex " })).toEqual({ targetHarness: "codex" });
+    expect(parseExportIntent({ action: "export", targetHarness: "" })).toBeNull();
+    expect(parseExportIntent({ action: "export", targetHarness: "codex", key: "untrusted" })).toBeNull();
+    expect(parseExportIntent({ action: "export", targetHarness: "codex", path: "/tmp/untrusted" })).toBeNull();
   });
 });
 
@@ -367,12 +379,16 @@ describe("startDaemon", () => {
       "canAttach",
       "canBranch",
       "canDetach",
+      "canExport",
       "canInterrupt",
       "canOpenTerminal",
+      "canReduce",
       "canRespond",
       "canResume",
       "canSend",
       "error",
+      "exportBackTarget",
+      "exportReceipt",
       "harness",
       "harnesses",
       "history",
@@ -614,6 +630,7 @@ async function sessionRig(
   sessions: FakeHarnessClient["sessions"] = [OWN, ATLAS, BRIDGE],
   suppliedClient?: FakeHarnessClient,
   persistence?: MessengerPersistence,
+  materializeArtifact?: (artifact: SessionArtifact) => Promise<ExportReceipt>,
 ): Promise<Rig & { logs: string[] }> {
   const client = suppliedClient ?? new FakeHarnessClient({ sessions });
   const logs: string[] = [];
@@ -629,6 +646,7 @@ async function sessionRig(
     attachHost: async () => host,
     log: (m) => logs.push(m),
     ...(persistence ? { persistence } : {}),
+    ...(materializeArtifact ? { materializeArtifact } : {}),
   });
   running.push(daemon);
   return { daemon, host, client, logs, attached: [], lastPush: () => host.pushes.at(-1) as WidgetState };
@@ -792,6 +810,67 @@ describe("attaching", () => {
     expect(client.discoverQueries.some((query) => query.workspace === ATLAS.cwd)).toBe(false);
   });
 
+  it("exports the daemon-selected session through the lossless native artifact API", async () => {
+    const receipt: ExportReceipt = {
+      targetHarness: "codex",
+      fidelity: "value_lossless",
+      path: "/tmp/export-bundle",
+      files: 1,
+      residueCount: 0,
+    };
+    const materialized: SessionArtifact[] = [];
+    const { daemon, client, host, lastPush } = await sessionRig(
+      [OWN, ATLAS],
+      undefined,
+      undefined,
+      async (artifact) => {
+        materialized.push(artifact);
+        return receipt;
+      },
+    );
+    await host.fireIntent(INTENT_QUEUE, { action: "attach", key: sessionKey(ATLAS.locator) });
+    expect(lastPush().canExport).toBe(true);
+    await host.fireIntent(INTENT_QUEUE, { action: "export", targetHarness: "codex" });
+    await daemon.flush();
+
+    expect(client.exportedWith).toEqual([{ locator: ATLAS.locator, target_harness: "codex" }]);
+    expect(materialized).toHaveLength(1);
+    expect(lastPush().exportReceipt).toEqual(receipt);
+    expect(lastPush().error).toBeNull();
+  });
+
+  it("refuses to materialize an export with semantic residue", async () => {
+    const client = new FakeHarnessClient({ sessions: [OWN, ATLAS] });
+    client.exportSession = async (params): Promise<never> => ({
+      artifact: {
+        source_harness: params.locator.harness,
+        target_harness: params.target_harness,
+        session_id: params.locator.session_id,
+        content: "lossy",
+        suggested_filename: "lossy.jsonl",
+        files: [],
+        fidelity: "semantic",
+        residue: ["native tool result could not be represented"],
+      },
+    }) as never;
+    let materialized = false;
+    const { daemon, host, lastPush } = await sessionRig(
+      client.sessions,
+      client,
+      undefined,
+      async () => {
+        materialized = true;
+        throw new Error("must not materialize");
+      },
+    );
+    await host.fireIntent(INTENT_QUEUE, { action: "attach", key: sessionKey(ATLAS.locator) });
+    await host.fireIntent(INTENT_QUEUE, { action: "export", targetHarness: "codex" });
+    await daemon.flush();
+    expect(materialized).toBe(false);
+    expect(lastPush().exportReceipt).toBeNull();
+    expect(lastPush().error).toContain("refusing a lossy codex export");
+  });
+
   it("restores a per-conversation draft after the daemon and iframe are replaced", async () => {
     const store = new MemoryPersistence();
     const first = await sessionRig([OWN, ATLAS], undefined, store);
@@ -922,7 +1001,13 @@ describe("attaching", () => {
     expect(client.branchedWith).toEqual([{ locator: ATLAS.locator, target_harness: "codex" }]);
     expect(client.startedWith.at(-1)?.harness).toBe("codex");
     expect(client.startedRuntimes.at(-1)?.sent).toEqual(["Continue this imported conversation without losing context."]);
-    expect(lastPush()).toMatchObject({ mode: "control", strategy: "branch", harness: "codex" });
+    expect(lastPush()).toMatchObject({
+      mode: "control",
+      strategy: "branch",
+      harness: "codex",
+      canExport: true,
+      exportBackTarget: "claude-code",
+    });
     expect(lastPush().transcript.some((entry) => entry.role === "notice" && entry.code === "branched")).toBe(true);
     expect(client.runtime.closed).toBe(false);
   });

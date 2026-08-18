@@ -23,7 +23,7 @@ import type {
   SupercodeClientAction,
   SupercodeClientSnapshot,
 } from "@volter-ai-dev/supercode-client";
-import type { DiscoveryQuery, HarnessId, JsonValue, SessionDescriptor, SessionFormat } from "@volter-ai-dev/supercode-harness-sdk";
+import type { DiscoveryQuery, HarnessId, JsonValue, SessionArtifact, SessionDescriptor, SessionFormat } from "@volter-ai-dev/supercode-harness-sdk";
 import { WidgetHost } from "lucarne/widget/host";
 import {
   DEFAULT_MAX_ENTRIES,
@@ -38,7 +38,10 @@ import {
 } from "./projection.js";
 import { homedir } from "node:os";
 import { performance } from "node:perf_hooks";
+import { join } from "node:path";
 import type { MessengerPersistence } from "./persistence.js";
+import { writeSessionArtifact } from "./artifacts.js";
+import type { ExportReceipt } from "./projection.js";
 import {
   MAX_SESSION_ROWS,
   attachmentFor,
@@ -103,6 +106,7 @@ export interface AgentController {
   subscribe(listener: () => void): () => void;
   initialize(): Promise<SupercodeClientSnapshot>;
   dispatch(action: SupercodeClientAction): Promise<SupercodeClientSnapshot>;
+  exportSession?(sessionKey: string, targetHarness: SessionFormat): Promise<SessionArtifact>;
   close(): Promise<void>;
 }
 
@@ -213,6 +217,8 @@ export interface DaemonOptions {
   log?: ((message: string) => void) | undefined;
   /** Durable messenger chrome. The CLI supplies a private local file store; tests may inject memory. */
   persistence?: MessengerPersistence | false | undefined;
+  /** Materialize a verified export. Default: a private bundle under `<workspace>/.supercode/exports`. */
+  materializeArtifact?: ((artifact: SessionArtifact) => Promise<ExportReceipt>) | undefined;
 }
 
 /**
@@ -337,6 +343,15 @@ export function parseDetachIntent(payload: unknown): boolean {
 export function parseTerminalIntent(payload: unknown): boolean {
   if (!payload || typeof payload !== "object") return false;
   return (payload as { action?: unknown }).action === "terminal" && Object.keys(payload).length === 1;
+}
+
+export interface ExportIntent { targetHarness: HarnessId }
+
+export function parseExportIntent(payload: unknown): ExportIntent | null {
+  if (!payload || typeof payload !== "object" || Object.keys(payload).some((key) => key !== "action" && key !== "targetHarness")) return null;
+  const { action, targetHarness } = payload as { action?: unknown; targetHarness?: unknown };
+  if (action !== "export" || typeof targetHarness !== "string" || targetHarness.trim() === "") return null;
+  return { targetHarness: targetHarness.trim() as HarnessId };
 }
 
 export interface BranchIntent {
@@ -529,6 +544,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const transcriptLimits = new Map<string, number>();
   /** A page action can fail before the controller publishes a structured error. Keep it visible. */
   let actionError: string | null = null;
+  let exportReceipt: ExportReceipt | null = null;
+  const materializeArtifact = options.materializeArtifact
+    ?? ((artifact: SessionArtifact): Promise<ExportReceipt> => writeSessionArtifact(artifact, join(options.workspace, ".supercode", "exports")));
 
   // Messenger attention belongs to the daemon so it remains consistent across every injected page.
   // The first inventory establishes a baseline; only later transcript changes become unread.
@@ -580,6 +598,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   interface ForeignControllerSlot {
     controller: AgentController;
     unsubscribe: () => void;
+    sourceHarness: HarnessId;
   }
   const foreignControllers = new Map<string, ForeignControllerSlot>();
   let activeForeignKey: string | null = null;
@@ -705,6 +724,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       attachError,
       error: actionError ?? projected.error,
       recoverable: actionError !== null || projected.recoverable,
+      canExport: typeof activeController().exportSession === "function" && snapshot.operation === null && Boolean(snapshot.activeSessionKey || snapshot.activeSessionId),
+      canReduce: false,
+      exportBackTarget: snapshot.connection.strategy === "branch" ? activeForeign()?.sourceHarness ?? null : null,
+      exportReceipt,
       history: { sessionLimit, hasMoreSessions, transcriptLimit, hasEarlier },
       savedDraft: draftKey ? drafts.get(draftKey) ?? "" : "",
       attention: observeAttention(snapshot, sessions, attached, observedAt),
@@ -881,7 +904,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       return;
     }
     activeForeignKey = key;
-    foreignControllers.set(key, { controller: candidate, unsubscribe: candidate.subscribe(schedulePush) });
+    foreignControllers.set(key, {
+      controller: candidate,
+      unsubscribe: candidate.subscribe(schedulePush),
+      sourceHarness: descriptor.locator.harness,
+    });
     const attachedAt = performance.now();
     log(
       `following ${descriptor.locator.harness} in ${workspace} (read-only mirror; ` +
@@ -947,6 +974,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           foreignControllers.set(foreignKey, {
             controller: replacement,
             unsubscribe: replacement.subscribe(schedulePush),
+            sourceHarness: previous?.sourceHarness ?? descriptor.locator.harness,
           });
           activeForeignKey = foreignKey;
           previous?.unsubscribe();
@@ -1118,6 +1146,38 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       } catch (e) {
         actionError = message(e);
         log(`terminal handoff failed: ${actionError}`);
+      }
+      await pushNow();
+      return;
+    }
+    const exportIntent = parseExportIntent(intent.payload);
+    if (exportIntent !== null) {
+      actionError = null;
+      exportReceipt = null;
+      const target = exportIntent.targetHarness;
+      const selected = activeController();
+      try {
+        if (!SESSION_FORMATS.has(target)) throw new Error(`${target} is not a supported native export format`);
+        if (typeof selected.exportSession !== "function") throw new Error("this controller does not expose native session export");
+        let snapshot = selected.getSnapshot();
+        let key = snapshot.activeSessionKey;
+        if (!key && snapshot.activeSessionId) {
+          await selected.dispatch({ type: "refresh", autoObserve: false });
+          snapshot = selected.getSnapshot();
+          key = snapshot.sessions.find(
+            (session) => session.harness === snapshot.activeHarness && session.sessionId === snapshot.activeSessionId,
+          )?.key ?? null;
+        }
+        if (!key) throw new Error("this continuation has not persisted a native session to export yet");
+        const artifact = await selected.exportSession(key, target as SessionFormat);
+        if (artifact.fidelity === "semantic" || artifact.residue.length > 0) {
+          throw new Error(`refusing a lossy ${target} export (${artifact.residue.length} unresolved fidelity notes)`);
+        }
+        exportReceipt = await materializeArtifact(artifact);
+        log(`exported ${snapshot.activeHarness ?? "coding agent"} session to ${target} at ${exportReceipt.path}`);
+      } catch (e) {
+        actionError = message(e);
+        log(`export failed: ${actionError}`);
       }
       await pushNow();
       return;

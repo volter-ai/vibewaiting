@@ -22,6 +22,7 @@ import type {
   RuntimeStartParams,
   SessionDescriptor,
   SessionFormat,
+  SessionArtifact,
   SessionLocator,
   SessionMessageResult,
   SessionWatchEvent,
@@ -197,6 +198,7 @@ export class FakeHarnessClient implements HarnessClientAdapter {
   readonly attachedWith: RuntimeAttachExistingParams[] = [];
   readonly attachedRuntimes: FakeRuntime[] = [];
   readonly branchedWith: Array<{ locator: SessionLocator; target_harness?: SessionFormat }> = [];
+  readonly exportedWith: Array<{ locator: SessionLocator; target_harness: SessionFormat }> = [];
   /** Persisted sessions on this fake box — what `discover` returns and `session()` can load/follow. */
   sessions: Array<SessionDescriptor & { text?: string; messages?: string[] }>;
   /** Every discovery query seen, so a test can prove the GLOBAL scan carries no workspace. */
@@ -289,8 +291,19 @@ export class FakeHarnessClient implements HarnessClientAdapter {
     throw new Error("FakeHarnessClient.importSession is not part of this test");
   }
 
-  async exportSession(): Promise<never> {
-    throw new Error("FakeHarnessClient.exportSession is not part of this test");
+  async exportSession(params: { locator: SessionLocator; target_harness: SessionFormat }): Promise<never> {
+    this.exportedWith.push(params);
+    const artifact: SessionArtifact = {
+      source_harness: params.locator.harness,
+      target_harness: params.target_harness,
+      session_id: params.locator.session_id,
+      content: "{\"exported\":true}\n",
+      suggested_filename: `${params.locator.session_id}.jsonl`,
+      files: [],
+      fidelity: "value_lossless",
+      residue: [],
+    };
+    return { artifact } as never;
   }
 
   async translateSession(): Promise<never> {

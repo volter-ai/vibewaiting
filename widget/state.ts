@@ -49,6 +49,10 @@ export const EMPTY_STATE: WidgetState = {
   canOpenTerminal: false,
   strategy: null,
   terminalHandoff: null,
+  canExport: false,
+  canReduce: false,
+  exportBackTarget: null,
+  exportReceipt: null,
   messaging: null,
   canInterrupt: false,
   canRespond: false,
@@ -296,6 +300,19 @@ function readTerminalHandoff(raw: unknown): WidgetState["terminalHandoff"] {
   return { program: raw["program"], arguments: raw["arguments"] as string[], cwd: raw["cwd"] };
 }
 
+function readExportReceipt(raw: unknown): WidgetState["exportReceipt"] {
+  if (!isRecord(raw) || typeof raw["targetHarness"] !== "string" || typeof raw["path"] !== "string") return null;
+  const fidelity = raw["fidelity"];
+  if (fidelity !== "byte_lossless" && fidelity !== "value_lossless" && fidelity !== "semantic") return null;
+  return {
+    targetHarness: raw["targetHarness"],
+    fidelity,
+    path: raw["path"],
+    files: typeof raw["files"] === "number" ? Math.max(0, raw["files"]) : 0,
+    residueCount: typeof raw["residueCount"] === "number" ? Math.max(0, raw["residueCount"]) : 0,
+  };
+}
+
 function readSessionRow(raw: unknown): SessionRow | null {
   if (!isRecord(raw)) return null;
   const { key, harness, name, cwd, title, age, updatedAt, messages, active, live, runtimeStatus } = raw;
@@ -390,6 +407,10 @@ export function readWidgetState(raw: unknown): WidgetState {
       ? raw["strategy"]
       : null,
     terminalHandoff: readTerminalHandoff(raw["terminalHandoff"]),
+    canExport: raw["canExport"] === true,
+    canReduce: raw["canReduce"] === true,
+    exportBackTarget: typeof raw["exportBackTarget"] === "string" ? raw["exportBackTarget"] : null,
+    exportReceipt: readExportReceipt(raw["exportReceipt"]),
     messaging: raw["messaging"] === "live_peer" ? "live_peer" : null,
     canInterrupt: raw["canInterrupt"] === true,
     canRespond: raw["canRespond"] === true,
