@@ -22,6 +22,7 @@ import {
   ATTACH_ERROR_LINGER_MS,
   attachOutcome,
   attachSettled,
+  composerHeight,
   filterSessionRows,
   harnessDisplayName,
   isSendKey,
@@ -448,6 +449,15 @@ function Chat({ state, onBack, onNew, onClose }: { state: WidgetState; onBack: (
     memory.queued = queued;
   }, [draft, memory, pending, queued]);
 
+  useLayoutEffect(() => {
+    const element = textarea.current;
+    if (!element) return;
+    element.style.height = "0px";
+    const height = composerHeight(element.scrollHeight);
+    element.style.height = `${height}px`;
+    element.style.overflowY = element.scrollHeight > height ? "auto" : "hidden";
+  }, [draft]);
+
   useEffect(() => {
     mountedChatKey = memoryKey;
     return () => {
@@ -649,51 +659,52 @@ function Chat({ state, onBack, onNew, onClose }: { state: WidgetState; onBack: (
           ) : null}
         </div>
       </div>
-      {!atBottom ? <button class="vw-latest" type="button" onClick={pin}>↓ Latest</button> : null}
-      <div class="vw-composer">
-        {queued.length ? (
-          <div class="vw-queue" role="status">
-            <strong>{queued.length} queued</strong>
-            {queued.map((message, index) => <div key={`${index}:${message}`}><span>{message}</span><button type="button" aria-label={`Remove queued message ${index + 1}`} onClick={(): void => setQueued((items) => {
-              const next = items.filter((_, itemIndex) => itemIndex !== index);
-              memory.queued = next;
-              return next;
-            })}>×</button></div>)}
-          </div>
-        ) : null}
-        {readOnly ? (
-          <div class="vw-readonly" aria-label="Read-only chat">
-            <span aria-hidden="true">◉</span>
-            <span><strong>Read-only</strong> · controlled in another agent window</span>
-          </div>
-        ) : (
-          <div class="vw-envelope">
-            <textarea
-              ref={textarea}
-              class="vw-input"
-              rows={2}
-              aria-label={`Message ${harnessDisplayName(attached?.harness ?? state.harness ?? "agent")}`}
-              placeholder={state.startup !== "ready" ? "Connecting…" : state.busy ? "Queue a follow-up…" : "Ask your agent…"}
-              value={draft}
-              disabled={state.mode !== "control" && !state.canSend}
-              onInput={(e): void => {
-                const value = (e.currentTarget as HTMLTextAreaElement).value;
-                memory.draft = value;
-                setDraft(value);
-              }}
-              onKeyDown={onKeyDown}
-            />
-            <div class="vw-composer-foot">
-              <span class="vw-agent-id">{harnessDisplayName(attached?.harness ?? state.harness)}</span>
-              <span class="vw-actions">
-                {state.busy ? <button class="vw-stop" type="button" aria-label="Stop agent" onClick={interrupt} disabled={!state.canInterrupt}>■</button> : null}
-                <button class="vw-send" type="button" aria-label={state.busy ? "Queue message" : "Send message"} onClick={send} disabled={draft.trim() === "" || (!state.busy && !state.canSend)}>
-                  {state.busy ? "+" : "↑"}
-                </button>
-              </span>
+      <div class="vw-compose-shell">
+        {!atBottom ? <button class="vw-latest" type="button" onClick={pin}>↓ Latest</button> : null}
+        <div class="vw-composer vw-composer-compact">
+          {queued.length ? (
+            <div class="vw-queue" role="status">
+              <strong>{queued.length} queued</strong>
+              {queued.map((message, index) => <div key={`${index}:${message}`}><span>{message}</span><button type="button" aria-label={`Remove queued message ${index + 1}`} onClick={(): void => setQueued((items) => {
+                const next = items.filter((_, itemIndex) => itemIndex !== index);
+                memory.queued = next;
+                return next;
+              })}>×</button></div>)}
             </div>
-          </div>
-        )}
+          ) : null}
+          {readOnly ? (
+            <div class="vw-readonly" aria-label="Read-only chat">
+              <span aria-hidden="true">◉</span>
+              <span><strong>Read-only</strong> · controlled in another agent window</span>
+            </div>
+          ) : (
+            <div class="vw-envelope vw-envelope-compact">
+              <textarea
+                ref={textarea}
+                class="vw-input"
+                rows={1}
+                aria-label={`Message ${harnessDisplayName(attached?.harness ?? state.harness ?? "agent")}`}
+                placeholder={state.startup !== "ready" ? "Connecting…" : state.busy ? "Queue a follow-up…" : "Ask your agent…"}
+                value={draft}
+                disabled={state.mode !== "control" && !state.canSend}
+                onInput={(e): void => {
+                  const value = (e.currentTarget as HTMLTextAreaElement).value;
+                  memory.draft = value;
+                  setDraft(value);
+                }}
+                onKeyDown={onKeyDown}
+              />
+              <div class="vw-composer-foot">
+                <span class="vw-actions">
+                  {state.busy ? <button class="vw-stop" type="button" aria-label="Stop agent" onClick={interrupt} disabled={!state.canInterrupt}>■</button> : null}
+                  <button class="vw-send" type="button" aria-label={state.busy ? "Queue message" : "Send message"} onClick={send} disabled={draft.trim() === "" || (!state.busy && !state.canSend)}>
+                    {state.busy ? "+" : "↑"}
+                  </button>
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

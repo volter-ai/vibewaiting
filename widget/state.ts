@@ -72,6 +72,11 @@ export function panelLandingView(state: Pick<WidgetState, "attention">, remember
 /** Visual state of the collapsed messenger control. */
 export type PillMode = "connecting" | "idle" | "unread" | "working" | "needs-input" | "error";
 
+/** Rest as one messenger line, then grow with a real multiline draft without taking the panel. */
+export function composerHeight(scrollHeight: number): number {
+  return Math.max(34, Math.min(150, Number.isFinite(scrollHeight) ? scrollHeight : 34));
+}
+
 export interface StartupMessage {
   title: string;
   detail: string;
