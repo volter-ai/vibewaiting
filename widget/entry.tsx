@@ -937,6 +937,30 @@ widget.registerPanel({
   badge: () => unreadCount,
 });
 
+const COLLAPSED_SIZE_PX = 50;
+let collapsedHostObserver: MutationObserver | null = null;
+
+/**
+ * Lucarne 1.7.x floors every host width at 80px. That is useful for generic text pills but wrong
+ * for a floating messenger launcher. The iframe is same-origin by Lucarne's shell contract, so
+ * while (and only while) the pill exists, keep its outer host matched to the square content. The
+ * style observer reasserts the size after Lucarne's close-time resize relay reapplies its floor.
+ */
+function fitCollapsedHost(): void {
+  if (!document.querySelector(".pill")) return;
+  const root = window.frameElement?.getRootNode();
+  const host = root && "host" in root ? (root as ShadowRoot).host : null;
+  if (!host || !("style" in host)) return;
+  const hostElement = host as HTMLElement;
+  const size = `${COLLAPSED_SIZE_PX}px`;
+  if (hostElement.style.width !== size) hostElement.style.width = size;
+  if (hostElement.style.height !== size) hostElement.style.height = size;
+  if (!collapsedHostObserver) {
+    collapsedHostObserver = new MutationObserver(fitCollapsedHost);
+    collapsedHostObserver.observe(hostElement, { attributes: true, attributeFilter: ["style"] });
+  }
+}
+
 /**
  * Lucarne owns the pill DOM, but this app owns its identity. Decorate each shell redraw with the
  * same canonical harness mark used throughout the messenger and expose its semantic layout mode
@@ -949,10 +973,19 @@ function syncCollapsedChrome(): void {
   const brand = pill.querySelector<HTMLElement>(".brand");
   if (brand) {
     renderPreact(
-      <HarnessLogo id={collapsedHarness} label={collapsedHarnessLabel} size={30} />,
+      collapsedHarness
+        ? <HarnessLogo id={collapsedHarness} label={collapsedHarnessLabel} size={30} />
+        : (
+          <span class="vw-launcher-fallback" aria-hidden="true">
+            <svg viewBox="0 0 24 24" focusable="false">
+              <path d="M5 4.5h14A2.5 2.5 0 0 1 21.5 7v7A2.5 2.5 0 0 1 19 16.5h-7.3L7 20v-3.5H5A2.5 2.5 0 0 1 2.5 14V7A2.5 2.5 0 0 1 5 4.5Z" />
+            </svg>
+          </span>
+        ),
       brand,
     );
   }
+  fitCollapsedHost();
 }
 
 const shellWrap = document.querySelector(".wrap");
@@ -960,9 +993,6 @@ if (shellWrap) {
   new MutationObserver(syncCollapsedChrome).observe(shellWrap, { childList: true });
 }
 syncCollapsedChrome();
-// Lucarne's observer is armed on first panel open. Size the initial collapsed render immediately,
-// otherwise its 220px boot placeholder can survive forever on a never-opened widget.
-widget.requestResize();
 
 /**
  * Preact panel content is unmounted while Lucarne draws the collapsed pill. Keep the queue alive at
@@ -999,8 +1029,6 @@ widget.onPatch((patch) => {
   collapsedHarnessLabel = collapsedHarness ? harnessDisplayName(collapsedHarness) : "Agent";
   widget.setPill({ tone: pill.tone, label: pill.label });
   syncCollapsedChrome();
-  // setPill replaces the shell node while minimized; explicitly relay every resulting width.
-  widget.requestResize();
 });
 
 function isRecord(v: unknown): v is Record<string, unknown> {
