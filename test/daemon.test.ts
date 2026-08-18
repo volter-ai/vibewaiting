@@ -628,6 +628,9 @@ describe("attaching", () => {
     // …and the runtime this daemon started is untouched.
     expect(client.runtime.closed).toBe(false);
     expect(client.activeFollows).toBe(1);
+    // The global inbox already supplied ATLAS's exact locator. Opening it must not rescan every
+    // transcript in that workspace just so the mirror controller can rediscover the same locator.
+    expect(client.discoverQueries.some((query) => query.workspace === ATLAS.cwd)).toBe(false);
   });
 
   it("returns to the daemon's own session, which can still send", async () => {
