@@ -159,6 +159,14 @@ export interface WidgetState {
   canResume: boolean;
   /** A mirror can be continued as an independent branch without taking over its source runtime. */
   canBranch: boolean;
+  /** A proven live endpoint can be joined as shared control. */
+  canAttach: boolean;
+  /** The current shared attachment can return to a passive mirror without stopping its peer. */
+  canDetach: boolean;
+  /** The controlled runtime can produce native terminal attachment instructions. */
+  canOpenTerminal: boolean;
+  /** How this controller acquired control; used to label shared versus independent continuations. */
+  strategy: "start" | "resume" | "attach" | "branch" | null;
   /** A mirror is messageable because Supercode proved a live peer endpoint, not because we own it. */
   messaging: "live_peer" | null;
   /** True only while the active controlled runtime can accept a native interrupt. */
@@ -436,6 +444,10 @@ export function project(snapshot: SupercodeClientSnapshot, options: ProjectionOp
     canSend: snapshot.availableActions.send,
     canResume: snapshot.availableActions.resume,
     canBranch: snapshot.availableActions.branch,
+    canAttach: snapshot.availableActions.attach,
+    canDetach: snapshot.availableActions.detach,
+    canOpenTerminal: snapshot.availableActions.openTerminal,
+    strategy: snapshot.connection.strategy,
     messaging: snapshot.connection.messaging,
     canInterrupt: snapshot.availableActions.interrupt,
     canRespond: snapshot.availableActions.respond,

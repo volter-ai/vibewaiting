@@ -9,9 +9,12 @@ import {
   WIDGET_NS,
   bindIntentQueue,
   chooseHarness,
+  parseBranchIntent,
   parseAttachIntent,
   parseAcknowledgeIntent,
   parseInterruptIntent,
+  parseJoinIntent,
+  parseDetachIntent,
   parseMountedIntent,
   parseNewChatIntent,
   parseRefreshIntent,
@@ -113,6 +116,22 @@ describe("parseResumeIntent", () => {
     expect(parseResumeIntent({ action: "resume", key: "page-must-not-pick-a-target" })).toBe(false);
     expect(parseResumeIntent({ action: "attach" })).toBe(false);
     expect(parseResumeIntent(null)).toBe(false);
+  });
+});
+
+describe("continuation control intents", () => {
+  it("keeps join and detach target-free", () => {
+    expect(parseJoinIntent({ action: "join" })).toBe(true);
+    expect(parseJoinIntent({ action: "join", endpoint: "untrusted" })).toBe(false);
+    expect(parseDetachIntent({ action: "detach" })).toBe(true);
+    expect(parseDetachIntent({ action: "detach", key: "untrusted" })).toBe(false);
+  });
+
+  it("accepts a branch harness choice but never a page-chosen session", () => {
+    expect(parseBranchIntent({ action: "branch" })).toEqual({ targetHarness: null });
+    expect(parseBranchIntent({ action: "branch", targetHarness: " codex " })).toEqual({ targetHarness: "codex" });
+    expect(parseBranchIntent({ action: "branch", targetHarness: "" })).toBeNull();
+    expect(parseBranchIntent({ action: "branch", key: "untrusted" })).toBeNull();
   });
 });
 
@@ -308,8 +327,11 @@ describe("startDaemon", () => {
       "attached",
       "attention",
       "busy",
+      "canAttach",
       "canBranch",
+      "canDetach",
       "canInterrupt",
+      "canOpenTerminal",
       "canRespond",
       "canResume",
       "canSend",
@@ -325,6 +347,7 @@ describe("startDaemon", () => {
       "recoverable",
       "sessions",
       "startup",
+      "strategy",
       "taskPlan",
       "transcript",
       "workspace",
@@ -734,6 +757,81 @@ describe("attaching", () => {
     });
     // The daemon's original runtime remains another healthy conversation, not collateral damage.
     expect(client.runtime.closed).toBe(false);
+  });
+
+  it("forks a read-only conversation into a separately controlled target harness", async () => {
+    const { daemon, client, host, lastPush } = await sessionRig();
+    await host.fireIntent(INTENT_QUEUE, { action: "attach", key: sessionKey(ATLAS.locator) });
+    expect(lastPush()).toMatchObject({ mode: "mirror", canBranch: true });
+
+    await host.fireIntent(INTENT_QUEUE, { action: "branch", targetHarness: "codex" });
+    await daemon.flush();
+
+    expect(client.branchedWith).toEqual([{ locator: ATLAS.locator, target_harness: "codex" }]);
+    expect(client.startedWith.at(-1)?.harness).toBe("codex");
+    expect(client.startedRuntimes.at(-1)?.sent).toEqual(["Continue this imported conversation without losing context."]);
+    expect(lastPush()).toMatchObject({ mode: "control", strategy: "branch", harness: "codex" });
+    expect(lastPush().transcript.some((entry) => entry.role === "notice" && entry.code === "branched")).toBe(true);
+    expect(client.runtime.closed).toBe(false);
+  });
+
+  it("rekeys a retained branch when its new native session appears in discovery", async () => {
+    const { daemon, client, host, lastPush } = await sessionRig();
+    await host.fireIntent(INTENT_QUEUE, { action: "attach", key: sessionKey(ATLAS.locator) });
+    await host.fireIntent(INTENT_QUEUE, { action: "branch", targetHarness: "codex" });
+    const branchedController = daemon.activeController();
+    const persistedBranch = descriptor({
+      harness: "codex",
+      sessionId: "started-2",
+      cwd: ATLAS.cwd,
+      title: "Continued parser work",
+      updatedAtMs: 2_000_001,
+    });
+    client.sessions.push(persistedBranch);
+    await daemon.refreshSessions();
+
+    expect(lastPush().attached).toMatchObject({ key: sessionKey(persistedBranch.locator), harness: "codex" });
+    await host.fireIntent(INTENT_QUEUE, { action: "release" });
+    await host.fireIntent(INTENT_QUEUE, { action: "attach", key: sessionKey(persistedBranch.locator) });
+    expect(daemon.activeController()).toBe(branchedController);
+    expect(client.startedRuntimes.at(-1)?.closed).toBe(false);
+  });
+
+  it("rejects a cross-harness continuation the live inventory cannot start", async () => {
+    const { daemon, client, host, lastPush } = await sessionRig();
+    await host.fireIntent(INTENT_QUEUE, { action: "attach", key: sessionKey(ATLAS.locator) });
+    await host.fireIntent(INTENT_QUEUE, { action: "branch", targetHarness: "grok" });
+    await daemon.flush();
+
+    expect(client.branchedWith).toEqual([]);
+    expect(lastPush().error).toContain("not currently available");
+    expect(lastPush().mode).toBe("mirror");
+  });
+
+  it("joins a controller-proven live endpoint and detaches back to its follower", async () => {
+    const shared = descriptor({
+      sessionId: "shared-1",
+      cwd: "/home/dev/volter/shared",
+      liveEndpoint: "supercode-live://fake/shared-1",
+      liveStatus: "idle",
+    });
+    const { daemon, client, host, lastPush } = await sessionRig([OWN, shared]);
+    await host.fireIntent(INTENT_QUEUE, { action: "attach", key: sessionKey(shared.locator) });
+    expect(lastPush()).toMatchObject({ mode: "mirror", canAttach: true });
+
+    await host.fireIntent(INTENT_QUEUE, { action: "join" });
+    await daemon.flush();
+    expect(client.attachedWith).toEqual([expect.objectContaining({
+      harness: "claude-code",
+      runtime_id: "shared-1",
+      base_url: "supercode-live://fake/shared-1",
+    })]);
+    expect(lastPush()).toMatchObject({ mode: "control", strategy: "attach", canDetach: true });
+
+    await host.fireIntent(INTENT_QUEUE, { action: "detach" });
+    await daemon.flush();
+    expect(client.attachedRuntimes[0]?.closed).toBe(true);
+    expect(lastPush()).toMatchObject({ mode: "mirror", strategy: null, canAttach: true });
   });
 
   it("keeps a continued conversation alive while another chat is viewed", async () => {

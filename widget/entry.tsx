@@ -619,6 +619,13 @@ function Chat({ state, onBack, onNew, onClose }: { state: WidgetState; onBack: (
   // composer says so rather than offering a send that can only fail.
   const readOnly = state.mode === "mirror" && !state.canSend;
   const canContinueHere = readOnly && state.canResume && !explicitlyLiveElsewhere;
+  const canJoinLive = readOnly && state.canAttach;
+  const canForkHere = readOnly && state.canBranch;
+  const continuationTargets = state.harnesses.filter((candidate) => candidate.startable);
+  const showConversationMenu = state.canDetach || state.canBranch || canJoinLive;
+  const branch = (targetHarness?: string): void => {
+    widget.sendIntent(INTENT_QUEUE, { action: "branch", ...(targetHarness ? { targetHarness } : {}) });
+  };
   const blocks = conversationBlocks(state.transcript);
   const status = state.needsInput
     ? "Needs input"
@@ -647,6 +654,20 @@ function Chat({ state, onBack, onNew, onClose }: { state: WidgetState; onBack: (
           <strong>{headerTitle}</strong>
           <small data-state={state.needsInput ? "needs-input" : state.busy ? "working" : readOnly ? "mirror" : "ready"}>{headerStatus}</small>
         </span>
+        {showConversationMenu ? (
+          <details class="vw-chat-menu">
+            <summary class="vw-icon" aria-label="Conversation actions" title="Conversation actions">•••</summary>
+            <div class="vw-chat-menu-popover">
+              {state.canDetach ? <button type="button" onClick={(): void => { widget.sendIntent(INTENT_QUEUE, { action: "detach" }); }}>Detach to read-only</button> : null}
+              {canJoinLive ? <button type="button" onClick={(): void => { widget.sendIntent(INTENT_QUEUE, { action: "join" }); }}>Join live session</button> : null}
+              {state.canBranch ? continuationTargets.map((candidate) => (
+                <button key={candidate.id} type="button" onClick={(): void => branch(candidate.id)}>
+                  {candidate.id === state.harness ? `Fork in ${candidate.label}` : `Continue with ${candidate.label}`}
+                </button>
+              )) : null}
+            </div>
+          </details>
+        ) : null}
         <button class="vw-icon" type="button" aria-label="New chat" title="New chat" disabled={state.busy || !state.harnesses.some((harness) => harness.startable)} onClick={onNew}>＋</button>
         <button class="vw-icon" type="button" aria-label="Close chat" title="Close chat" onClick={onClose}>×</button>
       </div>
@@ -708,26 +729,32 @@ function Chat({ state, onBack, onNew, onClose }: { state: WidgetState; onBack: (
             </div>
           ) : null}
           {readOnly ? (
-            <div class="vw-readonly" aria-label={canContinueHere ? "Continue read-only chat" : "Read-only chat"}>
+            <div class="vw-readonly" aria-label={canContinueHere || canJoinLive || canForkHere ? "Continue read-only chat" : "Read-only chat"}>
               <span aria-hidden="true">◉</span>
               <span>
                 <strong>{explicitlyLiveElsewhere ? "Active elsewhere" : "Read-only"}</strong>
-                {canContinueHere
+                {canJoinLive
+                  ? ` · join this ${harnessName} runtime without taking it over`
+                  : canContinueHere
                   ? ` · resume this ${harnessName} session here`
+                  : canForkHere
+                    ? ` · start an independent continuation without taking over the source`
                   : explicitlyLiveElsewhere
                     ? " · wait, message live, or start a separate continuation"
                     : " · this harness cannot resume the persisted session"}
               </span>
-              {canContinueHere ? (
+              {canJoinLive || canContinueHere || canForkHere ? (
                 <button
                   class="vw-continue"
                   type="button"
                   disabled={state.operation !== null}
                   onClick={(): void => {
-                    widget.sendIntent(INTENT_QUEUE, { action: "resume" });
+                    if (canJoinLive) widget.sendIntent(INTENT_QUEUE, { action: "join" });
+                    else if (canContinueHere) widget.sendIntent(INTENT_QUEUE, { action: "resume" });
+                    else branch();
                   }}
                 >
-                  Continue here
+                  {canJoinLive ? "Join live" : canContinueHere ? "Continue here" : "Fork here"}
                 </button>
               ) : null}
             </div>

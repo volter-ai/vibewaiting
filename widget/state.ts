@@ -44,6 +44,10 @@ export const EMPTY_STATE: WidgetState = {
   canSend: false,
   canResume: false,
   canBranch: false,
+  canAttach: false,
+  canDetach: false,
+  canOpenTerminal: false,
+  strategy: null,
   messaging: null,
   canInterrupt: false,
   canRespond: false,
@@ -337,6 +341,12 @@ export function readWidgetState(raw: unknown): WidgetState {
     canSend: raw["canSend"] === true,
     canResume: raw["canResume"] === true,
     canBranch: raw["canBranch"] === true,
+    canAttach: raw["canAttach"] === true,
+    canDetach: raw["canDetach"] === true,
+    canOpenTerminal: raw["canOpenTerminal"] === true,
+    strategy: raw["strategy"] === "start" || raw["strategy"] === "resume" || raw["strategy"] === "attach" || raw["strategy"] === "branch"
+      ? raw["strategy"]
+      : null,
     messaging: raw["messaging"] === "live_peer" ? "live_peer" : null,
     canInterrupt: raw["canInterrupt"] === true,
     canRespond: raw["canRespond"] === true,

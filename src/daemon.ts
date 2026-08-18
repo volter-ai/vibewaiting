@@ -23,7 +23,7 @@ import type {
   SupercodeClientAction,
   SupercodeClientSnapshot,
 } from "@volter-ai-dev/supercode-client";
-import type { DiscoveryQuery, HarnessId, JsonValue, SessionDescriptor } from "@volter-ai-dev/supercode-harness-sdk";
+import type { DiscoveryQuery, HarnessId, JsonValue, SessionDescriptor, SessionFormat } from "@volter-ai-dev/supercode-harness-sdk";
 import { WidgetHost } from "lucarne/widget/host";
 import {
   DEFAULT_MAX_ENTRIES,
@@ -313,7 +313,40 @@ export function parseReleaseIntent(payload: unknown): boolean {
 /** Continue the mirror currently selected by the daemon. The page never supplies a session key. */
 export function parseResumeIntent(payload: unknown): boolean {
   if (!payload || typeof payload !== "object") return false;
-  return (payload as { action?: unknown }).action === "resume" && !("key" in payload);
+  return (payload as { action?: unknown }).action === "resume" && Object.keys(payload).length === 1;
+}
+
+/** Join the selected mirror's controller-proven live endpoint; the page cannot supply an endpoint. */
+export function parseJoinIntent(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object") return false;
+  return (payload as { action?: unknown }).action === "join" && Object.keys(payload).length === 1;
+}
+
+/** Leave shared control and return to following the same session. */
+export function parseDetachIntent(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object") return false;
+  return (payload as { action?: unknown }).action === "detach" && Object.keys(payload).length === 1;
+}
+
+export interface BranchIntent {
+  targetHarness: HarnessId | null;
+}
+
+const SESSION_FORMATS = new Set<string>(["claude-code", "codex", "opencode", "pi", "grok"]);
+
+/**
+ * Continue the selected transcript as a separate branch. A harness choice is user input, but the
+ * daemon still validates it against its own live inventory before dispatch; no session locator or
+ * runtime endpoint is accepted from the page.
+ */
+export function parseBranchIntent(payload: unknown): BranchIntent | null {
+  if (!payload || typeof payload !== "object") return null;
+  if (Object.keys(payload).some((key) => key !== "action" && key !== "targetHarness")) return null;
+  const { action, targetHarness } = payload as { action?: unknown; targetHarness?: unknown };
+  if (action !== "branch") return null;
+  if (targetHarness === undefined) return { targetHarness: null };
+  if (typeof targetHarness !== "string" || targetHarness.trim() === "") return null;
+  return { targetHarness: targetHarness.trim() as HarnessId };
 }
 
 /** A newly mounted iframe asks for one forced snapshot; no page-chosen target or state is trusted. */
@@ -549,6 +582,19 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     if (stopped) return Promise.resolve();
     const snapshot = activeController().getSnapshot();
     const ref = activeRef(snapshot);
+    // A branch starts before its new native session necessarily appears in global discovery. Once
+    // it does, move the retained controller from its source-row key to the branch's real row key so
+    // reopening that row returns to the same live runtime instead of spawning a duplicate mirror.
+    if (activeForeignKey !== null && snapshot.connection.mode === "control" && ref?.sessionId) {
+      const current = foreignControllers.get(activeForeignKey);
+      const persisted = descriptors.find((descriptor) => matchesActive(descriptor, ref));
+      const persistedKey = persisted ? sessionKey(persisted.locator) : null;
+      if (current && persistedKey && persistedKey !== activeForeignKey) {
+        foreignControllers.delete(activeForeignKey);
+        foreignControllers.set(persistedKey, current);
+        activeForeignKey = persistedKey;
+      }
+    }
     const observedAt = now();
     const sessions = projectSessions(descriptors, { now: observedAt, home, active: ref, max: MAX_SESSION_ROWS });
     const ownSnapshot = controller.getSnapshot();
@@ -672,6 +718,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     if (stopped || seq !== attachSeq) return;
     // A new attempt supersedes the previous failure, whatever this one goes on to do.
     attachError = null;
+    const retained = foreignControllers.get(key);
+    if (retained) {
+      await releaseForeignView();
+      activeForeignKey = key;
+      log(`returning to locally controlled ${retained.controller.getSnapshot().activeHarness ?? "coding agent"} session`);
+      await pushNow();
+      return;
+    }
     const descriptor = descriptors.find((d) => sessionKey(d.locator) === key);
     if (!descriptor) {
       await failAttach(
@@ -689,13 +743,6 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     await releaseForeignView();
     if (matchesActive(descriptor, activeRef(controller.getSnapshot()))) {
       log(`following this daemon's own ${descriptor.locator.harness} session again`);
-      await pushNow();
-      return;
-    }
-    const retained = foreignControllers.get(key);
-    if (retained) {
-      activeForeignKey = key;
-      log(`returning to locally controlled ${descriptor.locator.harness} session`);
       await pushNow();
       return;
     }
@@ -854,6 +901,74 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       } catch (e) {
         actionError = message(e);
         log(`resume failed: ${actionError}`);
+      }
+      await pushNow();
+      return;
+    }
+    if (parseJoinIntent(intent.payload)) {
+      actionError = null;
+      const foreign = activeForeign();
+      const snapshot = foreign?.controller.getSnapshot();
+      const key = snapshot?.activeSessionKey ?? null;
+      try {
+        if (!foreign || !snapshot || snapshot.connection.mode !== "mirror" || key === null) {
+          throw new Error("open a live shared conversation before joining it");
+        }
+        if (!snapshot.availableActions.attach) {
+          throw new Error(`${snapshot.activeHarness ?? "this harness"} does not expose a joinable live endpoint`);
+        }
+        await foreign.controller.dispatch({ type: "attach", sessionKey: key });
+        log(`joined ${snapshot.activeHarness ?? "coding agent"} live session under shared control`);
+      } catch (e) {
+        actionError = message(e);
+        log(`join failed: ${actionError}`);
+      }
+      await pushNow();
+      return;
+    }
+    if (parseDetachIntent(intent.payload)) {
+      actionError = null;
+      const snapshot = activeController().getSnapshot();
+      try {
+        if (!snapshot.availableActions.detach) throw new Error("this conversation is not a shared live attachment");
+        await activeController().dispatch({ type: "detach" });
+        log(`detached from ${snapshot.activeHarness ?? "coding agent"}; continuing as a read-only follower`);
+      } catch (e) {
+        actionError = message(e);
+        log(`detach failed: ${actionError}`);
+      }
+      await pushNow();
+      return;
+    }
+    const branch = parseBranchIntent(intent.payload);
+    if (branch !== null) {
+      actionError = null;
+      const foreign = activeForeign();
+      const snapshot = foreign?.controller.getSnapshot();
+      const key = snapshot?.activeSessionKey ?? null;
+      try {
+        if (!foreign || !snapshot || snapshot.connection.mode !== "mirror" || key === null) {
+          throw new Error("open a read-only conversation before starting a separate continuation");
+        }
+        if (!snapshot.availableActions.branch) {
+          throw new Error(`${snapshot.activeHarness ?? "this harness"} cannot branch this conversation`);
+        }
+        const target = branch.targetHarness;
+        if (target !== null && !SESSION_FORMATS.has(target)) {
+          throw new Error(`${target} is not a supported session format for continuation`);
+        }
+        if (target !== null && !snapshot.harnesses.some((harness) => harness.id === target && harness.availableActions.start)) {
+          throw new Error(`${target} is not currently available to start a continuation`);
+        }
+        await foreign.controller.dispatch({
+          type: "branch",
+          sessionKey: key,
+          ...(target === null ? {} : { targetHarness: target as SessionFormat }),
+        });
+        log(`branched ${snapshot.activeHarness ?? "coding agent"} conversation${target ? ` into ${target}` : ""}`);
+      } catch (e) {
+        actionError = message(e);
+        log(`branch failed: ${actionError}`);
       }
       await pushNow();
       return;

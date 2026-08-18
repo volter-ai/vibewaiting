@@ -234,6 +234,14 @@ export const PANEL_CSS = `
   background:var(--acc); color:var(--on-acc); font:600 10.5px/1 inherit; cursor:pointer; white-space:nowrap }
 .vw-continue:disabled { opacity:.45; cursor:default }
 .vw-continue:focus-visible { outline:2px solid var(--acc); outline-offset:2px }
+.vw-chat-menu { position:relative; flex:none }
+.vw-chat-menu summary { display:flex; align-items:center; justify-content:center; list-style:none; letter-spacing:-1px; font-size:10px }
+.vw-chat-menu summary::-webkit-details-marker { display:none }
+.vw-chat-menu-popover { position:absolute; z-index:8; top:34px; right:0; width:196px; padding:5px; display:grid; gap:2px;
+  border:1px solid var(--hair); border-radius:10px; background:var(--bg); box-shadow:0 12px 32px #0007 }
+.vw-chat-menu-popover button { min-height:31px; padding:6px 8px; border:0; border-radius:7px; background:transparent;
+  color:var(--fg); text-align:left; font:inherit; cursor:pointer }
+.vw-chat-menu-popover button:hover,.vw-chat-menu-popover button:focus-visible { background:var(--fill); outline:none }
 .vw-opening { flex:1; display:grid; place-items:center; align-content:center; gap:7px; padding:24px; color:var(--mut); text-align:center }
 .vw-opening .vw-startup-orbit { grid-row:auto }.vw-opening strong { color:var(--fg); font-size:13px }.vw-opening > span:last-child { font-size:11px }
 .vw-new-body { min-height:0; flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px; padding:28px; color:var(--mut); text-align:center }

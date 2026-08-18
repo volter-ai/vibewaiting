@@ -17,9 +17,11 @@ import type {
   NormalizedSession,
   ObservedRuntimeEvent,
   RuntimeCapabilities,
+  RuntimeAttachExistingParams,
   RuntimeResumeParams,
   RuntimeStartParams,
   SessionDescriptor,
+  SessionFormat,
   SessionLocator,
   SessionMessageResult,
   SessionWatchEvent,
@@ -176,8 +178,12 @@ export class FakeHarnessClient implements HarnessClientAdapter {
   readonly runtime: FakeRuntime;
   readonly harnesses: LocalHarness[];
   readonly startedWith: RuntimeStartParams[] = [];
+  readonly startedRuntimes: FakeRuntime[] = [];
   readonly resumedWith: RuntimeResumeParams[] = [];
   readonly resumedRuntimes: FakeRuntime[] = [];
+  readonly attachedWith: RuntimeAttachExistingParams[] = [];
+  readonly attachedRuntimes: FakeRuntime[] = [];
+  readonly branchedWith: Array<{ locator: SessionLocator; target_harness?: SessionFormat }> = [];
   /** Persisted sessions on this fake box — what `discover` returns and `session()` can load/follow. */
   sessions: Array<SessionDescriptor & { text?: string }>;
   /** Every discovery query seen, so a test can prove the GLOBAL scan carries no workspace. */
@@ -235,7 +241,11 @@ export class FakeHarnessClient implements HarnessClientAdapter {
   async startManagedRuntime(params: RuntimeStartParams): Promise<never> {
     this.startedWith.push(params);
     if (this.#failStart) throw new Error(this.#failStart);
-    return this.runtime as unknown as never;
+    const runtime = this.startedWith.length === 1
+      ? this.runtime
+      : new FakeRuntime(params.harness, `started-${this.startedWith.length}`);
+    this.startedRuntimes.push(runtime);
+    return runtime as unknown as never;
   }
 
   async resumeManagedRuntime(params: RuntimeResumeParams): Promise<never> {
@@ -245,12 +255,21 @@ export class FakeHarnessClient implements HarnessClientAdapter {
     return runtime as unknown as never;
   }
 
-  async attachManagedRuntime(): Promise<never> {
-    throw new Error("FakeHarnessClient.attachManagedRuntime is not part of this test");
+  async attachManagedRuntime(params: RuntimeAttachExistingParams): Promise<never> {
+    this.attachedWith.push(params);
+    const runtime = new FakeRuntime(params.harness, params.runtime_id);
+    this.attachedRuntimes.push(runtime);
+    return runtime as unknown as never;
   }
 
-  async branchSession(): Promise<never> {
-    throw new Error("FakeHarnessClient.branchSession is not part of this test");
+  async branchSession(params: { locator: SessionLocator; target_harness?: SessionFormat }): Promise<never> {
+    this.branchedWith.push(params);
+    const source = await this.session(params.locator).load();
+    return {
+      parent: params.locator,
+      session: source,
+      bootstrap_prompt: "Continue this imported conversation without losing context.",
+    } as never;
   }
 
   async importSession(): Promise<never> {
