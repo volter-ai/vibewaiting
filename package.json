@@ -21,7 +21,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.widget.json && tsc -p tsconfig.test.json",
     "test": "vitest run",
     "test:widget": "npm run build:widget && playwright test",
-    "check": "npm run typecheck && npm test && npm run build && npm run test:widget",
+    "check": "npm run typecheck && npm test && npm run build",
+    "check:browser": "npm run check && npm run test:widget",
     "smoke": "node scripts/smoke-harness.mjs",
     "smoke:sessions": "npm run build && node scripts/smoke-sessions.mjs"
   },
