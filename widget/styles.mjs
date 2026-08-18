@@ -110,6 +110,7 @@ export const PANEL_CSS = `
 @media (prefers-reduced-motion:reduce) {
   .pill:is([data-mode="connecting"],[data-mode="working"]) .brand::after,
   .vw-startup-orbit::before,.vw-startup-orbit span,.vw-startup-track .vw-step-current::after,.vw-spinner,.vw-typing-dots i { animation:none }
+  .vw-fold-mark { transition:none }
 }
 
 /* transcript */
@@ -157,11 +158,12 @@ export const PANEL_CSS = `
 /* Consecutive tools become VGAI-style activity groups with independently expandable rows. */
 .vw-tool-group { margin:2px 0 8px; overflow:hidden; border:1px solid var(--bd); border-radius:9px; background:var(--fill) }
 .vw-tool-group-head,.vw-tool-row-head { display:flex; align-items:center; gap:6px; min-height:32px; padding:0 8px;
-  list-style:none; cursor:pointer; color:var(--mut); font-size:11px }
-.vw-tool-group-head::-webkit-details-marker,.vw-tool-row-head::-webkit-details-marker,.vw-reasoning summary::-webkit-details-marker { display:none }
+  width:100%; border:0; background:transparent; text-align:left; cursor:pointer; color:var(--mut); font:inherit; font-size:11px }
+.vw-tool-group-head:focus-visible,.vw-tool-row-head:focus-visible { outline:2px solid var(--acc); outline-offset:-2px }
+.vw-reasoning summary::-webkit-details-marker { display:none }
 .vw-tool-group-head strong { color:var(--fg); font-weight:600 }
 .vw-fold-mark { flex:none; font-size:15px; line-height:10px; transition:transform 120ms ease }
-.vw-open,details[open] > summary .vw-fold-mark { transform:rotate(90deg) }
+.vw-open { transform:rotate(90deg) }
 .vw-spacer { flex:1 }
 .vw-tool-row { border-top:1px solid var(--hair) }
 .vw-tool-glyph { width:15px; color:var(--mut); font:10px ui-monospace,SFMono-Regular,Menlo,monospace; text-align:center }
