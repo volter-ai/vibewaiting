@@ -57,7 +57,7 @@ import {
   toolTarget,
   type ToolCategory,
 } from "./presentation.js";
-import { HarnessLogo } from "./harness-logo.js";
+import { HarnessLogo, hasHarnessLogo } from "./harness-logo.js";
 
 const NS = "vibewaiting";
 const INTENT_QUEUE = "agent";
@@ -266,7 +266,6 @@ function SessionListRow({
 }): JSX.Element {
   const opening = openingLabel !== null;
   const status = activityLabel(activity);
-  const harnessLabel = harnessDisplayName(row.harness);
   return (
     <button
       class={`vw-srow${row.active ? " vw-active" : ""}${opening ? " vw-srow-opening" : ""}`}
@@ -275,7 +274,7 @@ function SessionListRow({
       aria-busy={opening}
       title={`${harnessDisplayName(row.harness)} · ${row.cwd}${status ? ` · ${status}` : ""}`}
     >
-      <HarnessLogo id={row.harness} label={harnessLabel} activity={activity} size={32} />
+      <HarnessLogo id={row.harness} activity={activity} size={32} />
       <span class="vw-scol">
         <span class="vw-sline">
           <span class="vw-sname">{sessionDisplayName(row)}</span>
@@ -595,7 +594,7 @@ function Chat({ state, onBack, onNew, onClose }: { state: WidgetState; onBack: (
         <button class="vw-icon" type="button" onClick={onBack} title="All chats" aria-label="Back to chats">
           ‹
         </button>
-        <HarnessLogo id={attached?.harness ?? state.harness} label={harnessName || "Agent"} size={28} />
+        <HarnessLogo id={attached?.harness ?? state.harness} size={28} />
         <span class="vw-head-copy">
           <strong>{headerTitle}</strong>
           <small data-state={state.needsInput ? "needs-input" : state.busy ? "working" : readOnly ? "mirror" : "ready"}>{headerStatus}</small>
@@ -756,7 +755,7 @@ function NewChat({
       {state.error && starting ? <div class="vw-error" role="alert"><span>{state.error}</span></div> : null}
       <div class="vw-composer">
       <div class="vw-new-picker">
-          <HarnessLogo id={harness} label={state.harnesses.find((item) => item.id === harness)?.label ?? harness} size={24} />
+          <HarnessLogo id={harness} size={24} />
           <label for="vw-new-harness">Coding harness</label>
           <select id="vw-new-harness" value={harness} disabled={Boolean(starting)} onChange={(event): void => setHarness(event.currentTarget.value)}>
             {state.harnesses.map((item) => <option key={item.id} value={item.id} disabled={!item.startable}>{item.label}{item.startable ? "" : " · unavailable"}</option>)}
@@ -793,7 +792,7 @@ function OpeningChat({ row, elapsed, onBack, onClose }: { row: SessionRow; elaps
     <div class="vw-chat">
       <div class="vw-app-head">
         <button class="vw-icon" type="button" aria-label="Back to chats" onClick={onBack}>‹</button>
-        <HarnessLogo id={row.harness} label={harnessDisplayName(row.harness)} size={28} />
+        <HarnessLogo id={row.harness} size={28} />
         <span class="vw-head-copy"><strong>{sessionDisplayName(row)}</strong><small>{harnessDisplayName(row.harness)} · Opening</small></span>
         <button class="vw-icon" type="button" aria-label="Close chat" onClick={onClose}>×</button>
       </div>
@@ -927,7 +926,7 @@ let lastTone: WidgetState["pill"]["tone"] = "off";
 let unreadCount = 0;
 let collapsedMode: PillMode = "connecting";
 let collapsedHarness = "";
-let collapsedHarnessLabel = "Agent";
+let collapsedRenderKey: string | null = null;
 widget.registerPanel({
   id: "agent",
   title: "Chats",
@@ -947,7 +946,8 @@ let collapsedHostObserver: MutationObserver | null = null;
  * style observer reasserts the size after Lucarne's close-time resize relay reapplies its floor.
  */
 function fitCollapsedHost(): void {
-  if (!document.querySelector(".pill")) return;
+  const pill = document.querySelector<HTMLButtonElement>(".pill");
+  if (!pill) return;
   const root = window.frameElement?.getRootNode();
   const host = root && "host" in root ? (root as ShadowRoot).host : null;
   if (!host || !("style" in host)) return;
@@ -955,6 +955,11 @@ function fitCollapsedHost(): void {
   const size = `${COLLAPSED_SIZE_PX}px`;
   if (hostElement.style.width !== size) hostElement.style.width = size;
   if (hostElement.style.height !== size) hostElement.style.height = size;
+  const identityReady = hasHarnessLogo(collapsedHarness);
+  const visibility = identityReady ? "visible" : "hidden";
+  const pointerEvents = identityReady ? "auto" : "none";
+  if (hostElement.style.visibility !== visibility) hostElement.style.visibility = visibility;
+  if (hostElement.style.pointerEvents !== pointerEvents) hostElement.style.pointerEvents = pointerEvents;
   if (!collapsedHostObserver) {
     collapsedHostObserver = new MutationObserver(fitCollapsedHost);
     collapsedHostObserver.observe(hostElement, { attributes: true, attributeFilter: ["style"] });
@@ -970,18 +975,14 @@ function syncCollapsedChrome(): void {
   const pill = document.querySelector<HTMLButtonElement>(".pill");
   if (!pill) return;
   pill.dataset.mode = collapsedMode;
+  const identityReady = hasHarnessLogo(collapsedHarness);
+  pill.hidden = !identityReady;
   const brand = pill.querySelector<HTMLElement>(".brand");
   if (brand) {
     renderPreact(
       collapsedHarness
-        ? <HarnessLogo id={collapsedHarness} label={collapsedHarnessLabel} size={30} />
-        : (
-          <span class="vw-launcher-fallback" aria-hidden="true">
-            <svg viewBox="0 0 24 24" focusable="false">
-              <path d="M5 4.5h14A2.5 2.5 0 0 1 21.5 7v7A2.5 2.5 0 0 1 19 16.5h-7.3L7 20v-3.5H5A2.5 2.5 0 0 1 2.5 14V7A2.5 2.5 0 0 1 5 4.5Z" />
-            </svg>
-          </span>
-        ),
+        ? <HarnessLogo id={collapsedHarness} size={30} />
+        : null,
       brand,
     );
   }
@@ -1026,9 +1027,12 @@ widget.onPatch((patch) => {
     ?? state.harness
     ?? state.sessions.find((session) => session.active)?.harness
     ?? "";
-  collapsedHarnessLabel = collapsedHarness ? harnessDisplayName(collapsedHarness) : "Agent";
-  widget.setPill({ tone: pill.tone, label: pill.label });
-  syncCollapsedChrome();
+  const renderKey = [pill.tone, pill.label, collapsedMode, collapsedHarness, unreadCount].join("\u0000");
+  if (renderKey !== collapsedRenderKey) {
+    collapsedRenderKey = renderKey;
+    widget.setPill({ tone: pill.tone, label: pill.label });
+    syncCollapsedChrome();
+  }
 });
 
 function isRecord(v: unknown): v is Record<string, unknown> {
