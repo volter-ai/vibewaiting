@@ -78,8 +78,11 @@ function syncPanelViewport(requestResize = true): void {
   } catch {
     // A stricter embed still gets the safe desktop dimensions below.
   }
-  const width = Math.max(280, Math.min(420, pageWidth - 16));
-  const height = Math.max(280, Math.min(480, pageHeight - 16));
+  // Preserve a real 16px margin on BOTH axes after the host's own border is added. Subtracting
+  // only the right/bottom inset made a 390px viewport produce a 376px outer panel at right:16,
+  // which placed its left rim at -2px and visibly clipped the mobile widget.
+  const width = Math.max(240, Math.min(420, pageWidth - 32));
+  const height = Math.max(280, Math.min(480, pageHeight - 32));
   document.documentElement.style.setProperty("--vw-panel-width", `${width}px`);
   document.documentElement.style.setProperty("--vw-panel-height", `${height}px`);
   if (requestResize) widget.requestResize();
@@ -936,7 +939,9 @@ widget.registerPanel({
   badge: () => unreadCount,
 });
 
-const COLLAPSED_SIZE_PX = 50;
+// 50px control + 4px visual bleed on each side. The outer host adds its own 1px rim, yielding the
+// conventional 60px messenger footprint without clipping badges, rings, shadows, or focus paint.
+const COLLAPSED_SIZE_PX = 58;
 let collapsedHostObserver: MutationObserver | null = null;
 
 /**
@@ -947,14 +952,18 @@ let collapsedHostObserver: MutationObserver | null = null;
  */
 function fitCollapsedHost(): void {
   const pill = document.querySelector<HTMLButtonElement>(".pill");
-  if (!pill) return;
   const root = window.frameElement?.getRootNode();
   const host = root && "host" in root ? (root as ShadowRoot).host : null;
   if (!host || !("style" in host)) return;
   const hostElement = host as HTMLElement;
+  if (!pill) {
+    if (hostElement.style.borderRadius !== "26px") hostElement.style.borderRadius = "26px";
+    return;
+  }
   const size = `${COLLAPSED_SIZE_PX}px`;
   if (hostElement.style.width !== size) hostElement.style.width = size;
   if (hostElement.style.height !== size) hostElement.style.height = size;
+  if (hostElement.style.borderRadius !== "30px") hostElement.style.borderRadius = "30px";
   const identityReady = hasHarnessLogo(collapsedHarness);
   const visibility = identityReady ? "visible" : "hidden";
   const pointerEvents = identityReady ? "auto" : "none";
