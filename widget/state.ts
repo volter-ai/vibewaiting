@@ -46,7 +46,7 @@ export interface StartupMessage {
   step: number;
 }
 
-function harnessDisplayName(harness: string): string {
+export function harnessDisplayName(harness: string): string {
   const known: Record<string, string> = {
     "claude-code": "Claude Code",
     codex: "Codex",
@@ -315,6 +315,44 @@ export function listRows(state: WidgetState): SessionRow[] {
   ];
 }
 
+/** Model identifiers are useful metadata, but poor conversation titles. */
+function isModelTitle(title: string): boolean {
+  return /^(?:claude(?: code)?(?:-|$)|gpt(?:-|$)|o[1-9](?:-|$)|codex(?:-|$)|grok(?:-|$)|gemini(?:-|$)|pi(?:-|$)|opencode(?:-|$))/i.test(
+    title.trim(),
+  );
+}
+
+/** The messenger row's primary label: a real conversation title first, otherwise its project. */
+export function sessionDisplayName(row: Pick<SessionRow, "name" | "title">): string {
+  const title = row.title.trim();
+  const name = row.name.trim();
+  if (title !== "" && title !== name && !isModelTitle(title)) return title;
+  return name || title || "Untitled chat";
+}
+
+/** Compact metadata that distinguishes repeated conversations without burying the useful title. */
+export function sessionDetail(row: Pick<SessionRow, "name" | "title" | "cwd" | "messages">): string {
+  const primary = sessionDisplayName(row);
+  const parts: string[] = [];
+  if (row.name.trim() !== "" && row.name.trim() !== primary) parts.push(row.name.trim());
+  if (row.title.trim() !== "" && row.title.trim() !== primary) parts.push(row.title.trim());
+  if (row.messages !== null) parts.push(`${row.messages} msg${row.messages === 1 ? "" : "s"}`);
+  if (parts.length === 0 && row.cwd.trim() !== "") parts.push(row.cwd.trim());
+  return parts.join(" · ");
+}
+
+/** Local, instant chat-list search; no new discovery/load RPC is needed. */
+export function filterSessionRows(rows: readonly SessionRow[], query: string): SessionRow[] {
+  const needle = query.trim().toLocaleLowerCase();
+  if (needle === "") return [...rows];
+  return rows.filter((row) =>
+    [row.name, row.title, row.cwd, row.harness]
+      .join("\n")
+      .toLocaleLowerCase()
+      .includes(needle),
+  );
+}
+
 /**
  * Has the host confirmed the attach this panel asked for? The list marks the tapped row as opening
  * until it has, and only then does the messenger slide to the chat view — a view that switched on
@@ -367,7 +405,13 @@ export function openingMessage(elapsedMs: number): string {
  * (which is the only useful thing to say when nothing is attached).
  */
 export function pillFor(state: WidgetState): WidgetState["pill"] {
-  if (state.attached !== null) return state.pill;
+  if (state.attached !== null) {
+    const harness = state.attached.harness;
+    const label = state.pill.label.startsWith(harness)
+      ? `${harnessDisplayName(harness)}${state.pill.label.slice(harness.length)}`
+      : state.pill.label;
+    return { ...state.pill, label };
+  }
   const count = state.sessions.length;
   if (count === 0) return state.pill;
   return { tone: state.pill.tone, label: `${count} session${count === 1 ? "" : "s"}` };

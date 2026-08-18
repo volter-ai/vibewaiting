@@ -3,6 +3,8 @@ import {
   EMPTY_STATE,
   attachOutcome,
   attachSettled,
+  filterSessionRows,
+  harnessDisplayName,
   isSendKey,
   listRows,
   nearBottom,
@@ -11,6 +13,8 @@ import {
   pillFor,
   readWidgetState,
   roleLabel,
+  sessionDetail,
+  sessionDisplayName,
   startupMessage,
 } from "../widget/state.js";
 import { project } from "../src/projection.js";
@@ -262,6 +266,37 @@ describe("session rows in a patch", () => {
   });
 });
 
+describe("chat-list labels and search", () => {
+  const titled = {
+    key: "g1",
+    harness: "grok",
+    name: "unity-fps-arc",
+    cwd: "~/volter/unity-fps-arc",
+    title: "Fix nested prefab remapping",
+    age: "2m ago",
+    updatedAt: 1,
+    messages: 42,
+    active: false,
+    live: false,
+  };
+  const modelOnly = { ...titled, key: "c1", harness: "claude-code", name: "vgai-engine", title: "claude-opus-5" };
+
+  it("puts a meaningful conversation title first but keeps model ids as metadata", () => {
+    expect(sessionDisplayName(titled)).toBe("Fix nested prefab remapping");
+    expect(sessionDetail(titled)).toBe("unity-fps-arc · 42 msgs");
+    expect(sessionDisplayName(modelOnly)).toBe("vgai-engine");
+    expect(sessionDetail(modelOnly)).toBe("claude-opus-5 · 42 msgs");
+    expect(harnessDisplayName("claude-code")).toBe("Claude Code");
+  });
+
+  it("searches title, project, path, and harness locally", () => {
+    expect(filterSessionRows([titled, modelOnly], "prefab").map((row) => row.key)).toEqual(["g1"]);
+    expect(filterSessionRows([titled, modelOnly], "vgai").map((row) => row.key)).toEqual(["c1"]);
+    expect(filterSessionRows([titled, modelOnly], "claude").map((row) => row.key)).toEqual(["c1"]);
+    expect(filterSessionRows([titled, modelOnly], "")).toHaveLength(2);
+  });
+});
+
 describe("attachSettled", () => {
   const attached = { key: "k2", harness: "codex", name: "bridge", cwd: "~/b", title: "" };
 
@@ -310,7 +345,7 @@ describe("pillFor", () => {
 
   it("reports the attached session's own status", () => {
     const state = { ...base, attached: { key: "k", harness: "claude-code", name: "atlas", cwd: "~/a", title: "" } };
-    expect(pillFor(state)).toEqual({ tone: "live", label: "claude-code ready" });
+    expect(pillFor(state)).toEqual({ tone: "live", label: "Claude Code ready" });
   });
 
   it("counts what is waiting when nothing is attached", () => {

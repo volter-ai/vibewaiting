@@ -8,9 +8,16 @@ export const PANEL_CSS = `
   max-height:520px; min-height:90px; padding:2px 6px 8px }
 .vw-list::-webkit-scrollbar,.vw-scroll::-webkit-scrollbar { width:8px }
 .vw-list::-webkit-scrollbar-thumb,.vw-scroll::-webkit-scrollbar-thumb { background:var(--fill-2); border-radius:4px }
+.vw-search { position:sticky; top:0; z-index:2; display:flex; align-items:center; gap:7px; margin:2px 2px 6px;
+  padding:7px 9px; border:1px solid var(--hair); border-radius:10px; background:var(--fill); color:var(--mut) }
+.vw-search:focus-within { border-color:var(--acc) }
+.vw-search input { min-width:0; flex:1; border:0; outline:0; background:transparent; color:var(--fg); font:inherit; font-size:12px }
+.vw-search input::placeholder { color:var(--mut) }
+.vw-search small { min-width:16px; text-align:right; color:var(--mut); font-size:9.5px; font-variant-numeric:tabular-nums }
 .vw-srow { display:flex; align-items:center; gap:9px; width:100%; background:transparent; border:0; border-radius:9px;
   padding:8px; text-align:left; color:var(--fg); font:inherit; cursor:pointer }
 .vw-srow:hover,.vw-srow.vw-active { background:var(--fill) }
+.vw-srow:focus-visible,.vw-back:focus-visible,.vw-copy:focus-visible { outline:2px solid var(--acc); outline-offset:-2px }
 .vw-dot { flex:none; width:7px; height:7px; border-radius:50%; background:var(--fill-2); border:1px solid var(--bd) }
 .vw-dot.vw-live { background:var(--ok); border-color:var(--ok) }
 .vw-scol { display:flex; flex-direction:column; gap:2px; min-width:0; flex:1 }
@@ -41,7 +48,7 @@ export const PANEL_CSS = `
 @keyframes vw-breathe { 50% { transform:scale(.72); opacity:.5 } }
 @keyframes vw-progress { from { transform:translateX(-100%) } to { transform:translateX(180%) } }
 @media (prefers-reduced-motion:reduce) {
-  .vw-startup-orbit::before,.vw-startup-orbit span,.vw-startup-track .vw-step-current::after,.vw-spinner { animation:none }
+  .vw-startup-orbit::before,.vw-startup-orbit span,.vw-startup-track .vw-step-current::after,.vw-spinner,.vw-typing-dots i { animation:none }
 }
 
 /* chat header */
@@ -81,7 +88,9 @@ export const PANEL_CSS = `
 .vw-markdown th,.vw-markdown td { padding:4px 5px; border:1px solid var(--bd); text-align:left; vertical-align:top }
 .vw-markdown th { background:var(--fill); font-weight:600 }
 .vw-markdown hr { border:0; border-top:1px solid var(--hair); margin:12px 0 }
-.vw-copy { margin-top:3px; padding:2px 5px; border:0; border-radius:5px; background:transparent; color:var(--mut); font:inherit; font-size:10px; cursor:pointer }
+.vw-copy { margin-top:3px; padding:2px 5px; border:0; border-radius:5px; background:transparent; color:var(--mut); font:inherit; font-size:10px; cursor:pointer;
+  opacity:0; transition:opacity 120ms ease }
+.vw-message:hover .vw-copy,.vw-message:focus-within .vw-copy,.vw-copy:focus-visible { opacity:1 }
 .vw-copy:hover { color:var(--fg); background:var(--fill) }
 
 /* Consecutive tools become VGAI-style activity groups with independently expandable rows. */
@@ -114,16 +123,22 @@ export const PANEL_CSS = `
 .vw-request-kind { color:var(--mut); font-size:11px }
 .vw-request-card pre { max-height:120px; margin:0; overflow:auto; color:var(--mut); font:10px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; white-space:pre-wrap }
 .vw-request-actions { display:flex; flex-wrap:wrap; gap:5px }
-.vw-request-actions button,.vw-mirror-card button { padding:4px 7px; border:1px solid var(--bd2); border-radius:6px; background:var(--fill); color:var(--fg); font:inherit; font-size:11px; cursor:pointer }
+.vw-request-actions button { padding:4px 7px; border:1px solid var(--bd2); border-radius:6px; background:var(--fill); color:var(--fg); font:inherit; font-size:11px; cursor:pointer }
 .vw-request-actions button:disabled { opacity:.45; cursor:default }
 .vw-request-actions .vw-request-reject { color:var(--block); border-color:var(--block) }
-.vw-working { display:flex; align-items:center; gap:6px; color:var(--mut); font-size:11px }
+.vw-typing { align-self:flex-start; display:flex; align-items:center; gap:7px; min-height:28px; padding:5px 8px 5px 6px;
+  border:1px solid var(--hair); border-radius:12px; background:var(--fill); color:var(--mut); font-size:10.5px }
+.vw-typing-mark { display:grid; place-items:center; width:18px; height:18px; border-radius:50%; background:var(--fill-2); color:var(--acc); font-size:10px }
+.vw-typing-dots { display:flex; align-items:center; gap:3px }
+.vw-typing-dots i { width:4px; height:4px; border-radius:50%; background:var(--mut); animation:vw-dot 1.1s ease-in-out infinite }
+.vw-typing-dots i:nth-child(2) { animation-delay:.14s }.vw-typing-dots i:nth-child(3) { animation-delay:.28s }
+@keyframes vw-dot { 0%,60%,100% { transform:translateY(0); opacity:.4 } 30% { transform:translateY(-3px); opacity:1 } }
 .vw-spinner { width:8px; height:8px; border:1px solid var(--bd2); border-top-color:var(--acc); border-radius:50%; animation:vw-spin .75s linear infinite }
 .vw-spinner-small { display:inline-block; flex:none; width:7px; height:7px }
 @keyframes vw-spin { to { transform:rotate(360deg) } }
 .vw-error { margin:0 12px 6px; padding:6px 8px; border-radius:8px; background:var(--fill); color:var(--block); font-size:11.5px }
 
-/* composer + mirror explanation */
+/* composer + compact mirror status */
 .vw-composer { border-top:1px solid var(--hair); padding:8px 12px 12px; display:flex; flex-direction:column; gap:6px }
 .vw-envelope { overflow:hidden; border:1px solid var(--bd2); border-radius:10px; background:var(--fill) }
 .vw-input { display:block; width:100%; min-height:58px; max-height:150px; resize:none; background:transparent; color:var(--fg);
@@ -141,6 +156,7 @@ export const PANEL_CSS = `
 .vw-queue { display:grid; gap:3px; color:var(--mut); font-size:10.5px }
 .vw-queue > div { display:flex; gap:5px; align-items:center }.vw-queue > div span { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
 .vw-queue button { border:0; background:transparent; color:var(--mut); cursor:pointer }
-.vw-mirror-card { display:grid; gap:7px; padding:9px; border:1px solid var(--bd); border-radius:9px; color:var(--mut); font-size:11.5px; line-height:1.45 }
-.vw-mirror-card strong { color:var(--fg) }.vw-mirror-card button { justify-self:start }
+.vw-readonly { display:flex; align-items:center; gap:7px; min-height:34px; padding:6px 8px; border:1px solid var(--hair);
+  border-radius:9px; background:var(--fill); color:var(--mut); font-size:10.5px; line-height:1.35 }
+.vw-readonly > span:first-child { color:var(--ask); font-size:9px }.vw-readonly strong { color:var(--fg) }
 `;

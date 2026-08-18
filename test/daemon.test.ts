@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
   DEFAULT_DISCOVER_INTERVAL_MS,
+  DEFAULT_INTENT_POLL_MS,
   DEFAULT_PUSH_DEBOUNCE_MS,
   DEFAULT_REPUSH_INTERVAL_MS,
   INTENT_QUEUE,
   WIDGET_NS,
+  bindIntentQueue,
   chooseHarness,
   parseAttachIntent,
   parseInterruptIntent,
@@ -14,6 +16,7 @@ import {
   startDaemon,
   type AgentController,
   type Daemon,
+  type WidgetBridge,
 } from "../src/daemon.js";
 import { DEFAULT_MAX_ENTRIES, DEFAULT_MAX_ENTRY_CHARS, MAX_ATTACH_ERROR_CHARS } from "../src/projection.js";
 import type { WidgetState } from "../src/projection.js";
@@ -95,6 +98,46 @@ describe("parseAttachIntent", () => {
     expect(parseAttachIntent({ action: "attach" })).toBeNull();
     expect(parseAttachIntent({ action: "send", text: "hi" })).toBeNull();
     expect(parseAttachIntent(null)).toBeNull();
+  });
+});
+
+describe("messenger intent cadence", () => {
+  it("uses Lucarne's safe context drain at the app's 100ms cadence and deduplicates", async () => {
+    let tick: (() => unknown) | null = null;
+    let fallbackRegistered = false;
+    let stopped = false;
+    let drains = 0;
+    const host: WidgetBridge = {
+      push: async () => undefined,
+      onIntent: () => {
+        fallbackRegistered = true;
+      },
+      every: (ms, fn) => {
+        expect(ms).toBe(DEFAULT_INTENT_POLL_MS);
+        tick = fn;
+        return () => {
+          stopped = true;
+        };
+      },
+      drainIntentsWithContext: async () => {
+        drains += 1;
+        return [{ items: [{ id: "one", payload: { action: "send", text: "hello" } }] }];
+      },
+      remove: async () => undefined,
+    };
+    const received: unknown[] = [];
+    const stop = bindIntentQueue(host, INTENT_QUEUE, (intent) => {
+      received.push(intent.payload);
+    });
+
+    expect(fallbackRegistered).toBe(false);
+    expect(tick).not.toBeNull();
+    await tick!();
+    await tick!();
+    expect(drains).toBe(2);
+    expect(received).toEqual([{ action: "send", text: "hello" }]);
+    stop();
+    expect(stopped).toBe(true);
   });
 });
 
