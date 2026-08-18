@@ -8,8 +8,8 @@ export const PANEL_CSS = `
 .panel { width:var(--vw-panel-width,420px) }
 .panel > header { display:none }
 .panel { animation-duration:.18s }
-.pill { position:relative; width:50px; height:50px; justify-content:center; padding:0; border:0;
-  border-radius:50%; background:transparent; overflow:hidden; animation:none }
+.pill { position:relative; width:50px; height:50px; justify-content:center; margin:4px; padding:0; border:0;
+  border-radius:50%; background:transparent; overflow:visible; animation:none }
 .pill:hover { border-color:transparent; background:var(--fill) }
 .pill:focus-visible { outline:2px solid var(--acc); outline-offset:-3px }
 .pill .brand { position:relative; display:grid; place-items:center }
@@ -18,13 +18,13 @@ export const PANEL_CSS = `
 .pill .lead { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap }
 .pill .triad { position:absolute; inset:0; margin:0; padding:0; pointer-events:none }
 .pill .triad .oi.dot { display:none }
-.pill .triad .oi.badge { position:absolute; top:2px; right:2px; min-width:17px; height:17px; padding:0 4px;
+.pill .triad .oi.badge { position:absolute; top:6px; right:6px; min-width:17px; height:17px; padding:0 4px;
   border:1.5px solid var(--bg); border-radius:9px; background:var(--block); box-shadow:0 1px 4px rgba(0,0,0,.28) }
 
 /* Live state wraps the identity in motion without changing the launcher's footprint. */
 .pill:is([data-mode="connecting"],[data-mode="working"]) .brand::after { content:""; position:absolute; inset:-4px;
   border:2px solid color-mix(in srgb,var(--acc) 28%,transparent); border-top-color:var(--acc); border-radius:50%; animation:vw-spin .8s linear infinite }
-.pill:is([data-mode="needs-input"],[data-mode="error"]) .triad .oi.dot { position:absolute; right:2px; bottom:2px;
+.pill:is([data-mode="needs-input"],[data-mode="error"]) .triad .oi.dot { position:absolute; right:6px; bottom:6px;
   display:grid; place-items:center; width:17px; height:17px; border:1.5px solid var(--bg); border-radius:50%; box-shadow:0 1px 4px rgba(0,0,0,.28); animation:none }
 .pill[data-mode="needs-input"] .triad .oi.dot { border-color:var(--bg); background:var(--ask); color:var(--bg) }
 .pill[data-mode="needs-input"] .triad .oi.dot::before { content:"!"; font-size:11px; font-weight:800; line-height:1 }
@@ -106,6 +106,7 @@ export const PANEL_CSS = `
 @keyframes vw-breathe { 50% { transform:scale(.72); opacity:.5 } }
 @keyframes vw-progress { from { transform:translateX(-100%) } to { transform:translateX(180%) } }
 @media (prefers-reduced-motion:reduce) {
+  .pill:is([data-mode="connecting"],[data-mode="working"]) .brand::after,
   .vw-startup-orbit::before,.vw-startup-orbit span,.vw-startup-track .vw-step-current::after,.vw-spinner,.vw-typing-dots i { animation:none }
 }
 
