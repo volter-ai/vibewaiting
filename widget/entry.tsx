@@ -1,5 +1,5 @@
-// The iframe app — ONE panel in the minimized-messenger shape: the active conversation opens
-// first, with the machine-wide inbox and new-chat composer one tap away.
+// The iframe app — ONE panel in the minimized-messenger shape: unread conversations open into the
+// inbox that the badge announced; otherwise the last screen is restored.
 //
 //   inbox  ──tap a row──▶  opening ──host confirms──▶ chat
 //     ▲                         │                         │
@@ -29,6 +29,7 @@ import {
   nearBottom,
   orderedSessionRows,
   operationLabel,
+  panelLandingView,
   pendingResolved,
   pillFor,
   pillModeFor,
@@ -810,7 +811,7 @@ function OpeningChat({ row, elapsed, onBack, onClose }: { row: SessionRow; elaps
 
 function MessengerPanel({ state }: { state: unknown }): JSX.Element {
   const s = readWidgetState(state);
-  const [view, setView] = useState<View>(() => rememberedUi.view);
+  const [view, setView] = useState<View>(() => panelLandingView(s, rememberedUi.view));
   const [query, setQuery] = useState(rememberedUi.query);
   const [awaiting, setAwaiting] = useState<{ key: string; startedAt: number; row: SessionRow } | null>(null);
   const [openingNow, setOpeningNow] = useState(() => Date.now());

@@ -59,6 +59,16 @@ export const EMPTY_STATE: WidgetState = {
 /** Conversation-first navigation: history and compose sit behind the active thread. */
 export type View = "list" | "chat" | "new";
 
+/**
+ * Choose the screen shown when the collapsed messenger is opened. Unseen conversations must be
+ * discoverable from the badge that announced them, so they take precedence over the last local
+ * screen. Action required by the currently attached agent is deliberately not folded into this
+ * rule: that state should still land directly in its actionable chat.
+ */
+export function panelLandingView(state: Pick<WidgetState, "attention">, remembered: View): View {
+  return state.attention.length > 0 ? "list" : remembered;
+}
+
 /** Visual state of the collapsed messenger control. */
 export type PillMode = "connecting" | "idle" | "unread" | "working" | "needs-input" | "error";
 
