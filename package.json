@@ -34,8 +34,9 @@
     "preact": "^10.19.0"
   },
   "devDependencies": {
-    "@types/node": "^22.10.0",
     "@playwright/test": "1.62.1",
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.2.18",
     "typescript": "^5.7.0",
     "vitest": "^3.2.7"
   }
