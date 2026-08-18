@@ -18,6 +18,7 @@
 // daemon started, and detaching is just closing the second controller.
 import { SupercodeController } from "@volter-ai-dev/supercode-client";
 import type {
+  FrontendHarness,
   HarnessClientAdapter,
   SupercodeClientAction,
   SupercodeClientSnapshot,
@@ -109,6 +110,49 @@ export interface SessionDiscoveryClient {
   discover(query: DiscoveryQuery): Promise<{ sessions: SessionDescriptor[] }>;
 }
 
+/**
+ * Give a one-session mirror controller the inventory facts the daemon already established.
+ *
+ * `SupercodeController.initialize()` normally probes harnesses and discovers the entire target
+ * workspace before `observe` can resolve its opaque session key. The inbox row already carries the
+ * authoritative locator, and the owning controller already carries the harness inventory, so doing
+ * both scans again makes opening proportional to unrelated transcript files. This adapter seeds
+ * only the controller's first inventory pass; every other transport method and any later refresh
+ * still reaches the real client unchanged.
+ */
+export function withSeededMirrorInventory(
+  client: HarnessClientAdapter,
+  descriptor: SessionDescriptor,
+  harnesses: readonly FrontendHarness[],
+): HarnessClientAdapter {
+  let seedDiscovery = true;
+  let seedHarnesses = harnesses.some((harness) => harness.id === descriptor.locator.harness);
+  return new Proxy(client, {
+    get(target, property): unknown {
+      if (property === "discover") {
+        return async (query: Parameters<HarnessClientAdapter["discover"]>[0]): Promise<{ sessions: SessionDescriptor[] }> => {
+          if (seedDiscovery) {
+            seedDiscovery = false;
+            return { sessions: [descriptor] };
+          }
+          return await target.discover(query);
+        };
+      }
+      if (property === "listHarnesses") {
+        return async (query: Parameters<HarnessClientAdapter["listHarnesses"]>[0]) => {
+          if (seedHarnesses) {
+            seedHarnesses = false;
+            return { harnesses: [...harnesses] };
+          }
+          return await target.listHarnesses(query);
+        };
+      }
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as HarnessClientAdapter;
+}
+
 export interface DaemonOptions {
   /** The lucarne session whose pages get the widget. */
   sessionId: string;
@@ -158,7 +202,11 @@ export interface DaemonOptions {
    * How a FOREIGN session gets its (non-owning) controller. Default: a second `SupercodeController`
    * on this daemon's client with `ownsClient: false`, so closing it leaves the transport alone.
    */
-  createController?: ((opts: { workspace: string }) => AgentController) | undefined;
+  createController?: ((opts: {
+    workspace: string;
+    descriptor: SessionDescriptor;
+    harnesses: readonly FrontendHarness[];
+  }) => AgentController) | undefined;
   projection?: ProjectionOptions | undefined;
   log?: ((message: string) => void) | undefined;
 }
@@ -547,12 +595,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   const createController =
     options.createController ??
-    ((opts: { workspace: string }): AgentController =>
+    ((opts: { workspace: string; descriptor: SessionDescriptor; harnesses: readonly FrontendHarness[] }): AgentController =>
       // `ownsClient: false`: this daemon's ONE transport outlives every mirror that borrows it.
-      // The requested descriptor is observed explicitly below, so automatic
-      // observation here would load the workspace's newest session twice.
+      // Seed the locator and already-known harness inventory so initialization does not rediscover
+      // an entire workspace merely to mint the controller's local session key.
       new SupercodeController({
-        client: requireClient(options),
+        client: withSeededMirrorInventory(requireClient(options), opts.descriptor, opts.harnesses),
         workspace: opts.workspace,
         ownsClient: false,
         autoObserve: false,
@@ -612,7 +660,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     let initializedAt = attachStartedAt;
     let candidate: AgentController;
     try {
-      candidate = createController({ workspace });
+      candidate = createController({
+        workspace,
+        descriptor,
+        harnesses: controller.getSnapshot().harnesses,
+      });
     } catch (e) {
       await failAttach(key, seq, message(e), `attach unavailable: ${message(e)}`);
       return;
@@ -650,7 +702,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     const attachedAt = performance.now();
     log(
       `following ${descriptor.locator.harness} in ${workspace} (read-only mirror; ` +
-      `${Math.round(attachedAt - attachStartedAt)}ms total = ${Math.round(initializedAt - attachStartedAt)}ms discovery + ` +
+      `${Math.round(attachedAt - attachStartedAt)}ms total = ${Math.round(initializedAt - attachStartedAt)}ms seeded init + ` +
       `${Math.round(attachedAt - initializedAt)}ms transcript)`,
     );
     await pushNow();
