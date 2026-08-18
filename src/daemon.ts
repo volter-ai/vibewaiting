@@ -358,6 +358,10 @@ export interface BranchIntent {
   targetHarness: HarnessId | null;
 }
 
+export interface ReduceIntent {
+  targetHarness: HarnessId | null;
+}
+
 const SESSION_FORMATS = new Set<string>(["claude-code", "codex", "opencode", "pi", "grok"]);
 
 /**
@@ -370,6 +374,19 @@ export function parseBranchIntent(payload: unknown): BranchIntent | null {
   if (Object.keys(payload).some((key) => key !== "action" && key !== "targetHarness")) return null;
   const { action, targetHarness } = payload as { action?: unknown; targetHarness?: unknown };
   if (action !== "branch") return null;
+  if (targetHarness === undefined) return { targetHarness: null };
+  if (typeof targetHarness !== "string" || targetHarness.trim() === "") return null;
+  return { targetHarness: targetHarness.trim() as HarnessId };
+}
+
+/** Start a verified reversible continuation. The page may choose only a
+ * declared target harness; source identity and recovery paths stay inside the
+ * trusted controller/service boundary. */
+export function parseReduceIntent(payload: unknown): ReduceIntent | null {
+  if (!payload || typeof payload !== "object") return null;
+  if (Object.keys(payload).some((key) => key !== "action" && key !== "targetHarness")) return null;
+  const { action, targetHarness } = payload as { action?: unknown; targetHarness?: unknown };
+  if (action !== "reduce") return null;
   if (targetHarness === undefined) return { targetHarness: null };
   if (typeof targetHarness !== "string" || targetHarness.trim() === "") return null;
   return { targetHarness: targetHarness.trim() as HarnessId };
@@ -726,8 +743,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       error: actionError ?? projected.error,
       recoverable: actionError !== null || projected.recoverable,
       canExport: typeof activeController().exportSession === "function" && snapshot.operation === null && Boolean(snapshot.activeSessionKey || snapshot.activeSessionId),
-      canReduce: false,
-      exportBackTarget: snapshot.connection.strategy === "branch" ? activeForeign()?.sourceHarness ?? null : null,
+      canReduce: projected.canReduce,
+      exportBackTarget: snapshot.connection.strategy === "branch" || snapshot.connection.strategy === "reduce"
+        ? activeForeign()?.sourceHarness ?? null
+        : null,
       exportReceipt,
       history: { sessionLimit, hasMoreSessions, transcriptLimit, hasEarlier },
       savedDraft: draftKey ? drafts.get(draftKey) ?? "" : "",
@@ -749,6 +768,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       canReduce: state.canReduce,
       exportBackTarget: state.exportBackTarget,
       exportReceipt: state.exportReceipt,
+      reductionReceipt: state.reductionReceipt,
       savedDraft: state.savedDraft,
     };
     const stateFingerprint = JSON.stringify(state);
@@ -1235,6 +1255,48 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       } catch (e) {
         actionError = message(e);
         log(`branch failed: ${actionError}`);
+      }
+      await pushNow();
+      return;
+    }
+    const reduction = parseReduceIntent(intent.payload);
+    if (reduction !== null) {
+      actionError = null;
+      const foreign = activeForeign();
+      const snapshot = foreign?.controller.getSnapshot();
+      const key = snapshot?.activeSessionKey ?? null;
+      try {
+        if (!foreign || !snapshot || snapshot.connection.mode !== "mirror" || key === null) {
+          throw new Error("open a persisted read-only conversation before reducing it");
+        }
+        if (!snapshot.availableActions.reduce) {
+          throw new Error("this Supercode service cannot create a verified reversible continuation");
+        }
+        const target = reduction.targetHarness;
+        if (target !== null && !SESSION_FORMATS.has(target)) {
+          throw new Error(`${target} is not a supported session format for continuation`);
+        }
+        if (target !== null && !snapshot.harnesses.some((harness) => harness.id === target && harness.availableActions.start)) {
+          throw new Error(`${target} is not currently available to start a continuation`);
+        }
+        const startedAt = performance.now();
+        await foreign.controller.dispatch({
+          type: "reduce",
+          sessionKey: key,
+          ...(target === null ? {} : { targetHarness: target as SessionFormat }),
+        });
+        const receipt = foreign.controller.getSnapshot().reductionReceipt;
+        if (!receipt?.verified || !receipt.reversible) {
+          throw new Error("Supercode started no verified reversible reduction");
+        }
+        log(
+          `reduced ${snapshot.activeHarness ?? "coding agent"} conversation${target ? ` into ${target}` : ""} ` +
+          `${receipt.sourceTokens}→${receipt.reducedTokens} tokens (${receipt.ratio.toFixed(1)}x) in ` +
+          `${Math.round(performance.now() - startedAt)}ms`,
+        );
+      } catch (e) {
+        actionError = message(e);
+        log(`reduction failed: ${actionError}`);
       }
       await pushNow();
       return;

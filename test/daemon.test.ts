@@ -10,6 +10,7 @@ import {
   bindIntentQueue,
   chooseHarness,
   parseBranchIntent,
+  parseReduceIntent,
   parseAttachIntent,
   parseAcknowledgeIntent,
   parseInterruptIntent,
@@ -142,6 +143,14 @@ describe("continuation control intents", () => {
     expect(parseBranchIntent({ action: "branch", targetHarness: " codex " })).toEqual({ targetHarness: "codex" });
     expect(parseBranchIntent({ action: "branch", targetHarness: "" })).toBeNull();
     expect(parseBranchIntent({ action: "branch", key: "untrusted" })).toBeNull();
+  });
+
+  it("accepts a reduction harness choice but never recovery paths or a page-chosen session", () => {
+    expect(parseReduceIntent({ action: "reduce" })).toEqual({ targetHarness: null });
+    expect(parseReduceIntent({ action: "reduce", targetHarness: " codex " })).toEqual({ targetHarness: "codex" });
+    expect(parseReduceIntent({ action: "reduce", targetHarness: "" })).toBeNull();
+    expect(parseReduceIntent({ action: "reduce", key: "untrusted" })).toBeNull();
+    expect(parseReduceIntent({ action: "reduce", sidecarPath: "/tmp/untrusted" })).toBeNull();
   });
 });
 
@@ -399,6 +408,7 @@ describe("startDaemon", () => {
       "owned",
       "pill",
       "recoverable",
+      "reductionReceipt",
       "savedDraft",
       "semantics",
       "sessions",
@@ -1024,6 +1034,39 @@ describe("attaching", () => {
       exportBackTarget: "claude-code",
     });
     expect(lastPush().transcript.some((entry) => entry.role === "notice" && entry.code === "branched")).toBe(true);
+    expect(client.runtime.closed).toBe(false);
+  });
+
+  it("starts a reduced continuation only through the controller's verified receipt", async () => {
+    const { daemon, client, host, lastPush } = await sessionRig();
+    await host.fireIntent(INTENT_QUEUE, { action: "attach", key: sessionKey(ATLAS.locator) });
+    expect(lastPush()).toMatchObject({ mode: "mirror", canReduce: true });
+
+    await host.fireIntent(INTENT_QUEUE, { action: "reduce", targetHarness: "codex" });
+    await daemon.flush();
+
+    expect(client.reducedWith).toEqual([{ locator: ATLAS.locator, target_harness: "codex" }]);
+    expect(client.startedWith.at(-1)?.harness).toBe("codex");
+    expect(client.startedRuntimes.at(-1)?.sent).toEqual([
+      "Continue from this verified reversible reduction.",
+    ]);
+    expect(lastPush()).toMatchObject({
+      mode: "control",
+      strategy: "reduce",
+      harness: "codex",
+      canReduce: false,
+      exportBackTarget: "claude-code",
+      reductionReceipt: {
+        sourceTokens: 100_000,
+        reducedTokens: 10_000,
+        ratio: 10,
+        sidecarId: "rescue-fake",
+        verified: true,
+        reversible: true,
+        targetHarness: "codex",
+      },
+    });
+    expect(lastPush().transcript.some((entry) => entry.role === "notice" && entry.code === "reduced")).toBe(true);
     expect(client.runtime.closed).toBe(false);
   });
 

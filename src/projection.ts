@@ -155,6 +155,16 @@ export interface ExportReceipt {
   residueCount: number;
 }
 
+export interface ReductionReceipt {
+  sourceTokens: number;
+  reducedTokens: number;
+  ratio: number;
+  sidecarId: string;
+  verified: boolean;
+  reversible: boolean;
+  targetHarness: string;
+}
+
 /**
  * The last attach that FAILED, named by the row key the panel echoed in.
  *
@@ -197,14 +207,15 @@ export interface WidgetState {
   /** The controlled runtime can produce native terminal attachment instructions. */
   canOpenTerminal: boolean;
   /** How this controller acquired control; used to label shared versus independent continuations. */
-  strategy: "start" | "resume" | "attach" | "branch" | null;
+  strategy: "start" | "resume" | "attach" | "branch" | "reduce" | null;
   /** Native terminal attachment command after an explicit request; environment values stay host-side. */
   terminalHandoff: TerminalHandoff | null;
-  /** Daemon-gated lossless artifact export; reduction remains false until the service exposes it. */
+  /** Daemon-gated lossless artifact export and verified reversible continuation. */
   canExport: boolean;
   canReduce: boolean;
   exportBackTarget: string | null;
   exportReceipt: ExportReceipt | null;
+  reductionReceipt: ReductionReceipt | null;
   /** A mirror is messageable because Supercode proved a live peer endpoint, not because we own it. */
   messaging: "live_peer" | null;
   /** True only while the active controlled runtime can accept a native interrupt. */
@@ -508,9 +519,20 @@ export function project(snapshot: SupercodeClientSnapshot, options: ProjectionOp
         }
       : null,
     canExport: false,
-    canReduce: false,
+    canReduce: snapshot.availableActions.reduce,
     exportBackTarget: null,
     exportReceipt: null,
+    reductionReceipt: snapshot.reductionReceipt
+      ? {
+          sourceTokens: snapshot.reductionReceipt.sourceTokens,
+          reducedTokens: snapshot.reductionReceipt.reducedTokens,
+          ratio: snapshot.reductionReceipt.ratio,
+          sidecarId: snapshot.reductionReceipt.sidecarId,
+          verified: snapshot.reductionReceipt.verified,
+          reversible: snapshot.reductionReceipt.reversible,
+          targetHarness: snapshot.reductionReceipt.targetHarness,
+        }
+      : null,
     messaging: snapshot.connection.messaging,
     canInterrupt: snapshot.availableActions.interrupt,
     canRespond: snapshot.availableActions.respond,

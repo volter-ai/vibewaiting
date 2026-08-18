@@ -59,6 +59,7 @@ function snapshot(over: Partial<SupercodeClientSnapshot> = {}): SupercodeClientS
       resume: false,
       attach: false,
       branch: false,
+      reduce: false,
       detach: false,
       openTerminal: false,
       send: false,
@@ -68,6 +69,7 @@ function snapshot(over: Partial<SupercodeClientSnapshot> = {}): SupercodeClientS
     error: null,
     terminalLaunch: null,
     delivery: null,
+    reductionReceipt: null,
     ...over,
   };
 }
@@ -394,6 +396,7 @@ describe("project", () => {
       canReduce: false,
       exportBackTarget: null,
       exportReceipt: null,
+      reductionReceipt: null,
       messaging: null,
       canInterrupt: false,
       canRespond: false,
