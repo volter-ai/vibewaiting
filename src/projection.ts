@@ -126,6 +126,27 @@ export interface TranscriptTaskPlan {
   observedAt: number | null;
 }
 
+export interface SessionSemantics {
+  fidelity: "byte_lossless" | "value_lossless" | "semantic" | null;
+  residue: string[];
+  residueCount: number;
+  parseErrors: number;
+  rawRecords: number;
+  subagents: Array<{
+    id: string;
+    source: string;
+    model: string | null;
+    messages: number;
+    fidelity: "byte_lossless" | "value_lossless" | "semantic";
+  }>;
+}
+
+export interface TerminalHandoff {
+  program: string;
+  arguments: string[];
+  cwd: string;
+}
+
 /**
  * The last attach that FAILED, named by the row key the panel echoed in.
  *
@@ -169,6 +190,8 @@ export interface WidgetState {
   canOpenTerminal: boolean;
   /** How this controller acquired control; used to label shared versus independent continuations. */
   strategy: "start" | "resume" | "attach" | "branch" | null;
+  /** Native terminal attachment command after an explicit request; environment values stay host-side. */
+  terminalHandoff: TerminalHandoff | null;
   /** A mirror is messageable because Supercode proved a live peer endpoint, not because we own it. */
   messaging: "live_peer" | null;
   /** True only while the active controlled runtime can accept a native interrupt. */
@@ -179,6 +202,8 @@ export interface WidgetState {
   workspace: string;
   /** Normalized native plan (Codex/Claude/OpenCode) rendered above the transcript. */
   taskPlan: TranscriptTaskPlan;
+  /** Loss/fidelity and child-agent facts from the normalized session; never inferred from bubbles. */
+  semantics: SessionSemantics;
   /** The controller's last structured error message, or `null`. */
   error: string | null;
   /** Whether retrying the last controller failure is meaningful. */
@@ -227,6 +252,8 @@ export const DEFAULT_MAX_ENTRY_CHARS = 16_000;
 export const MAX_PILL_LABEL_CHARS = 72;
 /** An attach failure is one line under a 300px-wide row — a stack-trace-length message is cut here. */
 export const MAX_ATTACH_ERROR_CHARS = 200;
+const MAX_RESIDUE_ITEMS = 20;
+const MAX_RESIDUE_CHARS = 300;
 
 /** The metadata keys a harness may record an entry's time under, in the order we trust them. */
 const TIMESTAMP_KEYS = ["timestamp", "ts", "time", "created_at", "createdAt", "date"] as const;
@@ -443,6 +470,7 @@ export function derivePill(snapshot: SupercodeClientSnapshot): WidgetPill {
  * this function has no business inventing them. `src/daemon.ts` merges them over this result.
  */
 export function project(snapshot: SupercodeClientSnapshot, options: ProjectionOptions = {}): WidgetState {
+  const activeSession = snapshot.activeSession;
   return {
     pill: derivePill(snapshot),
     startup: "ready",
@@ -459,6 +487,13 @@ export function project(snapshot: SupercodeClientSnapshot, options: ProjectionOp
     canDetach: snapshot.availableActions.detach,
     canOpenTerminal: snapshot.availableActions.openTerminal,
     strategy: snapshot.connection.strategy,
+    terminalHandoff: snapshot.terminalLaunch
+      ? {
+          program: snapshot.terminalLaunch.program,
+          arguments: [...snapshot.terminalLaunch.arguments],
+          cwd: snapshot.terminalLaunch.cwd,
+        }
+      : null,
     messaging: snapshot.connection.messaging,
     canInterrupt: snapshot.availableActions.interrupt,
     canRespond: snapshot.availableActions.respond,
@@ -472,6 +507,22 @@ export function project(snapshot: SupercodeClientSnapshot, options: ProjectionOp
       residueCount: snapshot.taskPlan.residue.length,
       observedAt: snapshot.taskPlan.observedAt,
     },
+    semantics: activeSession
+      ? {
+          fidelity: activeSession.fidelity,
+          residue: activeSession.residue.slice(0, MAX_RESIDUE_ITEMS).map((item) => truncate(item, MAX_RESIDUE_CHARS).text),
+          residueCount: activeSession.residue.length,
+          parseErrors: activeSession.parse_error_lines,
+          rawRecords: activeSession.raw_record_count,
+          subagents: activeSession.subagents.slice(0, 50).map((subagent, index) => ({
+            id: subagent.session_id ?? subagent.agent_id ?? `subagent-${index + 1}`,
+            source: subagent.source,
+            model: subagent.model,
+            messages: subagent.messages.length,
+            fidelity: subagent.fidelity,
+          })),
+        }
+      : { fidelity: null, residue: [], residueCount: 0, parseErrors: 0, rawRecords: 0, subagents: [] },
     error: snapshot.error?.message ?? null,
     recoverable: snapshot.error?.recoverable === true,
     harnesses: snapshot.harnesses.map((harness) => ({

@@ -48,11 +48,13 @@ export const EMPTY_STATE: WidgetState = {
   canDetach: false,
   canOpenTerminal: false,
   strategy: null,
+  terminalHandoff: null,
   messaging: null,
   canInterrupt: false,
   canRespond: false,
   workspace: "",
   taskPlan: { source: "none", items: [], residueCount: 0, observedAt: null },
+  semantics: { fidelity: null, residue: [], residueCount: 0, parseErrors: 0, rawRecords: 0, subagents: [] },
   error: null,
   recoverable: false,
   harnesses: [],
@@ -256,6 +258,44 @@ function readTaskPlan(raw: unknown): TranscriptTaskPlan {
   };
 }
 
+function readSemantics(raw: unknown): WidgetState["semantics"] {
+  if (!isRecord(raw)) return EMPTY_STATE.semantics;
+  const fidelity = raw["fidelity"] === "byte_lossless" || raw["fidelity"] === "value_lossless" || raw["fidelity"] === "semantic"
+    ? raw["fidelity"]
+    : null;
+  const subagents: WidgetState["semantics"]["subagents"] = [];
+  if (Array.isArray(raw["subagents"])) {
+    for (const candidate of raw["subagents"].slice(0, 50)) {
+      if (!isRecord(candidate) || typeof candidate["id"] !== "string" || typeof candidate["source"] !== "string") continue;
+      const childFidelity = candidate["fidelity"];
+      if (childFidelity !== "byte_lossless" && childFidelity !== "value_lossless" && childFidelity !== "semantic") continue;
+      subagents.push({
+        id: candidate["id"],
+        source: candidate["source"],
+        model: typeof candidate["model"] === "string" ? candidate["model"] : null,
+        messages: typeof candidate["messages"] === "number" ? Math.max(0, candidate["messages"]) : 0,
+        fidelity: childFidelity,
+      });
+    }
+  }
+  return {
+    fidelity,
+    residue: Array.isArray(raw["residue"])
+      ? raw["residue"].filter((item): item is string => typeof item === "string").slice(0, 20)
+      : [],
+    residueCount: typeof raw["residueCount"] === "number" ? Math.max(0, raw["residueCount"]) : 0,
+    parseErrors: typeof raw["parseErrors"] === "number" ? Math.max(0, raw["parseErrors"]) : 0,
+    rawRecords: typeof raw["rawRecords"] === "number" ? Math.max(0, raw["rawRecords"]) : 0,
+    subagents,
+  };
+}
+
+function readTerminalHandoff(raw: unknown): WidgetState["terminalHandoff"] {
+  if (!isRecord(raw) || typeof raw["program"] !== "string" || typeof raw["cwd"] !== "string") return null;
+  if (!Array.isArray(raw["arguments"]) || !raw["arguments"].every((item) => typeof item === "string")) return null;
+  return { program: raw["program"], arguments: raw["arguments"] as string[], cwd: raw["cwd"] };
+}
+
 function readSessionRow(raw: unknown): SessionRow | null {
   if (!isRecord(raw)) return null;
   const { key, harness, name, cwd, title, age, updatedAt, messages, active, live, runtimeStatus } = raw;
@@ -349,11 +389,13 @@ export function readWidgetState(raw: unknown): WidgetState {
     strategy: raw["strategy"] === "start" || raw["strategy"] === "resume" || raw["strategy"] === "attach" || raw["strategy"] === "branch"
       ? raw["strategy"]
       : null,
+    terminalHandoff: readTerminalHandoff(raw["terminalHandoff"]),
     messaging: raw["messaging"] === "live_peer" ? "live_peer" : null,
     canInterrupt: raw["canInterrupt"] === true,
     canRespond: raw["canRespond"] === true,
     workspace: typeof raw["workspace"] === "string" ? raw["workspace"] : "",
     taskPlan: readTaskPlan(raw["taskPlan"]),
+    semantics: readSemantics(raw["semantics"]),
     error: typeof raw["error"] === "string" ? raw["error"] : null,
     recoverable: raw["recoverable"] === true,
     harnesses: Array.isArray(raw["harnesses"])

@@ -95,6 +95,17 @@ export class FakeRuntime extends EventEmitter {
     return {};
   }
 
+  async terminalInstructions(): Promise<{ launch: { program: string; arguments: string[]; cwd: string; env: Record<string, string> } }> {
+    return {
+      launch: {
+        program: "supercode",
+        arguments: ["attach", this.handle.runtime_id],
+        cwd: "/tmp/project",
+        env: { SUPER_CODE_PRIVATE_TOKEN: "host-only" },
+      },
+    };
+  }
+
   async close(): Promise<{ closed: boolean }> {
     this.closed = true;
     return { closed: true };

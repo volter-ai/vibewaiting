@@ -159,6 +159,15 @@ export const PANEL_CSS = `
   opacity:0; transition:opacity 120ms ease }
 .vw-message:hover .vw-copy,.vw-message:focus-within .vw-copy,.vw-copy:focus-visible { opacity:1 }
 .vw-copy:hover { color:var(--fg); background:var(--fill) }
+.vw-message-context,.vw-session-details { margin-top:7px; color:var(--mut); font-size:10.5px }
+.vw-message-context summary,.vw-session-details summary { display:flex; align-items:center; gap:5px; width:max-content; max-width:100%;
+  cursor:pointer; list-style:none; color:var(--mut) }
+.vw-message-context summary::-webkit-details-marker,.vw-session-details summary::-webkit-details-marker { display:none }
+.vw-message-context > div,.vw-session-details-body { display:grid; gap:5px; max-height:150px; margin-top:5px; padding:7px 8px;
+  overflow:auto; border:1px solid var(--hair); border-radius:7px; background:var(--fill) }
+.vw-message-context p,.vw-session-details-body p { display:grid; gap:2px; margin:0; overflow-wrap:anywhere }
+.vw-message-context p span,.vw-session-details-body p span { color:var(--mut) }
+.vw-session-details { margin:0 0 4px; padding:6px 8px; border:1px solid var(--hair); border-radius:8px; background:var(--fill) }
 
 /* Consecutive tools become VGAI-style activity groups with independently expandable rows. */
 .vw-tool-group { margin:2px 0 8px; overflow:hidden; border:1px solid var(--bd); border-radius:9px; background:var(--fill) }
@@ -208,6 +217,12 @@ export const PANEL_CSS = `
 .vw-error { margin:6px 12px 0; padding:7px 8px; display:flex; align-items:center; gap:7px; border:1px solid color-mix(in srgb,var(--block) 45%,transparent); border-radius:8px; color:var(--block); font-size:11px }
 .vw-error > span { min-width:0; flex:1; overflow:hidden; text-overflow:ellipsis }
 .vw-error button { border:0; padding:2px 4px; background:transparent; color:inherit; font:inherit; cursor:pointer }
+.vw-terminal-handoff { display:flex; align-items:center; gap:8px; padding:6px 12px; border-bottom:1px solid var(--hair);
+  background:var(--fill); color:var(--fg); font-size:10.5px }
+.vw-terminal-handoff > span { min-width:0; flex:1; display:grid; gap:1px }
+.vw-terminal-handoff small { overflow:hidden; color:var(--mut); text-overflow:ellipsis; white-space:nowrap }
+.vw-terminal-handoff button { flex:none; padding:4px 7px; border:1px solid var(--bd2); border-radius:6px; background:var(--bg);
+  color:var(--fg); font:inherit; cursor:pointer }
 
 /* composer + compact mirror status */
 .vw-composer { border-top:1px solid var(--hair); padding:8px 12px 12px; display:flex; flex-direction:column; gap:6px }

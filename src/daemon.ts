@@ -334,6 +334,11 @@ export function parseDetachIntent(payload: unknown): boolean {
   return (payload as { action?: unknown }).action === "detach" && Object.keys(payload).length === 1;
 }
 
+export function parseTerminalIntent(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object") return false;
+  return (payload as { action?: unknown }).action === "terminal" && Object.keys(payload).length === 1;
+}
+
 export interface BranchIntent {
   targetHarness: HarnessId | null;
 }
@@ -1099,6 +1104,20 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       } catch (e) {
         actionError = message(e);
         log(`detach failed: ${actionError}`);
+      }
+      await pushNow();
+      return;
+    }
+    if (parseTerminalIntent(intent.payload)) {
+      actionError = null;
+      const snapshot = activeController().getSnapshot();
+      try {
+        if (!snapshot.availableActions.openTerminal) throw new Error("this runtime cannot create a terminal handoff");
+        await activeController().dispatch({ type: "openTerminal" });
+        log(`prepared terminal handoff for ${snapshot.activeHarness ?? "coding agent"}`);
+      } catch (e) {
+        actionError = message(e);
+        log(`terminal handoff failed: ${actionError}`);
       }
       await pushNow();
       return;

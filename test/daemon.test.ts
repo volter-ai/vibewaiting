@@ -18,6 +18,7 @@ import {
   parseDraftIntent,
   parseLoadEarlierIntent,
   parseLoadSessionsIntent,
+  parseTerminalIntent,
   parseMountedIntent,
   parseNewChatIntent,
   parseRefreshIntent,
@@ -129,6 +130,8 @@ describe("continuation control intents", () => {
     expect(parseJoinIntent({ action: "join", endpoint: "untrusted" })).toBe(false);
     expect(parseDetachIntent({ action: "detach" })).toBe(true);
     expect(parseDetachIntent({ action: "detach", key: "untrusted" })).toBe(false);
+    expect(parseTerminalIntent({ action: "terminal" })).toBe(true);
+    expect(parseTerminalIntent({ action: "terminal", command: "untrusted" })).toBe(false);
   });
 
   it("accepts a branch harness choice but never a page-chosen session", () => {
@@ -381,10 +384,12 @@ describe("startDaemon", () => {
       "pill",
       "recoverable",
       "savedDraft",
+      "semantics",
       "sessions",
       "startup",
       "strategy",
       "taskPlan",
+      "terminalHandoff",
       "transcript",
       "workspace",
     ]);
@@ -435,6 +440,18 @@ describe("startDaemon", () => {
     client.runtime.turnCompleted();
     await waitFor(() => lastPush().busy === false, 2000);
     expect(lastPush().canInterrupt).toBe(false);
+  });
+
+  it("projects a native terminal handoff without exposing its environment", async () => {
+    const { host, lastPush } = await rig();
+    expect(lastPush().canOpenTerminal).toBe(true);
+    await host.fireIntent(INTENT_QUEUE, { action: "terminal" });
+    expect(lastPush().terminalHandoff).toEqual({
+      program: "supercode",
+      arguments: ["attach", "runtime-1"],
+      cwd: "/tmp/project",
+    });
+    expect(JSON.stringify(lastPush())).not.toContain("SUPER_CODE_PRIVATE_TOKEN");
   });
 
   it("ignores an unrecognized intent payload instead of dispatching it", async () => {

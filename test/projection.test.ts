@@ -389,11 +389,13 @@ describe("project", () => {
       canDetach: false,
       canOpenTerminal: false,
       strategy: "start",
+      terminalHandoff: null,
       messaging: null,
       canInterrupt: false,
       canRespond: false,
       workspace: "/w",
       taskPlan: { source: "none", items: [], residueCount: 0, observedAt: null },
+      semantics: { fidelity: null, residue: [], residueCount: 0, parseErrors: 0, rawRecords: 0, subagents: [] },
       error: null,
       recoverable: false,
       harnesses: [],
@@ -430,6 +432,54 @@ describe("project", () => {
       residueCount: 1,
       observedAt: 123,
     });
+  });
+
+  it("projects fidelity residue and subagent summaries without copying child transcripts", () => {
+    const state = project(snapshot({
+      activeSession: {
+        source: "claude_code",
+        session_id: "parent",
+        model: "opus",
+        cwd: "/w",
+        system_prompt: null,
+        agent_id: null,
+        parent_tool_use_id: null,
+        lineage: {},
+        messages: [],
+        subagents: [{
+          source: "codex",
+          session_id: "child",
+          model: "gpt-5",
+          cwd: "/w",
+          system_prompt: null,
+          agent_id: "worker",
+          parent_tool_use_id: null,
+          lineage: {},
+          messages: [
+            { role: "user", content: "large child prompt", metadata: {} },
+            { role: "assistant", content: "large child answer", metadata: {} },
+          ],
+          subagents: [],
+          raw_record_count: 2,
+          parse_error_lines: 0,
+          fidelity: "value_lossless",
+          residue: [],
+        }],
+        raw_record_count: 42,
+        parse_error_lines: 2,
+        fidelity: "semantic",
+        residue: ["missing native parent link"],
+      },
+    }));
+    expect(state.semantics).toEqual({
+      fidelity: "semantic",
+      residue: ["missing native parent link"],
+      residueCount: 1,
+      parseErrors: 2,
+      rawRecords: 42,
+      subagents: [{ id: "child", source: "codex", model: "gpt-5", messages: 2, fidelity: "value_lossless" }],
+    });
+    expect(JSON.stringify(state.semantics)).not.toContain("large child answer");
   });
 
   it("stays bounded no matter how long the session got", () => {

@@ -257,6 +257,16 @@ function MessageRow({
   return (
     <article class={`vw-message vw-${entry.role}${pending ? " vw-pending" : ""}${failed ? " vw-message-failed" : ""}`} aria-label={failed ? "user message failed" : pending ? "user message sending" : `${roleLabel(entry.role)} message`}>
       <MarkdownContent value={entry.text} />
+      {entry.context?.length ? (
+        <details class="vw-message-context">
+          <summary>{entry.context.length} context {entry.context.length === 1 ? "item" : "items"}</summary>
+          <div>
+            {entry.context.map((item, index) => (
+              <p key={item.id ?? `${item.label}:${index}`}><strong>{item.label}</strong><span>{item.detail}</span></p>
+            ))}
+          </div>
+        </details>
+      ) : null}
       {entry.truncated ? <span class="vw-cut">[truncated]</span> : null}
       {entry.role === "assistant" ? <button class="vw-copy" type="button" aria-label={copied ? "Response copied" : "Copy response"} onClick={copy}>{copied ? "✓" : "Copy"}</button> : null}
       {entry.ts !== null ? <time class="vw-message-time" dateTime={new Date(entry.ts).toISOString()}>{messageTime(entry.ts)}</time> : null}
@@ -264,6 +274,36 @@ function MessageRow({
       {failed ? <span class="vw-send-failed">Not sent{onRetry ? <button type="button" onClick={onRetry}>Retry</button> : null}</span> : null}
     </article>
   );
+}
+
+function SessionDetails({ semantics }: { semantics: WidgetState["semantics"] }): JSX.Element | null {
+  const noteworthy = semantics.subagents.length > 0 || semantics.residueCount > 0 || semantics.parseErrors > 0;
+  if (!noteworthy) return null;
+  const summary = [
+    semantics.subagents.length ? `${semantics.subagents.length} subagent${semantics.subagents.length === 1 ? "" : "s"}` : "",
+    semantics.residueCount ? `${semantics.residueCount} fidelity note${semantics.residueCount === 1 ? "" : "s"}` : "",
+    semantics.parseErrors ? `${semantics.parseErrors} parse error${semantics.parseErrors === 1 ? "" : "s"}` : "",
+  ].filter(Boolean).join(" · ");
+  return (
+    <details class="vw-session-details">
+      <summary><span class="vw-fold-mark" aria-hidden="true">›</span>{summary}</summary>
+      <div class="vw-session-details-body">
+        {semantics.fidelity ? <p><strong>Fidelity</strong><span>{semantics.fidelity.replace("_", " ")}</span></p> : null}
+        {semantics.subagents.map((subagent) => (
+          <p key={subagent.id}><strong>{subagent.model ?? subagent.source}</strong><span>{subagent.messages} messages · {subagent.fidelity.replace("_", " ")}</span></p>
+        ))}
+        {semantics.residue.map((item, index) => <p key={`${index}:${item}`}><strong>Note</strong><span>{item}</span></p>)}
+        {semantics.residueCount > semantics.residue.length ? <p><span>{semantics.residueCount - semantics.residue.length} more notes retained upstream</span></p> : null}
+      </div>
+    </details>
+  );
+}
+
+function terminalCommand(handoff: NonNullable<WidgetState["terminalHandoff"]>): string {
+  const quote = (value: string): string => /^[A-Za-z0-9_./:@%+=,-]+$/.test(value)
+    ? value
+    : `'${value.replace(/'/g, `'"'"'`)}'`;
+  return [handoff.program, ...handoff.arguments].map(quote).join(" ");
 }
 
 function TranscriptRow({ entry, pending, failed, onRetry, canRespond }: { entry: TranscriptEntry; pending?: boolean | undefined; failed?: boolean | undefined; onRetry?: (() => void) | undefined; canRespond: boolean }): JSX.Element | null {
@@ -467,6 +507,7 @@ function Chat({ state, onBack, onNew, onClose }: { state: WidgetState; onBack: (
   const restoredScroll = useRef(false);
   const focusedComposer = useRef(false);
   const [dismissedError, setDismissedError] = useState<string | null>(null);
+  const [terminalCopied, setTerminalCopied] = useState(false);
   const currentAttention = state.attached?.key ? attentionFor(state, state.attached.key) : null;
 
   useEffect(() => {
@@ -647,7 +688,7 @@ function Chat({ state, onBack, onNew, onClose }: { state: WidgetState; onBack: (
   const canJoinLive = readOnly && state.canAttach;
   const canForkHere = readOnly && state.canBranch;
   const continuationTargets = state.harnesses.filter((candidate) => candidate.startable);
-  const showConversationMenu = state.canDetach || state.canBranch || canJoinLive;
+  const showConversationMenu = state.canDetach || state.canBranch || canJoinLive || state.canOpenTerminal;
   const branch = (targetHarness?: string): void => {
     widget.sendIntent(INTENT_QUEUE, { action: "branch", ...(targetHarness ? { targetHarness } : {}) });
   };
@@ -684,6 +725,7 @@ function Chat({ state, onBack, onNew, onClose }: { state: WidgetState; onBack: (
             <summary class="vw-icon" aria-label="Conversation actions" title="Conversation actions">•••</summary>
             <div class="vw-chat-menu-popover">
               {state.canDetach ? <button type="button" onClick={(): void => { widget.sendIntent(INTENT_QUEUE, { action: "detach" }); }}>Detach to read-only</button> : null}
+              {state.canOpenTerminal ? <button type="button" onClick={(): void => { widget.sendIntent(INTENT_QUEUE, { action: "terminal" }); }}>Prepare terminal handoff</button> : null}
               {canJoinLive ? <button type="button" onClick={(): void => { widget.sendIntent(INTENT_QUEUE, { action: "join" }); }}>Join live session</button> : null}
               {state.canBranch ? continuationTargets.map((candidate) => (
                 <button key={candidate.id} type="button" onClick={(): void => branch(candidate.id)}>
@@ -704,8 +746,25 @@ function Chat({ state, onBack, onNew, onClose }: { state: WidgetState; onBack: (
           <button type="button" aria-label="Dismiss agent error" onClick={(): void => setDismissedError(visibleError)}>×</button>
         </div>
       ) : null}
+      {state.terminalHandoff ? (
+        <div class="vw-terminal-handoff" role="status">
+          <span><strong>Terminal handoff ready</strong><small>{state.terminalHandoff.cwd}</small></span>
+          <button
+            type="button"
+            onClick={(): void => {
+              void navigator.clipboard?.writeText(terminalCommand(state.terminalHandoff!)).then(() => {
+                setTerminalCopied(true);
+                setTimeout(() => setTerminalCopied(false), 1500);
+              }).catch(() => undefined);
+            }}
+          >
+            {terminalCopied ? "Copied" : "Copy command"}
+          </button>
+        </div>
+      ) : null}
       <div class="vw-scroll" ref={scroller} onScroll={onScroll} tabIndex={0} aria-label="Conversation">
         <div ref={content}>
+          <SessionDetails semantics={state.semantics} />
           {state.history.hasEarlier ? (
             <button
               class="vw-load-earlier"
@@ -1027,9 +1086,7 @@ function MessengerPanel({ state }: { state: unknown }): JSX.Element {
     if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
-      if (view === "new") setView(s.attached ? "chat" : "list");
-      else if (view === "list" && s.attached) setView("chat");
-      else closeMessenger();
+      closeMessenger();
       return;
     }
     if (event.key !== "Tab" || dialog.current === null) return;
