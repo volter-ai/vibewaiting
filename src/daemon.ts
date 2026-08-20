@@ -471,6 +471,14 @@ export function parseMountedIntent(payload: unknown): boolean {
   return (payload as { action?: unknown }).action === "mounted" && Object.keys(payload).length === 1;
 }
 
+function parsePanelVisibilityIntent(payload: unknown): boolean | null {
+  if (!payload || typeof payload !== "object" || Object.keys(payload).length !== 1) return null;
+  const action = (payload as { action?: unknown }).action;
+  if (action === "panelVisible") return true;
+  if (action === "panelHidden") return false;
+  return null;
+}
+
 export function parseLoadSessionsIntent(payload: unknown): boolean {
   return Boolean(payload && typeof payload === "object" && (payload as { action?: unknown }).action === "loadSessions" && Object.keys(payload).length === 1);
 }
@@ -677,6 +685,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   };
   let priorRuntimeActive = false;
   let priorRuntimeKey: string | null = null;
+  let panelVisible = false;
 
   /**
    * Why the last attach did not happen. A logged-only failure is invisible to the person who tapped
@@ -714,7 +723,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         observedUpdates.set(row.key, { messages: row.messages, runtimeStatus: row.runtimeStatus, announcedMessages });
         continue;
       }
-      if (row.key === attached?.key) {
+      if (panelVisible && row.key === attached?.key) {
         announcedMessages = row.messages;
         observedUpdates.set(row.key, { messages: row.messages, runtimeStatus: row.runtimeStatus, announcedMessages });
         continue;
@@ -746,7 +755,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     const runtimeActive =
       snapshot.turn.state !== "idle" || snapshot.requests.some((request) => request.status === "pending");
     const runtimeKey = attached?.key || priorRuntimeKey;
-    if (priorRuntimeActive && !runtimeActive && priorRuntimeKey) {
+    if (priorRuntimeActive && !runtimeActive && priorRuntimeKey && !(panelVisible && attached?.key === priorRuntimeKey)) {
       const lastAssistant = [...snapshot.conversation].reverse().find(
         (entry) => entry.kind === "message" && entry.role === "assistant" && entry.text.trim() !== "",
       );
@@ -1128,7 +1137,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       });
     }
     if (parseMountedIntent(intent.payload)) {
+      panelVisible = false;
       await pushNow(true);
+      return;
+    }
+    const panelVisibility = parsePanelVisibilityIntent(intent.payload);
+    if (panelVisibility !== null) {
+      panelVisible = panelVisibility;
+      if (panelVisible) await pushNow(true);
       return;
     }
     if (parseLoadSessionsIntent(intent.payload)) {
@@ -1486,7 +1502,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     const action = intent.payload && typeof intent.payload === "object"
       ? (intent.payload as { action?: unknown }).action
       : null;
-    if (typeof action !== "string" || action === "draft" || action === "ack" || action === "mounted") return;
+    if (typeof action !== "string" || action === "draft" || action === "ack" || action === "mounted" || action === "panelVisible" || action === "panelHidden") return;
     await host.push({ bridgeDone: String(intent.id) }).catch((error: unknown) => {
       log(`bridge completion failed (continuing): ${message(error)}`);
     });

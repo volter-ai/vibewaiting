@@ -444,4 +444,46 @@ describe("messenger session state machine", () => {
     await host.fireIntent(INTENT_QUEUE, { action: "ack", key });
     expect(lastPush().attention).toEqual([]);
   });
+
+  it("marks completed conversations only while they are in the background", async () => {
+    const { host, client, lastPush } = await sessionRig();
+    client.sessions = [OWN, { ...ATLAS, updated_at_ms: 2_000_050 }, BRIDGE];
+    await host.ticks.find((tick) => tick.ms === DEFAULT_DISCOVER_INTERVAL_MS)?.fn();
+    expect(lastPush().attention).toEqual([]);
+
+    const ownedKey = sessionKey(OWN.locator);
+    await host.fireIntent(INTENT_QUEUE, { action: "panelVisible" });
+    await host.fireIntent(INTENT_QUEUE, { action: "send", text: "visible task" });
+    client.runtime.assistantMessage("visible result");
+    client.runtime.turnCompleted();
+    await waitFor(() => lastPush().busy === false);
+    expect(lastPush().attention).toEqual([]);
+
+    await host.fireIntent(INTENT_QUEUE, { action: "panelHidden" });
+    await host.fireIntent(INTENT_QUEUE, { action: "send", text: "background task" });
+    client.runtime.assistantMessage("background result");
+    client.runtime.turnCompleted();
+    await waitFor(() => lastPush().attention.some((item) => item.key === ownedKey));
+    expect(lastPush().attention).toEqual([expect.objectContaining({ key: ownedKey, kind: "finished" })]);
+    await host.fireIntent(INTENT_QUEUE, { action: "ack", key: ownedKey });
+
+    const key = sessionKey(ATLAS.locator);
+    await host.fireIntent(INTENT_QUEUE, { action: "panelVisible" });
+    await host.fireIntent(INTENT_QUEUE, { action: "attach", key });
+    client.sessions = [OWN, { ...ATLAS, live_status: "busy" }, BRIDGE];
+    await host.ticks.find((tick) => tick.ms === DEFAULT_DISCOVER_INTERVAL_MS)?.fn();
+    client.sessions = [OWN, { ...ATLAS, live_status: "idle" }, BRIDGE];
+    await host.ticks.find((tick) => tick.ms === DEFAULT_DISCOVER_INTERVAL_MS)?.fn();
+    expect(lastPush().attention).toEqual([]);
+
+    await host.fireIntent(INTENT_QUEUE, { action: "panelHidden" });
+    client.sessions = [OWN, { ...ATLAS, live_status: "busy" }, BRIDGE];
+    await host.ticks.find((tick) => tick.ms === DEFAULT_DISCOVER_INTERVAL_MS)?.fn();
+    client.sessions = [OWN, { ...ATLAS, live_status: "idle" }, BRIDGE];
+    await host.ticks.find((tick) => tick.ms === DEFAULT_DISCOVER_INTERVAL_MS)?.fn();
+    expect(lastPush().attention).toContainEqual({ key, kind: "finished" });
+
+    await host.fireIntent(INTENT_QUEUE, { action: "ack", key });
+    expect(lastPush().attention).toEqual([]);
+  });
 });

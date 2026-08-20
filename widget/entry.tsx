@@ -11,6 +11,10 @@ import { render as renderPreact } from "preact";
 import type { JSX } from "preact";
 
 type PillMode = "connecting" | "idle" | "unread" | "working" | "needs-input" | "error";
+type WidgetIntent = SupercodeUiIntent
+  | { action: "mounted" }
+  | { action: "panelVisible" }
+  | { action: "panelHidden" };
 
 const NS = "vibewaiting";
 const INTENT_QUEUE = "agent";
@@ -40,7 +44,10 @@ try {
   const pageWindow = window.parent;
   const onPageResize = (): void => syncPanelViewport();
   pageWindow.addEventListener("resize", onPageResize);
-  window.addEventListener("pagehide", () => pageWindow.removeEventListener("resize", onPageResize), { once: true });
+  window.addEventListener("pagehide", () => {
+    pageWindow.removeEventListener("resize", onPageResize);
+    if (mountedPanelContainer !== null) sendBridgeIntent({ action: "panelHidden" });
+  }, { once: true });
 } catch {
   // Cross-origin embedders retain fixed safe dimensions.
 }
@@ -50,7 +57,7 @@ let restoreLauncherFocus = false;
 let lastPanelState: unknown = {};
 let bridgeDisconnected = false;
 let bridgeAckTimer: ReturnType<typeof setTimeout> | null = null;
-let pendingBridgeIntent: { id: string; attachKey: string | null; mounted: boolean } | null = null;
+let pendingBridgeIntent: { id: string; attachKey: string | null; acceptsSnapshot: boolean } | null = null;
 const bridgeCompletions = new Map<string, () => void>();
 
 function resolveBridgeCompletion(id: string): void {
@@ -70,12 +77,12 @@ function renderCurrentPanel(): void {
   if (mountedPanelContainer !== null) renderMessengerPanel(mountedPanelContainer, lastPanelState);
 }
 
-function watchBridge(id: string, intent: SupercodeUiIntent | { action: "mounted" }): void {
+function watchBridge(id: string, intent: WidgetIntent): void {
   clearBridgeWatch();
   pendingBridgeIntent = {
     id,
     attachKey: intent.action === "attach" ? intent.key : null,
-    mounted: intent.action === "mounted",
+    acceptsSnapshot: intent.action === "mounted" || intent.action === "panelVisible",
   };
   bridgeAckTimer = setTimeout(() => {
     bridgeAckTimer = null;
@@ -89,14 +96,15 @@ function watchBridge(id: string, intent: SupercodeUiIntent | { action: "mounted"
   }, BRIDGE_ACK_TIMEOUT_MS);
 }
 
-function sendBridgeIntent(intent: SupercodeUiIntent | { action: "mounted" }): void | Promise<void> {
+function sendBridgeIntent(intent: WidgetIntent): void | Promise<void> {
   const id = widget.sendIntent(INTENT_QUEUE, intent);
   if (intent.action !== "draft" && intent.action !== "ack") watchBridge(id, intent);
-  if (intent.action === "draft" || intent.action === "ack" || intent.action === "mounted") return;
+  if (intent.action === "draft" || intent.action === "ack" || intent.action === "mounted" || intent.action === "panelVisible" || intent.action === "panelHidden") return;
   return new Promise<void>((resolve) => bridgeCompletions.set(id, resolve));
 }
 
 function closeMessenger(): void {
+  sendBridgeIntent({ action: "panelHidden" });
   if (mountedPanelContainer !== null) renderPreact(null, mountedPanelContainer);
   mountedPanelContainer = null;
   restoreLauncherFocus = true;
@@ -153,7 +161,7 @@ function renderMessengerPanel(element: HTMLElement, state: unknown): void {
   mountedPanelContainer = element;
   renderPreact(<MessengerDialog state={state} />, element);
   if (firstMount) {
-    sendBridgeIntent({ action: "mounted" });
+    sendBridgeIntent({ action: "panelVisible" });
     queueMicrotask(() => {
       const focusTarget = element.querySelector<HTMLElement>("textarea:not(:disabled), input:not(:disabled), button:not(:disabled), [tabindex='0']");
       focusTarget?.focus({ preventScroll: true });
@@ -242,13 +250,16 @@ function pillMode(state: SupercodeUiState): PillMode {
 widget.onPatch((patch) => {
   if (!isRecord(patch)) return;
   const acknowledged = typeof patch.bridgeAck === "string" && patch.bridgeAck === pendingBridgeIntent?.id;
+  const includesSnapshot = Object.keys(patch).some((key) => key !== "bridgeAck" && key !== "bridgeDone");
   if (typeof patch.bridgeDone === "string") resolveBridgeCompletion(patch.bridgeDone);
-  if (acknowledged || pendingBridgeIntent?.mounted) clearBridgeWatch();
+  if (acknowledged || (pendingBridgeIntent?.acceptsSnapshot && includesSnapshot)) clearBridgeWatch();
   if (bridgeDisconnected) bridgeDisconnected = false;
   Object.assign(accumulatedState, patch);
   const state = normalizeUiState(accumulatedState);
   lastTone = state.pill.tone;
-  unreadCount = state.attention.length + (state.needsInput ? 1 : 0);
+  const unreadKeys = new Set(state.attention.map((item) => item.key));
+  if (state.needsInput) unreadKeys.add(state.attached?.key || state.owned?.key || "@needs-input");
+  unreadCount = unreadKeys.size;
   collapsedMode = pillMode(state);
   collapsedLabel = state.pill.label ? `Open agent chats · ${state.pill.label}` : "Open agent chats";
   collapsedHarness = state.attached?.harness
