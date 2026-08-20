@@ -203,7 +203,7 @@ export class FakeHarnessClient implements HarnessClientAdapter {
   /** Persisted sessions on this fake box — what `discover` returns and `session()` can load/follow. */
   sessions: Array<SessionDescriptor & { text?: string; messages?: string[] }>;
   /** Every discovery query seen, so a test can prove the GLOBAL scan carries no workspace. */
-  readonly discoverQueries: Array<{ workspace?: string; limit?: number }> = [];
+  readonly discoverQueries: Array<{ workspace?: string; harnesses?: HarnessId[]; limit?: number }> = [];
   /** Followers currently streaming. The leak check: this must settle back to one attachment's worth. */
   activeFollows = 0;
   closeCalls = 0;
@@ -232,12 +232,13 @@ export class FakeHarnessClient implements HarnessClientAdapter {
   }
 
   /** Global when `workspace` is absent (the Sessions panel), workspace-scoped when a controller asks. */
-  async discover(query: { workspace?: string; limit?: number } = {}): Promise<{
+  async discover(query: { workspace?: string; harnesses?: HarnessId[]; limit?: number } = {}): Promise<{
     sessions: DiscoverableSessionDescriptor[];
   }> {
     this.discoverQueries.push(query);
-    const scoped =
-      query.workspace === undefined ? this.sessions : this.sessions.filter((s) => s.cwd === query.workspace);
+    const scoped = this.sessions.filter((session) =>
+      (query.workspace === undefined || session.cwd === query.workspace)
+      && (query.harnesses === undefined || query.harnesses.includes(session.locator.harness)));
     return { sessions: scoped.slice(0, query.limit ?? scoped.length).map(({ text: _text, ...rest }) => rest) };
   }
 
