@@ -777,7 +777,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       owned: attachmentFor(ownRef, ownRows, ownSnapshot.workspace, home),
       attachError,
       error: actionError ?? projected.error,
-      recoverable: actionError !== null || projected.recoverable,
+      // The shared UI's Retry control means "refresh controller state". Host intents such as
+      // resume/send/export already retain their own action, so labelling a refresh as a retry is
+      // dishonest; the original button or draft remains the real retry path.
+      recoverable: actionError === null && projected.recoverable,
       canExport: typeof activeController().exportSession === "function" && snapshot.operation === null && Boolean(snapshot.activeSessionKey || snapshot.activeSessionId),
       canReduce: projected.canReduce,
       exportBackTarget: snapshot.connection.strategy === "branch" || snapshot.connection.strategy === "reduce"
