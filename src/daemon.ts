@@ -957,10 +957,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     await previous.controller.close().catch((e: unknown) => log(`detach failed: ${message(e)}`));
   };
 
-  // Attaches are SERIALIZED and generation-checked: a double click must not leave two followers
-  // running against two sessions, and the loser must be closed rather than merely forgotten.
+  // Attaches run independently and are generation-checked. A slow native transcript must never
+  // hold a newer selection behind it; whichever attempt is newest owns the panel, and every loser
+  // closes its candidate rather than leaving a follower behind.
   let attachSeq = 0;
-  let attachChain: Promise<void> = Promise.resolve();
+  const attachTasks = new Set<Promise<void>>();
   const attachTimeoutMs = options.attachTimeoutMs ?? DEFAULT_ATTACH_TIMEOUT_MS;
 
   /**
@@ -1067,8 +1068,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   const attachSession = (key: string): Promise<void> => {
     const seq = (attachSeq += 1);
-    attachChain = attachChain.catch(() => undefined).then(() => runAttach(key, seq));
-    return attachChain;
+    const task = runAttach(key, seq);
+    attachTasks.add(task);
+    void task.then(
+      () => attachTasks.delete(task),
+      () => attachTasks.delete(task),
+    );
+    return task;
   };
 
   const stopIntentPump = bindIntentQueue(host, INTENT_QUEUE, async (intent) => {
@@ -1419,7 +1425,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     const key = parseAttachIntent(intent.payload);
     if (key !== null) {
       actionError = null;
-      await attachSession(key);
+      const task = attachSession(key);
+      // The context-aware Lucarne drain can receive a newer click while this native load is still
+      // running. Keep its pump free; the attach task itself owns failure projection and cleanup.
+      if (host.drainIntentsWithContext !== undefined) void task.catch(() => undefined);
+      else await task;
       return;
     }
     log(`ignoring unrecognized intent payload: ${JSON.stringify(intent.payload)}`);
@@ -1494,7 +1504,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       stopDiscovery();
       stopIntentPump();
       unsubscribe();
-      await attachChain.catch(() => undefined);
+      await Promise.all([...attachTasks].map((task) => task.catch(() => undefined)));
       activeForeignKey = null;
       const foreign = [...foreignControllers.values()];
       foreignControllers.clear();
