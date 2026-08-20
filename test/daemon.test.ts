@@ -235,6 +235,14 @@ describe("messenger session state machine", () => {
     const long = descriptor({
       sessionId: "long-session",
       cwd: "/home/dev/volter/long",
+      title: null,
+      previewCandidates: [
+        {
+          content: "<local-command-caveat>runtime context</local-command-caveat>",
+          metadata: { isMeta: "true" },
+        },
+        { content: "Make the transcript list fast", metadata: {} },
+      ],
       messages,
       messageCount: messages.length,
       updatedAtMs: 3_000_000,
@@ -247,6 +255,7 @@ describe("messenger session state machine", () => {
     const { daemon, host, client, lastPush } = await sessionRig(history);
 
     expect(lastPush().sessions).toHaveLength(30);
+    expect(lastPush().sessions[0]?.title).toBe("Make the transcript list fast");
     await host.fireIntent(INTENT_QUEUE, { action: "loadSessions" });
     await host.fireIntent(INTENT_QUEUE, { action: "loadSessions" });
     expect(lastPush().sessions).toHaveLength(65);

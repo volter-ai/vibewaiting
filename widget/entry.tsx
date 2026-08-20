@@ -192,18 +192,24 @@ let collapsedHostObserver: MutationObserver | null = null;
 
 function fitCollapsedHost(): void {
   const pill = document.querySelector<HTMLButtonElement>(".pill");
+  const panel = document.querySelector<HTMLElement>(".panel");
   const root = window.frameElement?.getRootNode();
   const host = root && "host" in root ? (root as ShadowRoot).host : null;
   if (!host || !("style" in host)) return;
   const hostElement = host as HTMLElement;
   if (!pill) {
-    if (hostElement.style.borderRadius !== "32px") hostElement.style.borderRadius = "32px";
+    const radius = panel ? "12px" : "32px";
+    if (hostElement.style.borderRadius !== radius) hostElement.style.borderRadius = radius;
+    const scrim = root && "querySelector" in root ? (root as ShadowRoot).querySelector<HTMLElement>("div") : null;
+    if (scrim && scrim.style.borderRadius !== radius) scrim.style.borderRadius = radius;
     return;
   }
   const size = `${COLLAPSED_SIZE_PX}px`;
   if (hostElement.style.width !== size) hostElement.style.width = size;
   if (hostElement.style.height !== size) hostElement.style.height = size;
   if (hostElement.style.borderRadius !== "32px") hostElement.style.borderRadius = "32px";
+  const scrim = root && "querySelector" in root ? (root as ShadowRoot).querySelector<HTMLElement>("div") : null;
+  if (scrim && scrim.style.borderRadius !== "32px") scrim.style.borderRadius = "32px";
   const identityReady = hasHarnessLogo(collapsedHarness);
   const visibility = identityReady ? "visible" : "hidden";
   const pointerEvents = identityReady ? "auto" : "none";
