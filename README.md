@@ -16,13 +16,15 @@ reversible operation; success is rendered only from a disk-verified reduction re
 Vibewaiting appears directly in the attached browser's normal windows and tabs. Lucarne's porthole
 is an optional remote/headless viewing surface, not the primary way a local user browses.
 
-## Local Supercode UI development
+## Local Supercode development
 
-Run `npm run sync:local-ui` to build and install the adjacent Supercode UI checkout directly into
-Vibewaiting's working `node_modules`; pass another UI directory as the final argument or set
-`SUPERCODE_UI_DIR` when the repositories are not siblings. The sync does not contact npm or modify
-`package.json`/`package-lock.json`. A later `npm ci` restores the published dependency for release
-and CI parity.
+Run `npm run sync:local` to build the adjacent Supercode binary and install its harness SDK, client,
+and UI packages directly into Vibewaiting's working `node_modules`. Pass another Supercode checkout
+as the final argument or set `SUPERCODE_DIR` when the repositories are not siblings. The command
+records the local binary beside those packages, so Vibewaiting cannot accidentally pair local UI
+with the published runtime. It does not contact npm or modify `package.json`/`package-lock.json`; a
+later `npm ci` restores the published dependencies for release and CI parity. `sync:local-ui` remains
+an alias for the complete coherent-stack sync so older development commands are safe.
 
 ## Test inclusion bar
 

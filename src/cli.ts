@@ -111,6 +111,10 @@ async function main(): Promise<void> {
   const baseUrl = process.env["LUCARNE_URL"] ?? DEFAULT_ENGINE_URL;
   const token = process.env["LUCARNE_TOKEN"];
   const lucarne = new LucarneClient({ baseUrl, ...(token ? { token } : {}) });
+  const localCommandMarker = fileURLToPath(new URL("../node_modules/.cache/vibewaiting/local-supercode-bin", import.meta.url));
+  const command = process.env["SUPERCODE_BIN"] ?? await readFile(localCommandMarker, "utf8")
+    .then((value) => value.trim() || undefined)
+    .catch(() => undefined);
 
   const html = await loadWidgetHtml();
 
@@ -145,10 +149,12 @@ async function main(): Promise<void> {
   const harnessClient = new SupercodeHarnessClient({
     cwd: args.workspace,
     requestTimeoutMs: DEFAULT_WIDGET_REQUEST_TIMEOUT_MS,
+    ...(command ? { command } : {}),
   });
   const discoveryClient = new SupercodeHarnessClient({
     cwd: args.workspace,
     requestTimeoutMs: DEFAULT_WIDGET_REQUEST_TIMEOUT_MS,
+    ...(command ? { command } : {}),
   });
   let daemon: Daemon;
   try {
