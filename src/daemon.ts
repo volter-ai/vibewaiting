@@ -860,7 +860,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         hasMoreSessions = result.sessions.length > sessionLimit;
         descriptors = result.sessions.slice(0, sessionLimit);
       } catch (e) {
-        log(`session discovery failed (continuing): ${message(e)}`);
+        if (!stopped) log(`session discovery failed (continuing): ${message(e)}`);
         return;
       }
       await pushNow(false, "inventory");
@@ -1379,6 +1379,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // state until initialization, harness startup, and discovery have all finished — indistinguishable
   // from a frozen panel on a cold machine.
   await pushNow();
+  // The CLI supplies a dedicated discovery transport, so its machine-wide store scan can overlap
+  // controller inventory without queueing behind it. Embedders that reuse one transport retain the
+  // serialized path: its NDJSON service processes requests one at a time.
+  const discoveryStartedAt = performance.now();
+  const bootstrapDiscovery = options.discoveryClient ? refreshSessions() : null;
   const inventoryStartedAt = performance.now();
   await controller.initialize();
   log(`controller inventory ready in ${Math.round(performance.now() - inventoryStartedAt)}ms`);
@@ -1390,8 +1395,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // a broken agent handshake must not keep every existing conversation behind its timeout.
   startup = "discovering";
   await pushNow();
-  const discoveryStartedAt = performance.now();
-  await refreshSessions();
+  await (bootstrapDiscovery ?? refreshSessions());
   log(`discovered ${descriptors.length} recent sessions in ${Math.round(performance.now() - discoveryStartedAt)}ms`);
 
   if (harness) {
