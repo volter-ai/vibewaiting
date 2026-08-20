@@ -985,6 +985,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     if (stopped || seq !== attachSeq) return;
     // A new attempt supersedes the previous failure, whatever this one goes on to do.
     attachError = null;
+    if (activeForeignKey === key) {
+      await pushNow();
+      return;
+    }
     const retained = foreignControllers.get(key);
     if (retained) {
       await releaseForeignView();
@@ -1001,10 +1005,6 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         "that session is no longer in the list",
         `attach: no discovered session with key ${key}`,
       );
-      return;
-    }
-    if (activeForeignKey === key) {
-      await pushNow();
       return;
     }
     await releaseForeignView();
