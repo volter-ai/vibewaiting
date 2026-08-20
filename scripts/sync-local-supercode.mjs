@@ -18,10 +18,14 @@ if (!source) {
 }
 
 const packages = [
-  ["sdk/typescript", "@volter-ai-dev/supercode-harness-sdk"],
-  ["sdk/client", "@volter-ai-dev/supercode-client"],
-  ["sdk/ui", "@volter-ai-dev/supercode-ui"],
+  [join(source, "sdk/typescript"), "@volter-ai-dev/supercode-harness-sdk"],
+  [join(source, "sdk/client"), "@volter-ai-dev/supercode-client"],
+  [join(source, "sdk/ui"), "@volter-ai-dev/supercode-ui"],
 ];
+const lucarneSource = resolve(process.env.LUCARNE_DIR ?? join(root, "../lucarne"));
+if (existsSync(join(lucarneSource, "packages/lucarne/package.json"))) {
+  packages.push([join(lucarneSource, "packages/lucarne"), "lucarne"]);
+}
 
 function run(program, args, options) {
   const result = spawnSync(program, args, { stdio: "inherit", ...options });
@@ -76,12 +80,15 @@ if (!existsSync(binary) || statSync(binary).mtimeMs < latestRustInputMtime(sourc
   process.stdout.write("local Supercode binary is current; skipping Rust rebuild\n");
 }
 run("npm", ["run", "build"], { cwd: join(source, "sdk/ui") });
+if (packages.some(([, name]) => name === "lucarne")) {
+  run("npm", ["run", "build"], { cwd: join(lucarneSource, "packages/lucarne") });
+}
 
 const scratch = mkdtempSync(join(tmpdir(), "vibewaiting-supercode-"));
 try {
-  const installed = packages.map(([relative, name]) => [
+  const installed = packages.map(([packageRoot, name]) => [
     name,
-    installPackage(join(source, relative), name, scratch),
+    installPackage(packageRoot, name, scratch),
   ]);
   const marker = join(root, "node_modules/.cache/vibewaiting/local-supercode-bin");
   mkdirSync(resolve(marker, ".."), { recursive: true });
