@@ -10,7 +10,7 @@ export const PANEL_CSS = `
 .vw-dialog > .scui-root {
   --scui-width:var(--vw-panel-width,420px);
   --scui-height:var(--vw-panel-height,480px);
-  --scui-bg:var(--bg);
+  --scui-bg:#14161c;
   --scui-bg-raised:var(--bg2);
   --scui-fill:var(--fill);
   --scui-fg:var(--fg);
@@ -23,6 +23,7 @@ export const PANEL_CSS = `
   --scui-danger:var(--block);
   width:100%; height:100%; border:0; border-radius:0;
 }
+:root[data-theme="light"] .vw-dialog > .scui-root { --scui-bg:#f8f9fb }
 
 /* Lucarne owns the collapsed control; Supercode supplies its canonical harness identity. */
 .pill { position:relative; box-sizing:border-box; width:56px; height:56px; justify-content:center; margin:4px; padding:0; border:0;
