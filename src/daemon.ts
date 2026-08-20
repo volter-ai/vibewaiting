@@ -2,7 +2,7 @@
 //
 // Three directions, and only three:
 //   controller revision → debounced `project(snapshot)` → `host.push(patch)`
-//   global discovery tick → `projectSessions(descriptors)` → the same push
+//   per-harness discovery slices → merged `projectSessions(descriptors)` → the same push
 //   widget intent ("agent" queue) → `send`/`interrupt`/`respond`, `attach` elsewhere, or `release`
 //
 // Both ends are INJECTABLE (`attachHost`, `client`, `controller`) because the honest test of this
@@ -73,7 +73,15 @@ export const DEFAULT_ATTENTION_SETTLE_MS = 15_000;
 /** A broken harness attach must become a visible row error, never an eternal local spinner. */
 export const DEFAULT_ATTACH_TIMEOUT_MS = 45_000;
 /** Harnesses tried, in order, when the caller named none — first one that can actually start wins. */
-export const HARNESS_PREFERENCE: readonly string[] = ["claude-code", "codex", "opencode", "pi", "grok"];
+export const HARNESS_PREFERENCE: readonly string[] = [
+  "claude-code",
+  "codex",
+  "gemini",
+  "goose",
+  "opencode",
+  "pi",
+  "grok",
+];
 /** The widget renders this many entries, so its passive transport should never fetch more. */
 const PASSIVE_MIRROR_VIEW = Object.freeze({
   tailMessages: DEFAULT_MAX_ENTRIES,
@@ -122,9 +130,25 @@ export interface SessionDiscoveryClient {
 }
 
 /**
+ * Native stores are independent inbox sources. Asking for them separately lets the messenger paint
+ * the first useful rows without waiting for the slowest store, and lets one broken adapter retain
+ * its previous rows without discarding fresh results from every other harness.
+ */
+const DISCOVERY_HARNESSES: readonly HarnessId[] = [
+  "claude-code",
+  "codex",
+  "gemini",
+  "goose",
+  "opencode",
+  "pi",
+  "grok",
+  "supercode",
+];
+
+/**
  * Skip the owning controller's redundant first workspace scan.
  *
- * The daemon performs one authoritative global discovery immediately after controller inventory.
+ * The daemon performs one authoritative machine-wide discovery pass immediately after controller inventory.
  * `SupercodeController.initialize()` otherwise queues its own workspace discovery beside harness
  * inventory on the same sequential NDJSON transport. Its timeout then includes time spent waiting
  * behind inventory, even though `autoObserve: false` means startup consumes none of those sessions.
@@ -307,7 +331,7 @@ export interface Daemon {
   lastPushed(): WidgetState | null;
   /** Push the current snapshot NOW, bypassing the debounce. Used after start and by tests. */
   flush(): Promise<void>;
-  /** Re-run global discovery and push. The discovery tick calls exactly this. */
+  /** Re-run the machine-wide, per-harness discovery pass and push completed slices. */
   refreshSessions(): Promise<void>;
   /** Point the Agent panel at a discovered session (the `attach` intent's implementation). */
   attach(key: string): Promise<void>;
@@ -395,7 +419,15 @@ export interface ReduceIntent {
   targetHarness: HarnessId | null;
 }
 
-const SESSION_FORMATS = new Set<string>(["claude-code", "codex", "opencode", "pi", "grok"]);
+const SESSION_FORMATS = new Set<string>([
+  "claude-code",
+  "codex",
+  "gemini",
+  "goose",
+  "opencode",
+  "pi",
+  "grok",
+]);
 
 /**
  * Continue the selected transcript as a separate branch. A harness choice is user input, but the
@@ -585,7 +617,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   const home = options.home ?? homedir();
   const now = options.now ?? Date.now;
-  // The GLOBAL discovery door, called with no workspace and preferably isolated from control RPCs.
+  // The machine-wide discovery door, called without a workspace and isolated from control RPCs.
   const discovery: SessionDiscoveryClient | undefined = options.discoveryClient ?? options.client;
   /** The last global scan, held whole — the row keys the panel echoes back resolve through it. */
   let descriptors: readonly SessionDescriptor[] = [];
@@ -846,25 +878,43 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const repushMs = options.repushIntervalMs ?? DEFAULT_REPUSH_INTERVAL_MS;
   const stopRepush = repushMs > 0 ? host.every(repushMs, () => pushNow()) : (): void => undefined;
 
-  /** Re-scan the whole machine for coding sessions. Failure is logged and the old list is kept. */
+  /** Re-scan each native store, publishing completed inbox slices as they arrive. */
   let refreshInFlight: Promise<void> | null = null;
+  const sessionsByHarness = new Map<HarnessId, SessionDescriptor[]>();
+  const rebuildDescriptors = (): void => {
+    const all = [...sessionsByHarness.values()].flat();
+    all.sort((left, right) =>
+      (right.updated_at_ms ?? Number.MIN_SAFE_INTEGER) - (left.updated_at_ms ?? Number.MIN_SAFE_INTEGER)
+      || left.locator.harness.localeCompare(right.locator.harness)
+      || left.locator.session_id.localeCompare(right.locator.session_id));
+    hasMoreSessions = all.length > sessionLimit
+      || [...sessionsByHarness.values()].some((sessions) => sessions.length > sessionLimit);
+    descriptors = all.slice(0, sessionLimit);
+  };
   const refreshSessions = (): Promise<void> => {
     if (stopped || !discovery) return Promise.resolve();
     // A slow native store must not let the five-second inventory tick pile up identical RPCs. Apart
     // from wasting work, those queued calls used to extend one timeout into minutes of repeated
     // "loading" failures.
     if (refreshInFlight) return refreshInFlight;
-    refreshInFlight = (async () => {
+    const reportTimings = sessionsByHarness.size === 0;
+    refreshInFlight = Promise.all(DISCOVERY_HARNESSES.map(async (harness) => {
+      const startedAt = performance.now();
       try {
-        const result = await discovery.discover({ limit: sessionLimit + 1 });
-        hasMoreSessions = result.sessions.length > sessionLimit;
-        descriptors = result.sessions.slice(0, sessionLimit);
+        const result = await discovery.discover({ harnesses: [harness], limit: sessionLimit + 1 });
+        if (stopped) return;
+        sessionsByHarness.set(harness, result.sessions);
+        rebuildDescriptors();
+        if (reportTimings) {
+          log(`discovered ${result.sessions.length} ${harness} sessions in ${Math.round(performance.now() - startedAt)}ms`);
+        }
+        await pushNow(false, "inventory");
       } catch (e) {
-        if (!stopped) log(`session discovery failed (continuing): ${message(e)}`);
-        return;
+        if (!stopped) {
+          log(`session discovery failed for ${harness} after ${Math.round(performance.now() - startedAt)}ms (continuing): ${message(e)}`);
+        }
       }
-      await pushNow(false, "inventory");
-    })().finally(() => {
+    })).then(() => undefined).finally(() => {
       refreshInFlight = null;
     });
     return refreshInFlight;
@@ -1379,7 +1429,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // state until initialization, harness startup, and discovery have all finished — indistinguishable
   // from a frozen panel on a cold machine.
   await pushNow();
-  // The CLI supplies a dedicated discovery transport, so its machine-wide store scan can overlap
+  // The CLI supplies a dedicated discovery transport, so its per-harness store scans can overlap
   // controller inventory without queueing behind it. Embedders that reuse one transport retain the
   // serialized path: its NDJSON service processes requests one at a time.
   const discoveryStartedAt = performance.now();

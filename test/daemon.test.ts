@@ -194,7 +194,7 @@ describe("bridge invariants", () => {
     expect(JSON.stringify(lastPush()).length).toBeLessThan(DEFAULT_MAX_ENTRIES * (DEFAULT_MAX_ENTRY_CHARS + 500));
   });
 
-  it("coalesces overlapping inventory ticks and never replays the transcript in their patch", async () => {
+  it("publishes a completed harness slice while coalescing the still-running inventory refresh", async () => {
     const { daemon, host, client } = await sessionRig([OWN, ATLAS]);
     for (let index = 0; index < 30; index += 1) client.runtime.assistantMessage(`${index}:${"x".repeat(1_000)}`);
     await waitFor(() => (daemon.lastPushed()?.transcript.length ?? 0) > 0);
@@ -208,19 +208,22 @@ describe("bridge invariants", () => {
     client.discover = async (query = {}) => {
       if (query.workspace !== undefined) return originalDiscover(query);
       globalCalls += 1;
-      await gate;
+      if (query.harnesses?.[0] === "codex") await gate;
       return originalDiscover(query);
     };
     client.sessions = [OWN, { ...ATLAS, updated_at_ms: (ATLAS.updated_at_ms ?? 0) + 1 }];
+    const pushesBeforeRefresh = host.pushes.length;
     const tick = host.ticks.find((item) => item.ms === DEFAULT_DISCOVER_INTERVAL_MS);
     const first = Promise.resolve(tick?.fn());
+    await waitFor(() => host.pushes.slice(pushesBeforeRefresh).some((push) =>
+      (push as Partial<WidgetState>).sessions?.some((session) => session.updatedAt === 2_000_001) ?? false));
     const second = Promise.resolve(tick?.fn());
-    await waitFor(() => globalCalls === 1);
+    expect(globalCalls).toBe(8);
     release();
     await Promise.all([first, second]);
 
     const patch = host.pushes.at(-1) as Record<string, unknown>;
-    expect(globalCalls).toBe(1);
+    expect(globalCalls).toBe(8);
     expect(patch).not.toHaveProperty("transcript");
     expect(JSON.stringify(patch).length).toBeLessThan(fullBytes / 5);
   });

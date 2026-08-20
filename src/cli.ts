@@ -32,7 +32,8 @@ Usage
 
 Options
   --workspace <dir>   project directory the coding agent runs in (default: cwd)
-  --harness <name>    claude-code | codex | opencode | pi | grok (default: first one ready)
+  --harness <name>    claude-code | codex | gemini | goose | opencode | pi | grok
+                      (default: first one ready)
   --session <id>      attach to an existing lucarne session instead of creating one
   --policy <name>     execution policy for the agent: default | yolo (default: the controller's)
   -h, --help          print this
