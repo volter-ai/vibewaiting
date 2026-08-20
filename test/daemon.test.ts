@@ -253,6 +253,9 @@ describe("messenger session state machine", () => {
 
     await host.fireIntent(INTENT_QUEUE, { action: "attach", key: sessionKey(long.locator) });
     expect(lastPush().transcript).toHaveLength(120);
+    await host.fireIntent(INTENT_QUEUE, { action: "attach", key: sessionKey(long.locator) });
+    expect(lastPush()).toMatchObject({ mode: "mirror", attached: { key: sessionKey(long.locator) } });
+    expect(client.activeFollows).toBe(1);
     await host.fireIntent(INTENT_QUEUE, { action: "loadEarlier" });
     await host.fireIntent(INTENT_QUEUE, { action: "loadEarlier" });
     await daemon.flush();

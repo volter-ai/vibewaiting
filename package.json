@@ -27,7 +27,7 @@
     "smoke:sessions": "npm run build && node scripts/smoke-sessions.mjs"
   },
   "dependencies": {
-    "@volter-ai-dev/supercode-client": "^0.3.12",
+    "@volter-ai-dev/supercode-client": "^0.3.13",
     "@volter-ai-dev/supercode-harness-sdk": "^0.3.5",
     "@volter-ai-dev/supercode-ui": "^0.1.11",
     "esbuild": "^0.28.2",
