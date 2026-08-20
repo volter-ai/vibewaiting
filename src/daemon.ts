@@ -288,9 +288,17 @@ export function bindIntentQueue(
   name: string,
   handler: (intent: { id: string | number; payload: unknown }) => void | Promise<void>,
   pollMs = DEFAULT_INTENT_POLL_MS,
+  onSettled?: (intent: { id: string | number; payload: unknown }) => void | Promise<void>,
 ): () => void {
+  const handle = async (intent: { id: string | number; payload: unknown }): Promise<void> => {
+    try {
+      await handler(intent);
+    } finally {
+      await onSettled?.(intent);
+    }
+  };
   if (pollMs <= 0 || host.drainIntentsWithContext === undefined) {
-    host.onIntent(name, handler);
+    host.onIntent(name, handle);
     return (): void => undefined;
   }
 
@@ -312,7 +320,7 @@ export function bindIntentQueue(
             const oldest = seenOrder.shift();
             if (oldest !== undefined) seen.delete(oldest);
           }
-          await handler(intent);
+          await handle(intent);
         }
       }
     } finally {
@@ -1474,7 +1482,15 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       return;
     }
     log(`ignoring unrecognized intent payload: ${JSON.stringify(intent.payload)}`);
-  }, options.intentPollMs ?? DEFAULT_INTENT_POLL_MS);
+  }, options.intentPollMs ?? DEFAULT_INTENT_POLL_MS, async (intent) => {
+    const action = intent.payload && typeof intent.payload === "object"
+      ? (intent.payload as { action?: unknown }).action
+      : null;
+    if (typeof action !== "string" || action === "draft" || action === "ack" || action === "mounted") return;
+    await host.push({ bridgeDone: String(intent.id) }).catch((error: unknown) => {
+      log(`bridge completion failed (continuing): ${message(error)}`);
+    });
+  });
 
   // Push before the first potentially slow RPC. Without this, the iframe mounts but receives no
   // state until initialization, harness startup, and discovery have all finished — indistinguishable

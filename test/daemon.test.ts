@@ -288,7 +288,13 @@ describe("messenger session state machine", () => {
     const { daemon, host, client, lastPush } = await sessionRig();
     const atlasKey = sessionKey(ATLAS.locator);
     await host.fireIntent(INTENT_QUEUE, { action: "attach", key: atlasKey });
+    const lifecycleStart = host.pushes.length;
     await host.fireIntent(INTENT_QUEUE, { action: "resume" });
+    const lifecycle = host.pushes.slice(lifecycleStart) as Array<Record<string, unknown>>;
+    const acceptedAt = lifecycle.findIndex((patch) => typeof patch.bridgeAck === "string");
+    const completionAt = lifecycle.findIndex((patch) => patch.bridgeDone === lifecycle[acceptedAt]?.bridgeAck);
+    expect(acceptedAt).toBeGreaterThanOrEqual(0);
+    expect(completionAt).toBeGreaterThan(acceptedAt);
     const continued = daemon.activeController();
     await host.fireIntent(INTENT_QUEUE, { action: "send", text: "continue" });
     await host.fireIntent(INTENT_QUEUE, { action: "release" });
