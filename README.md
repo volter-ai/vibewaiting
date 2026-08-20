@@ -12,3 +12,11 @@ Vibewaiting is intentionally a thin composition:
 The browser never receives native locators, recovery paths, credentials, or execution policy. In
 particular, reduce-and-continue is shown only when the Supercode controller exposes its real
 reversible operation; success is rendered only from a disk-verified reduction receipt.
+
+## Test inclusion bar
+
+Tests are deliberately scarce. Add one only when the behavior is both multi-step or genuinely
+complex **and** likely to regress: controller lifecycle transitions, concurrency/leak prevention,
+trusted-host boundaries, bounded wire performance, or a previously recurring browser interaction.
+Do not test copy, constants, formatting examples, trivial parsers/helpers, or behavior already owned
+by Lucarne or Supercode UI. Chromium coverage stays in the nightly workflow, never the merge gate.

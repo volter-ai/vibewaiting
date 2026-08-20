@@ -736,6 +736,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       ...projected,
       pill: startup === "ready" ? projected.pill : { tone: "off", label: startupLabel },
       startup,
+      // A requested/selected harness is already a real identity. Keep its real logo visible while
+      // the runtime is connecting and after a failed start; hiding the launcher reads as a freeze.
+      harness: projected.harness || startupHarness,
       sessions,
       attached,
       owned: attachmentFor(ownRef, ownRows, ownSnapshot.workspace, home),
@@ -808,22 +811,36 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const stopRepush = repushMs > 0 ? host.every(repushMs, () => pushNow()) : (): void => undefined;
 
   /** Re-scan the whole machine for coding sessions. Failure is logged and the old list is kept. */
-  const refreshSessions = async (): Promise<void> => {
-    if (stopped || !discovery) return;
-    try {
-      const result = await discovery.discover({ limit: sessionLimit + 1 });
-      hasMoreSessions = result.sessions.length > sessionLimit;
-      descriptors = result.sessions.slice(0, sessionLimit);
-    } catch (e) {
-      log(`session discovery failed (continuing): ${message(e)}`);
-      return;
-    }
-    await pushNow(false, "inventory");
+  let refreshInFlight: Promise<void> | null = null;
+  const refreshSessions = (): Promise<void> => {
+    if (stopped || !discovery) return Promise.resolve();
+    // A slow native store must not let the five-second inventory tick pile up identical RPCs. Apart
+    // from wasting work, those queued calls used to extend one timeout into minutes of repeated
+    // "loading" failures.
+    if (refreshInFlight) return refreshInFlight;
+    refreshInFlight = (async () => {
+      try {
+        const result = await discovery.discover({ limit: sessionLimit + 1 });
+        hasMoreSessions = result.sessions.length > sessionLimit;
+        descriptors = result.sessions.slice(0, sessionLimit);
+      } catch (e) {
+        log(`session discovery failed (continuing): ${message(e)}`);
+        return;
+      }
+      await pushNow(false, "inventory");
+    })().finally(() => {
+      refreshInFlight = null;
+    });
+    return refreshInFlight;
   };
 
   const discoverMs = options.discoverIntervalMs ?? DEFAULT_DISCOVER_INTERVAL_MS;
-  const stopDiscovery =
-    discoverMs > 0 && discovery ? host.every(discoverMs, () => refreshSessions()) : (): void => undefined;
+  // Begin polling only after bootstrap. Registering it before a slow runtime start let discovery
+  // ticks compete with startup on the same harness transport.
+  let stopDiscovery = (): void => undefined;
+  const startDiscoveryPolling = (): void => {
+    if (discoverMs > 0 && discovery) stopDiscovery = host.every(discoverMs, () => refreshSessions());
+  };
 
   const createController =
     options.createController ??
@@ -1332,6 +1349,15 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   const harness = chooseHarness(controller.getSnapshot(), options.harness);
   startupHarness = harness ?? options.harness ?? "";
+
+  // Fill the messenger before starting a native runtime. Discovery is cheap and useful on its own;
+  // a broken agent handshake must not keep every existing conversation behind its timeout.
+  startup = "discovering";
+  await pushNow();
+  const discoveryStartedAt = performance.now();
+  await refreshSessions();
+  log(`discovered ${descriptors.length} recent sessions in ${Math.round(performance.now() - discoveryStartedAt)}ms`);
+
   if (harness) {
     startup = "starting";
     await pushNow();
@@ -1348,13 +1374,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     log("no startable harness found — the panel will mirror instead");
   }
 
-  startup = "discovering";
-  await pushNow();
-  const discoveryStartedAt = performance.now();
-  await refreshSessions();
-  log(`discovered ${descriptors.length} recent sessions in ${Math.round(performance.now() - discoveryStartedAt)}ms`);
   startup = "ready";
   await pushNow();
+  startDiscoveryPolling();
   log(`widget ready in ${Math.round(performance.now() - daemonStartedAt)}ms total`);
 
   return {

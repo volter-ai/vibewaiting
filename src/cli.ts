@@ -14,6 +14,8 @@ import { startDaemon, type Daemon } from "./daemon.js";
 import { FileMessengerPersistence } from "./persistence.js";
 
 const DEFAULT_ENGINE_URL = "http://127.0.0.1:7800";
+/** A corner messenger must recover from a broken native handshake in one perceptual wait. */
+export const DEFAULT_WIDGET_REQUEST_TIMEOUT_MS = 5_000;
 
 export interface CliArgs {
   workspace: string;
@@ -125,7 +127,18 @@ async function main(): Promise<void> {
     );
   }
 
-  const harnessClient = new SupercodeHarnessClient({ cwd: args.workspace });
+  // The browser is already usable once Lucarne has created the session. Print its URL before any
+  // agent RPC so a slow or broken harness can never make startup look like a frozen CLI.
+  process.stdout.write(`\n  browse here → ${session.viewUrl}\n`);
+  process.stdout.write(
+    `  widget: connecting · workspace ${args.workspace} · session ${session.id}` +
+      `${createdSession ? " (created)" : " (adopted)"}\n\n  ctrl-c to stop\n`,
+  );
+
+  const harnessClient = new SupercodeHarnessClient({
+    cwd: args.workspace,
+    requestTimeoutMs: DEFAULT_WIDGET_REQUEST_TIMEOUT_MS,
+  });
   let daemon: Daemon;
   try {
     daemon = await startDaemon({
@@ -146,10 +159,8 @@ async function main(): Promise<void> {
   }
 
   const state = daemon.lastPushed();
-  process.stdout.write(`\n  browse here → ${session.viewUrl}\n`);
   process.stdout.write(
-    `  widget: ${state?.pill.label ?? "starting"} · workspace ${args.workspace} · session ${session.id}` +
-      `${createdSession ? " (created)" : " (adopted)"}\n\n  ctrl-c to stop\n`,
+    `  widget: ${state?.pill.label ?? "starting"}\n`,
   );
 
   let shuttingDown = false;
