@@ -1111,6 +1111,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   };
 
   const stopIntentPump = bindIntentQueue(host, INTENT_QUEUE, async (intent) => {
+    const action = intent.payload && typeof intent.payload === "object"
+      ? (intent.payload as { action?: unknown }).action
+      : null;
+    if (typeof action === "string" && action !== "draft" && action !== "ack") {
+      await host.push({ bridgeAck: String(intent.id) }).catch((error: unknown) => {
+        log(`bridge acknowledgement failed (continuing): ${message(error)}`);
+      });
+    }
     if (parseMountedIntent(intent.payload)) {
       await pushNow(true);
       return;

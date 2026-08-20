@@ -14,6 +14,7 @@ type PillMode = "connecting" | "idle" | "unread" | "working" | "needs-input" | "
 
 const NS = "vibewaiting";
 const INTENT_QUEUE = "agent";
+const BRIDGE_ACK_TIMEOUT_MS = 600;
 const widget = createWidget({ ns: NS, version: 1 });
 
 function syncPanelViewport(requestResize = true): void {
@@ -46,6 +47,43 @@ try {
 
 let mountedPanelContainer: HTMLElement | null = null;
 let restoreLauncherFocus = false;
+let lastPanelState: unknown = {};
+let bridgeDisconnected = false;
+let bridgeAckTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingBridgeIntent: { id: string; attachKey: string | null; mounted: boolean } | null = null;
+
+function clearBridgeWatch(): void {
+  if (bridgeAckTimer !== null) clearTimeout(bridgeAckTimer);
+  bridgeAckTimer = null;
+  pendingBridgeIntent = null;
+}
+
+function renderCurrentPanel(): void {
+  if (mountedPanelContainer !== null) renderMessengerPanel(mountedPanelContainer, lastPanelState);
+}
+
+function watchBridge(id: string, intent: SupercodeUiIntent | { action: "mounted" }): void {
+  clearBridgeWatch();
+  pendingBridgeIntent = {
+    id,
+    attachKey: intent.action === "attach" ? intent.key : null,
+    mounted: intent.action === "mounted",
+  };
+  bridgeAckTimer = setTimeout(() => {
+    bridgeAckTimer = null;
+    bridgeDisconnected = true;
+    lastTone = "dead";
+    collapsedMode = "error";
+    collapsedLabel = "Agent bridge disconnected";
+    renderCurrentPanel();
+    syncCollapsedChrome();
+  }, BRIDGE_ACK_TIMEOUT_MS);
+}
+
+function sendBridgeIntent(intent: SupercodeUiIntent | { action: "mounted" }): void {
+  const id = widget.sendIntent(INTENT_QUEUE, intent);
+  if (intent.action !== "draft" && intent.action !== "ack") watchBridge(id, intent);
+}
 
 function closeMessenger(): void {
   if (mountedPanelContainer !== null) renderPreact(null, mountedPanelContainer);
@@ -56,7 +94,7 @@ function closeMessenger(): void {
 
 const adapter: UiAdapter = {
   onIntent(intent: SupercodeUiIntent): void {
-    widget.sendIntent(INTENT_QUEUE, intent);
+    sendBridgeIntent(intent);
   },
   onClose: closeMessenger,
   copyText(value: string): Promise<void> | void {
@@ -65,6 +103,18 @@ const adapter: UiAdapter = {
 };
 
 function MessengerDialog({ state }: { state: unknown }): JSX.Element {
+  const normalized = normalizeUiState(state);
+  const message = "Vibewaiting is no longer connected to its local agent bridge.";
+  const displayState = bridgeDisconnected ? {
+    ...normalized,
+    pill: { tone: "dead" as const, label: "Agent bridge disconnected" },
+    operation: null,
+    error: message,
+    recoverable: false,
+    attachError: pendingBridgeIntent?.attachKey
+      ? { key: pendingBridgeIntent.attachKey, message }
+      : normalized.attachError,
+  } : normalized;
   return (
     <div
       class="vw-dialog"
@@ -79,17 +129,20 @@ function MessengerDialog({ state }: { state: unknown }): JSX.Element {
         closeMessenger();
       }}
     >
-      <SupercodeMessenger state={state} adapter={adapter} components={{ TaskPlan: () => null }} />
+      <SupercodeMessenger state={displayState} adapter={adapter} components={{ TaskPlan: () => null }} />
+      {bridgeDisconnected ? <section class="vw-bridge-disconnected" role="alert"><strong>Agent bridge disconnected</strong><small>Restart Vibewaiting for this browser session.</small><button type="button" onClick={closeMessenger}>Close</button></section> : null}
     </div>
   );
 }
 
 function renderMessengerPanel(element: HTMLElement, state: unknown): void {
+  lastPanelState = state;
   if (mountedPanelContainer !== null && mountedPanelContainer !== element) renderPreact(null, mountedPanelContainer);
   const firstMount = mountedPanelContainer !== element;
   mountedPanelContainer = element;
   renderPreact(<MessengerDialog state={state} />, element);
   if (firstMount) {
+    sendBridgeIntent({ action: "mounted" });
     queueMicrotask(() => {
       const focusTarget = element.querySelector<HTMLElement>("textarea:not(:disabled), input:not(:disabled), button:not(:disabled), [tabindex='0']");
       focusTarget?.focus({ preventScroll: true });
@@ -177,6 +230,9 @@ function pillMode(state: SupercodeUiState): PillMode {
 
 widget.onPatch((patch) => {
   if (!isRecord(patch)) return;
+  const acknowledged = typeof patch.bridgeAck === "string" && patch.bridgeAck === pendingBridgeIntent?.id;
+  if (acknowledged || pendingBridgeIntent?.mounted) clearBridgeWatch();
+  if (bridgeDisconnected) bridgeDisconnected = false;
   Object.assign(accumulatedState, patch);
   const state = normalizeUiState(accumulatedState);
   lastTone = state.pill.tone;
@@ -196,7 +252,7 @@ widget.onPatch((patch) => {
 
 // A sticky injection gets a fresh iframe on every navigation. Register the patch listener first,
 // then ask the trusted daemon for exactly one current snapshot so a fast reply cannot be lost.
-widget.sendIntent(INTENT_QUEUE, { action: "mounted" });
+sendBridgeIntent({ action: "mounted" });
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);

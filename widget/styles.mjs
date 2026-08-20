@@ -6,7 +6,7 @@ export const PANEL_CSS = `
 .panel > header { display:none }
 .panel { animation-duration:.18s }
 
-.vw-dialog { width:var(--vw-panel-width,420px); height:var(--vw-panel-height,480px); outline:0 }
+.vw-dialog { position:relative; width:var(--vw-panel-width,420px); height:var(--vw-panel-height,480px); outline:0 }
 .vw-dialog > .scui-root {
   --scui-width:var(--vw-panel-width,420px);
   --scui-height:var(--vw-panel-height,480px);
@@ -24,6 +24,11 @@ export const PANEL_CSS = `
   width:100%; height:100%; border:0; border-radius:0;
 }
 :root[data-theme="light"] .vw-dialog > .scui-root { --scui-bg:#f8f9fb }
+.vw-bridge-disconnected { position:absolute; inset:0; z-index:20; display:grid; place-content:center; justify-items:center; gap:8px;
+  box-sizing:border-box; padding:28px; text-align:center; color:var(--fg); background:color-mix(in srgb,var(--bg2) 94%,transparent); backdrop-filter:blur(8px) }
+.vw-bridge-disconnected strong { font-size:15px }
+.vw-bridge-disconnected small { max-width:260px; color:var(--mut); line-height:1.45 }
+.vw-bridge-disconnected button { margin-top:6px; padding:7px 14px; border:1px solid var(--bd); border-radius:8px; color:var(--fg); background:var(--fill); cursor:pointer }
 
 /* Lucarne owns the collapsed control; Supercode supplies its canonical harness identity. */
 .pill { position:relative; box-sizing:border-box; width:56px; height:56px; justify-content:center; margin:4px; padding:0; border:0;
