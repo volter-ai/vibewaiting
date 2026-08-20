@@ -322,7 +322,7 @@ describe("startDaemon", () => {
     // The controller's own default policy — the daemon invents no gate of its own.
     expect(client.startedWith).toEqual([{ harness: "claude-code", cwd: "/tmp/project", policy: "default" }]);
     expect(lastPush()).toMatchObject({
-      pill: { tone: "live", label: "claude-code ready" },
+      pill: { tone: "live", label: "Claude Code ready" },
       startup: "ready",
       harness: "claude-code",
       canSend: true,
@@ -444,7 +444,7 @@ describe("startDaemon", () => {
     await host.fireIntent(INTENT_QUEUE, { action: "send", text: "  refactor the parser  " });
     expect(client.runtime.sent).toEqual(["refactor the parser"]);
     // The controller echoes the prompt into the conversation and marks the turn running…
-    expect(lastPush()).toMatchObject({ busy: true, pill: { tone: "live", label: "claude-code working…" } });
+    expect(lastPush()).toMatchObject({ busy: true, pill: { tone: "live", label: "Claude Code working…" } });
     expect(lastPush().transcript.at(-1)).toMatchObject({ role: "user", text: "refactor the parser" });
 
     // …and the answer streams back through the same push path.
@@ -826,7 +826,7 @@ describe("attaching", () => {
     expect(lastPush().sessions.find((s) => s.name === "project")?.active).toBe(false);
     // …read-only, because a persisted mirror is not a control channel and we do not pretend it is.
     expect(lastPush().canSend).toBe(false);
-    expect(lastPush().pill).toEqual({ tone: "warn", label: "claude-code (read-only)" });
+    expect(lastPush().pill).toEqual({ tone: "warn", label: "Claude Code (read-only)" });
     // …and the runtime this daemon started is untouched.
     expect(client.runtime.closed).toBe(false);
     expect(client.activeFollows).toBe(1);
@@ -979,7 +979,7 @@ describe("attaching", () => {
       canSend: true,
       canInterrupt: false,
       attached: { name: "atlas", harness: "claude-code" },
-      pill: { tone: "live", label: "claude-code live" },
+      pill: { tone: "live", label: "Claude Code live" },
     });
     expect(daemon.activeController().getSnapshot().connection).toMatchObject({
       mode: "mirror",
