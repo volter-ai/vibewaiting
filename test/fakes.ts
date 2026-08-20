@@ -151,6 +151,7 @@ export function descriptor(over: {
   cwd?: string | null;
   title?: string | null;
   previewCandidates?: SessionDescriptor["preview_candidates"];
+  latestMessageCandidates?: SessionDescriptor["latest_message_candidates"];
   model?: string | null;
   updatedAtMs?: number | null;
   messageCount?: number | null;
@@ -170,6 +171,7 @@ export function descriptor(over: {
     cwd: over.cwd === undefined ? "/home/dev/projects/atlas" : over.cwd,
     title: over.title === undefined ? "Atlas refactor" : over.title,
     ...(over.previewCandidates ? { preview_candidates: [...over.previewCandidates] } : {}),
+    ...(over.latestMessageCandidates ? { latest_message_candidates: [...over.latestMessageCandidates] } : {}),
     updated_at_ms: over.updatedAtMs === undefined ? 1_000_000 : over.updatedAtMs,
     message_count: over.messageCount === undefined ? over.messages?.length ?? 12 : over.messageCount,
     model: over.model === undefined ? "claude-opus-5" : over.model,

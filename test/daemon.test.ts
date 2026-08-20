@@ -236,12 +236,13 @@ describe("messenger session state machine", () => {
       sessionId: "long-session",
       cwd: "/home/dev/volter/long",
       title: null,
-      previewCandidates: [
+      latestMessageCandidates: [
         {
+          role: "user",
           content: "<local-command-caveat>runtime context</local-command-caveat>",
           metadata: { isMeta: "true" },
         },
-        { content: "Make the transcript list fast", metadata: {} },
+        { role: "assistant", content: "The transcript list is fast now", metadata: {} },
       ],
       messages,
       messageCount: messages.length,
@@ -255,7 +256,8 @@ describe("messenger session state machine", () => {
     const { daemon, host, client, lastPush } = await sessionRig(history);
 
     expect(lastPush().sessions).toHaveLength(30);
-    expect(lastPush().sessions[0]?.title).toBe("Make the transcript list fast");
+    expect(lastPush().sessions[0]?.title).toBe("long");
+    expect(lastPush().sessions[0]?.preview).toBe("The transcript list is fast now");
     await host.fireIntent(INTENT_QUEUE, { action: "loadSessions" });
     await host.fireIntent(INTENT_QUEUE, { action: "loadSessions" });
     expect(lastPush().sessions).toHaveLength(65);
