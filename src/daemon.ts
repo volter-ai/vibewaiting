@@ -16,7 +16,7 @@
 // by a SECOND, non-owning controller scoped to that session's own workspace, sharing this process's
 // one harness transport (`ownsClient: false`). Attaching therefore never touches the session the
 // daemon started, and detaching is just closing the second controller.
-import { SupercodeController } from "@volter-ai-dev/supercode-client";
+import { SessionWindowCache, SupercodeController } from "@volter-ai-dev/supercode-client";
 import type {
   FrontendHarness,
   HarnessClientAdapter,
@@ -575,6 +575,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const daemonStartedAt = performance.now();
   const debounceMs = options.pushDebounceMs ?? DEFAULT_PUSH_DEBOUNCE_MS;
   const attach = options.attachHost ?? defaultAttachHost;
+  // Foreign mirrors are intentionally disposable, but their bounded display
+  // windows are not. Sharing this headless cache makes returning to a chat an
+  // immediate paint while its native transcript refresh continues.
+  const mirrorCache = new SessionWindowCache({ maxEntries: 12 });
 
   const controller: AgentController =
     options.controller ??
@@ -940,6 +944,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         ownsClient: false,
         autoObserve: false,
         mirrorView: { ...PASSIVE_MIRROR_VIEW, tailMessages: opts.tailMessages },
+        mirrorCache,
       }));
 
   /**
@@ -1023,6 +1028,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       await failAttach(key, seq, message(e), `attach unavailable: ${message(e)}`);
       return;
     }
+    const unpublishCandidate = (): void => {
+      const published = foreignControllers.get(key);
+      if (published?.controller !== candidate) return;
+      foreignControllers.delete(key);
+      if (activeForeignKey === key) activeForeignKey = null;
+      published.unsubscribe();
+    };
     try {
       const timeoutSeconds = Math.max(1, Math.ceil(attachTimeoutMs / 1000));
       await withTimeout(
@@ -1037,26 +1049,34 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
               (s) => s.harness === descriptor.locator.harness && s.sessionId === descriptor.locator.session_id,
             );
           if (!target) throw new Error(`that session is not visible in ${workspace}`);
+          if (stopped || seq !== attachSeq) return;
+          // Publish the controller before observe resolves. A shared cached
+          // window commits synchronously at the start of observe, and this
+          // subscription is what lets that state reach the widget while the
+          // native refresh remains in flight.
+          const candidateSlot: ForeignControllerSlot = {
+            controller: candidate,
+            unsubscribe: candidate.subscribe(schedulePush),
+            sourceHarness: descriptor.locator.harness,
+          };
+          activeForeignKey = key;
+          foreignControllers.set(key, candidateSlot);
           await candidate.dispatch({ type: "observe", sessionKey: target.key });
         })(),
         attachTimeoutMs,
         `could not open this session within ${timeoutSeconds} ${timeoutSeconds === 1 ? "second" : "seconds"}`,
       );
     } catch (e) {
+      unpublishCandidate();
       await candidate.close().catch(() => undefined);
       await failAttach(key, seq, message(e));
       return;
     }
     if (stopped || seq !== attachSeq) {
+      unpublishCandidate();
       await candidate.close().catch(() => undefined);
       return;
     }
-    activeForeignKey = key;
-    foreignControllers.set(key, {
-      controller: candidate,
-      unsubscribe: candidate.subscribe(schedulePush),
-      sourceHarness: descriptor.locator.harness,
-    });
     const attachedAt = performance.now();
     log(
       `following ${descriptor.locator.harness} in ${workspace} (read-only mirror; ` +
