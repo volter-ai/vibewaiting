@@ -139,6 +139,10 @@ async function main(): Promise<void> {
     cwd: args.workspace,
     requestTimeoutMs: DEFAULT_WIDGET_REQUEST_TIMEOUT_MS,
   });
+  const discoveryClient = new SupercodeHarnessClient({
+    cwd: args.workspace,
+    requestTimeoutMs: DEFAULT_WIDGET_REQUEST_TIMEOUT_MS,
+  });
   let daemon: Daemon;
   try {
     daemon = await startDaemon({
@@ -149,11 +153,13 @@ async function main(): Promise<void> {
       harness: args.harness,
       policy: args.policy,
       client: harnessClient,
+      discoveryClient,
       persistence: new FileMessengerPersistence(),
       log: (m) => process.stdout.write(`${m}\n`),
     });
   } catch (e) {
     await harnessClient.close().catch(() => undefined);
+    await discoveryClient.close().catch(() => undefined);
     if (createdSession) await lucarne.destroy(session.id).catch(() => undefined);
     throw e;
   }
@@ -169,6 +175,7 @@ async function main(): Promise<void> {
     shuttingDown = true;
     process.stdout.write("\nstopping…\n");
     await daemon.stop();
+    await discoveryClient.close().catch(() => undefined);
     // Only what this process created: an adopted session belongs to whoever is browsing in it.
     if (createdSession) await lucarne.destroy(session.id).catch(() => undefined);
     process.exit(0);

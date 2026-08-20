@@ -122,6 +122,33 @@ export interface SessionDiscoveryClient {
 }
 
 /**
+ * Skip the owning controller's redundant first workspace scan.
+ *
+ * The daemon performs one authoritative global discovery immediately after controller inventory.
+ * `SupercodeController.initialize()` otherwise queues its own workspace discovery beside harness
+ * inventory on the same sequential NDJSON transport. Its timeout then includes time spent waiting
+ * behind inventory, even though `autoObserve: false` means startup consumes none of those sessions.
+ */
+function withSeededOwnerDiscovery(client: HarnessClientAdapter): HarnessClientAdapter {
+  let seedDiscovery = true;
+  return new Proxy(client, {
+    get(target, property): unknown {
+      if (property === "discover") {
+        return async (query: Parameters<HarnessClientAdapter["discover"]>[0]): Promise<{ sessions: SessionDescriptor[] }> => {
+          if (seedDiscovery) {
+            seedDiscovery = false;
+            return { sessions: [] };
+          }
+          return await target.discover(query);
+        };
+      }
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as HarnessClientAdapter;
+}
+
+/**
  * Give a one-session mirror controller the inventory facts the daemon already established.
  *
  * `SupercodeController.initialize()` normally probes harnesses and discovers the entire target
@@ -183,6 +210,12 @@ export interface DaemonOptions {
   policy?: "default" | "yolo" | undefined;
   /** Inject the harness transport (a real `SupercodeHarnessClient`, or a fake in tests). */
   client?: HarnessClientAdapter | undefined;
+  /**
+   * Optional background inventory transport. Keeping it separate prevents a slow global scan from
+   * queuing user-initiated loads, resumes, and sends behind the same sequential NDJSON process.
+   * The caller owns its lifecycle.
+   */
+  discoveryClient?: SessionDiscoveryClient | undefined;
   /** Inject a whole controller, bypassing construction (tests, or a host that already owns one). */
   controller?: AgentController | undefined;
   /** Replace the widget mount (tests). Default: `WidgetHost.attach`. */
@@ -514,7 +547,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const controller: AgentController =
     options.controller ??
     new SupercodeController({
-      client: requireClient(options),
+      client: withSeededOwnerDiscovery(requireClient(options)),
       workspace: options.workspace,
       ownsClient: true,
       // Startup immediately creates its own runtime; observing the newest
@@ -552,8 +585,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   const home = options.home ?? homedir();
   const now = options.now ?? Date.now;
-  // The GLOBAL discovery door: the same transport, called with no workspace.
-  const discovery: SessionDiscoveryClient | undefined = options.client;
+  // The GLOBAL discovery door, called with no workspace and preferably isolated from control RPCs.
+  const discovery: SessionDiscoveryClient | undefined = options.discoveryClient ?? options.client;
   /** The last global scan, held whole — the row keys the panel echoes back resolve through it. */
   let descriptors: readonly SessionDescriptor[] = [];
   let sessionLimit = MAX_SESSION_ROWS;
