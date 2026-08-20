@@ -32,8 +32,10 @@ export interface SessionRow {
   name: string;
   /** The full workspace path with `$HOME` folded to `~` (tooltip / second line). */
   cwd: string;
-  /** Harness title or the first human-visible conversation message — never empty. */
+  /** Harness-provided topic, or a stable workspace/session identity — never empty. */
   title: string;
+  /** Latest human-visible conversation message, independently projected from the topic. */
+  preview: string;
   /** Relative age of `updated_at_ms` against the caller's `now`, or `""` when the harness recorded none. */
   age: string;
   updatedAt: number | null;
@@ -164,10 +166,10 @@ export function projectSession(
     cwd,
     title: firstNonEmpty(
       descriptor.title,
-      conversationPreviewText(descriptor.preview_candidates),
       workspaceName(descriptor.cwd),
       descriptor.locator.session_id.slice(0, 8),
     ),
+    preview: conversationPreviewText(descriptor.latest_message_candidates) ?? "",
     age: relativeAge(descriptor.updated_at_ms, options.now),
     updatedAt: descriptor.updated_at_ms,
     messages: descriptor.message_count,
