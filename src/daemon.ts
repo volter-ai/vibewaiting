@@ -1391,12 +1391,19 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const harness = chooseHarness(controller.getSnapshot(), options.harness);
   startupHarness = harness ?? options.harness ?? "";
 
-  // Fill the messenger before starting a native runtime. Discovery is cheap and useful on its own;
-  // a broken agent handshake must not keep every existing conversation behind its timeout.
-  startup = "discovering";
-  await pushNow();
-  await (bootstrapDiscovery ?? refreshSessions());
-  log(`discovered ${descriptors.length} recent sessions in ${Math.round(performance.now() - discoveryStartedAt)}ms`);
+  const finishDiscovery = async (): Promise<void> => {
+    await (bootstrapDiscovery ?? refreshSessions());
+    log(`discovered ${descriptors.length} recent sessions in ${Math.round(performance.now() - discoveryStartedAt)}ms`);
+  };
+  if (bootstrapDiscovery) {
+    // A messenger can be usable before its historical inbox finishes filling. The dedicated lane
+    // publishes rows as soon as they arrive while the control lane starts independently.
+    void finishDiscovery();
+  } else {
+    startup = "discovering";
+    await pushNow();
+    await finishDiscovery();
+  }
 
   if (harness) {
     startup = "starting";
