@@ -51,6 +51,14 @@ let lastPanelState: unknown = {};
 let bridgeDisconnected = false;
 let bridgeAckTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingBridgeIntent: { id: string; attachKey: string | null; mounted: boolean } | null = null;
+const bridgeCompletions = new Map<string, () => void>();
+
+function resolveBridgeCompletion(id: string): void {
+  const resolve = bridgeCompletions.get(id);
+  if (!resolve) return;
+  bridgeCompletions.delete(id);
+  resolve();
+}
 
 function clearBridgeWatch(): void {
   if (bridgeAckTimer !== null) clearTimeout(bridgeAckTimer);
@@ -71,6 +79,7 @@ function watchBridge(id: string, intent: SupercodeUiIntent | { action: "mounted"
   };
   bridgeAckTimer = setTimeout(() => {
     bridgeAckTimer = null;
+    resolveBridgeCompletion(id);
     bridgeDisconnected = true;
     lastTone = "dead";
     collapsedMode = "error";
@@ -80,9 +89,11 @@ function watchBridge(id: string, intent: SupercodeUiIntent | { action: "mounted"
   }, BRIDGE_ACK_TIMEOUT_MS);
 }
 
-function sendBridgeIntent(intent: SupercodeUiIntent | { action: "mounted" }): void {
+function sendBridgeIntent(intent: SupercodeUiIntent | { action: "mounted" }): void | Promise<void> {
   const id = widget.sendIntent(INTENT_QUEUE, intent);
   if (intent.action !== "draft" && intent.action !== "ack") watchBridge(id, intent);
+  if (intent.action === "draft" || intent.action === "ack" || intent.action === "mounted") return;
+  return new Promise<void>((resolve) => bridgeCompletions.set(id, resolve));
 }
 
 function closeMessenger(): void {
@@ -93,8 +104,8 @@ function closeMessenger(): void {
 }
 
 const adapter: UiAdapter = {
-  onIntent(intent: SupercodeUiIntent): void {
-    sendBridgeIntent(intent);
+  onIntent(intent: SupercodeUiIntent): void | Promise<void> {
+    return sendBridgeIntent(intent);
   },
   onClose: closeMessenger,
   copyText(value: string): Promise<void> | void {
@@ -231,6 +242,7 @@ function pillMode(state: SupercodeUiState): PillMode {
 widget.onPatch((patch) => {
   if (!isRecord(patch)) return;
   const acknowledged = typeof patch.bridgeAck === "string" && patch.bridgeAck === pendingBridgeIntent?.id;
+  if (typeof patch.bridgeDone === "string") resolveBridgeCompletion(patch.bridgeDone);
   if (acknowledged || pendingBridgeIntent?.mounted) clearBridgeWatch();
   if (bridgeDisconnected) bridgeDisconnected = false;
   Object.assign(accumulatedState, patch);
