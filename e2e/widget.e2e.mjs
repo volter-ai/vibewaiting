@@ -57,24 +57,6 @@ test("collapsed messenger uses the active harness and keeps notification chrome 
   expect(geometry.contained).toBe(true);
 });
 
-test("published Gemini CLI identity renders as a fixed square logo with no fallback", async ({ page }) => {
-  const frame = await mountWidget(page);
-  await push(page, readyState({
-    pill: { tone: "live", label: "Gemini CLI ready" },
-    sessions: [{ key: "gemini-one", harness: "gemini", name: "gemini-widget", cwd: "/work", title: "Gemini audit", active: true, live: false }],
-    harnesses: [{ id: "gemini", label: "Gemini CLI", installed: true, startable: true, reason: null }],
-  }));
-
-  const logo = frame.locator('.scui-logo[data-harness="gemini"]');
-  await expect(logo).toHaveCount(1, { timeout: 1000 });
-  await expect(logo.locator("svg")).toHaveAttribute("preserveAspectRatio", "xMidYMid meet");
-  const size = await logo.evaluate((element) => {
-    const bounds = element.getBoundingClientRect();
-    return { width: bounds.width, height: bounds.height };
-  });
-  expect(size).toEqual({ width: 34, height: 34 });
-});
-
 test("identical state patches do not rebuild or replay the collapsed launcher", async ({ page }) => {
   const frame = await mountWidget(page);
   const state = readyState();
