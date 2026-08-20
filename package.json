@@ -18,6 +18,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json && node widget/build.mjs",
     "build:widget": "node widget/build.mjs",
+    "sync:local-ui": "node scripts/sync-local-supercode-ui.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.widget.json && tsc -p tsconfig.test.json",
     "test": "vitest run",
     "test:widget": "npm run build:widget && playwright test",

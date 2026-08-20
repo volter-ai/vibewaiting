@@ -13,6 +13,14 @@ The browser never receives native locators, recovery paths, credentials, or exec
 particular, reduce-and-continue is shown only when the Supercode controller exposes its real
 reversible operation; success is rendered only from a disk-verified reduction receipt.
 
+## Local Supercode UI development
+
+Run `npm run sync:local-ui` to build and install the adjacent Supercode UI checkout directly into
+Vibewaiting's working `node_modules`; pass another UI directory as the final argument or set
+`SUPERCODE_UI_DIR` when the repositories are not siblings. The sync does not contact npm or modify
+`package.json`/`package-lock.json`. A later `npm ci` restores the published dependency for release
+and CI parity.
+
 ## Test inclusion bar
 
 Tests are deliberately scarce. Add one only when the behavior is both multi-step or genuinely
