@@ -4,7 +4,7 @@ Vibe code without leaving your browser: a lucarne glass widget in the corner of 
 
 Vibewaiting is intentionally a thin composition:
 
-- Lucarne owns browser attachment, isolation, launcher lifecycle, and the glass shell.
+- Lucarne provides browser attachment, isolation, launcher lifecycle, and the glass shell.
 - `@volter-ai-dev/supercode-client` owns session/runtime state and capability-gated actions.
 - `@volter-ai-dev/supercode-ui` supplies the component library and complete Storybook contract.
 - This repository bridges bounded state, trusted host persistence, notifications, and intents.
@@ -12,6 +12,20 @@ Vibewaiting is intentionally a thin composition:
 The browser never receives native locators, recovery paths, credentials, or execution policy. In
 particular, reduce-and-continue is shown only when the Supercode controller exposes its real
 reversible operation; success is rendered only from a disk-verified reduction receipt.
+
+Vibewaiting appears directly in the attached browser's normal windows and tabs. Lucarne's porthole
+is an optional remote/headless viewing surface, not the primary way a local user browses.
+
+## Local Supercode development
+
+Run `npm run sync:local` to build the adjacent Supercode binary and install its harness SDK, client,
+and UI packages directly into Vibewaiting's working `node_modules`. When an adjacent Lucarne checkout
+exists, the same command builds and installs that too. Pass another Supercode checkout as the final
+argument or set `SUPERCODE_DIR`; set `LUCARNE_DIR` when either repository is not a sibling. The command
+records the local binary beside those packages, so Vibewaiting cannot accidentally pair local UI with
+the published runtime. It does not contact npm or modify `package.json`/`package-lock.json`; a later
+`npm ci` restores the published dependencies for release and CI parity. `sync:local-ui` remains an
+alias for the complete coherent-stack sync so older development commands are safe.
 
 ## Test inclusion bar
 

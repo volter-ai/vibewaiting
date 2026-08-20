@@ -8,7 +8,7 @@
 // Pure by contract, exactly like `projection.ts`: no clock, no `os.homedir()`, no I/O. `now` and
 // `home` are PARAMETERS — a relative age computed from an ambient clock is untestable, and a
 // fabricated timestamp reads as fact in the UI.
-import { sessionFingerprint } from "@volter-ai-dev/supercode-client";
+import { conversationPreviewText, sessionFingerprint } from "@volter-ai-dev/supercode-client";
 import type { SessionDescriptor, SessionLocator } from "@volter-ai-dev/supercode-harness-sdk";
 
 /** How many rows cross the wire, however many sessions the box has accumulated. */
@@ -32,7 +32,7 @@ export interface SessionRow {
   name: string;
   /** The full workspace path with `$HOME` folded to `~` (tooltip / second line). */
   cwd: string;
-  /** The session's own title, else its model, else a short session id — never empty. */
+  /** Harness title or the first human-visible conversation message — never empty. */
   title: string;
   /** Relative age of `updated_at_ms` against the caller's `now`, or `""` when the harness recorded none. */
   age: string;
@@ -162,7 +162,12 @@ export function projectSession(
     harness: descriptor.locator.harness,
     name: workspaceName(descriptor.cwd) || "no workspace",
     cwd,
-    title: firstNonEmpty(descriptor.title, descriptor.model, descriptor.locator.session_id.slice(0, 8)),
+    title: firstNonEmpty(
+      descriptor.title,
+      conversationPreviewText(descriptor.preview_candidates),
+      workspaceName(descriptor.cwd),
+      descriptor.locator.session_id.slice(0, 8),
+    ),
     age: relativeAge(descriptor.updated_at_ms, options.now),
     updatedAt: descriptor.updated_at_ms,
     messages: descriptor.message_count,

@@ -42,7 +42,8 @@ Environment
   LUCARNE_URL         lucarne daemon base URL (default ${DEFAULT_ENGINE_URL})
   LUCARNE_TOKEN       bearer token, when the daemon requires one
 
-The widget mounts on every page of the session; open the printed URL to browse with it.
+The widget mounts on every page of the attached browser. Keep using that browser normally; the
+printed remote-view URL is only for headless, remote, or diagnostic access.
 `;
 
 /** Parse argv (already sliced past node + script). Throws on an unknown or value-less flag. */
@@ -110,6 +111,10 @@ async function main(): Promise<void> {
   const baseUrl = process.env["LUCARNE_URL"] ?? DEFAULT_ENGINE_URL;
   const token = process.env["LUCARNE_TOKEN"];
   const lucarne = new LucarneClient({ baseUrl, ...(token ? { token } : {}) });
+  const localCommandMarker = fileURLToPath(new URL("../node_modules/.cache/vibewaiting/local-supercode-bin", import.meta.url));
+  const command = process.env["SUPERCODE_BIN"] ?? await readFile(localCommandMarker, "utf8")
+    .then((value) => value.trim() || undefined)
+    .catch(() => undefined);
 
   const html = await loadWidgetHtml();
 
@@ -128,9 +133,14 @@ async function main(): Promise<void> {
     );
   }
 
-  // The browser is already usable once Lucarne has created the session. Print its URL before any
-  // agent RPC so a slow or broken harness can never make startup look like a frozen CLI.
-  process.stdout.write(`\n  browse here → ${session.viewUrl}\n`);
+  // The browser is already usable once Lucarne has exposed the session. Say that before any agent
+  // RPC so a slow or broken harness can never make startup look frozen. A native session's normal
+  // window is the product surface; Lucarne's view URL is a secondary remote/diagnostic surface.
+  process.stdout.write(
+    session.backend === "native"
+      ? `\n  browser: ${createdSession ? "opened" : "attached"} · keep using its normal window\n  remote view (optional) → ${session.viewUrl}\n`
+      : `\n  browser view → ${session.viewUrl}\n`,
+  );
   process.stdout.write(
     `  widget: connecting · workspace ${args.workspace} · session ${session.id}` +
       `${createdSession ? " (created)" : " (adopted)"}\n\n  ctrl-c to stop\n`,
@@ -139,10 +149,12 @@ async function main(): Promise<void> {
   const harnessClient = new SupercodeHarnessClient({
     cwd: args.workspace,
     requestTimeoutMs: DEFAULT_WIDGET_REQUEST_TIMEOUT_MS,
+    ...(command ? { command } : {}),
   });
   const discoveryClient = new SupercodeHarnessClient({
     cwd: args.workspace,
     requestTimeoutMs: DEFAULT_WIDGET_REQUEST_TIMEOUT_MS,
+    ...(command ? { command } : {}),
   });
   let daemon: Daemon;
   try {
