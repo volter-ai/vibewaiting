@@ -1054,9 +1054,22 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           // window commits synchronously at the start of observe, and this
           // subscription is what lets that state reach the widget while the
           // native refresh remains in flight.
+          let publishedTranscript = false;
+          const publishCandidateRevision = (): void => {
+            if (!publishedTranscript && candidate.getSnapshot().activeSession) {
+              publishedTranscript = true;
+              log(
+                `first ${descriptor.locator.harness} transcript state ready in ` +
+                `${Math.round(performance.now() - attachStartedAt)}ms`,
+              );
+              void pushNow();
+              return;
+            }
+            schedulePush();
+          };
           const candidateSlot: ForeignControllerSlot = {
             controller: candidate,
-            unsubscribe: candidate.subscribe(schedulePush),
+            unsubscribe: candidate.subscribe(publishCandidateRevision),
             sourceHarness: descriptor.locator.harness,
           };
           activeForeignKey = key;
