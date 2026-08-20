@@ -86,3 +86,11 @@ test("the expanded shell is a compact messenger dialog and closes back to the la
   await frame.getByRole("button", { name: "Close" }).click({ timeout: 1000 });
   await expect(frame.getByRole("button", { name: /Open agent chats/ })).toBeFocused({ timeout: 1000 });
 });
+
+test("a stale mounted widget reports a dead bridge instead of opening forever", async ({ page }) => {
+  const frame = await mountWidget(page);
+  await push(page, readyState());
+  await frame.getByRole("button", { name: /Open agent chats/ }).click({ timeout: 1000 });
+  await frame.getByRole("button", { name: /Widget audit/ }).click({ timeout: 1000 });
+  await expect(frame.getByRole("alert")).toContainText("Agent bridge disconnected", { timeout: 1000 });
+});
