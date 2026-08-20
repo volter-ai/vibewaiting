@@ -79,7 +79,7 @@ function MessengerDialog({ state }: { state: unknown }): JSX.Element {
         closeMessenger();
       }}
     >
-      <SupercodeMessenger state={state} adapter={adapter} />
+      <SupercodeMessenger state={state} adapter={adapter} components={{ TaskPlan: () => null }} />
     </div>
   );
 }
