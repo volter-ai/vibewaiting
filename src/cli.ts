@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// `vibewaiting` — mint (or adopt) a lucarne browser session, mount the agent widget on every page
-// of it, and bridge that widget to a real coding-agent session in your workspace.
+// `vibewaiting` — mount an agent messenger in ordinary browser pages and bridge it to real local
+// coding-agent sessions. The direct browser-extension path does not require Lucarne; the CLI path
+// can still mint or adopt a Lucarne-managed browser session for automation and remote access.
 //
 // Everything the process owns is torn down on SIGINT, and ONLY what it created: a session passed in
 // with `--session` is left running, because the human is probably still browsing in it.
@@ -11,6 +12,8 @@ import type { HarnessId } from "@volter-ai-dev/supercode-harness-sdk";
 import { LucarneClient } from "lucarne";
 import type { Session } from "lucarne";
 import { startDaemon, type Daemon } from "./daemon.js";
+import { runNativeHost } from "./native-host.js";
+import { installNativeHost, type NativeBrowser } from "./native-install.js";
 import { FileMessengerPersistence } from "./persistence.js";
 
 const DEFAULT_ENGINE_URL = "http://127.0.0.1:7800";
@@ -29,6 +32,7 @@ const USAGE = `vibewaiting — vibe code without leaving your browser
 
 Usage
   vibewaiting [options]
+  vibewaiting native install [--browser brave|chrome|chromium|firefox] [--extension-id <id>]
 
 Options
   --workspace <dir>   project directory the coding agent runs in (default: cwd)
@@ -46,6 +50,41 @@ The widget mounts on every page of the attached browser. Keep using that browser
 printed remote-view URL is only for headless, remote, or diagnostic access.
 `;
 
+async function runNativeInstall(argv: readonly string[]): Promise<void> {
+  let browser: NativeBrowser | undefined;
+  let extensionId: string | undefined;
+  for (let index = 0; index < argv.length; index += 1) {
+    const flag = argv[index];
+    const value = argv[index + 1];
+    if (!value) throw new Error(`vibewaiting: ${flag} needs a value`);
+    index += 1;
+    if (flag === "--browser") {
+      if (
+        value !== "brave" &&
+        value !== "chrome" &&
+        value !== "chromium" &&
+        value !== "firefox"
+      ) {
+        throw new Error(
+          "vibewaiting: --browser must be brave, chrome, chromium, or firefox",
+        );
+      }
+      browser = value;
+    } else if (flag === "--extension-id") {
+      extensionId = value;
+    } else {
+      throw new Error(`vibewaiting: unknown native install option ${flag}`);
+    }
+  }
+  const installed = await installNativeHost({
+    ...(browser ? { browser } : {}),
+    ...(extensionId ? { extensionId } : {}),
+  });
+  process.stdout.write(
+    `Vibewaiting native host installed\n  manifest → ${installed.manifestPath}\n  extension → ${installed.extensionId}\n`,
+  );
+}
+
 /** Parse argv (already sliced past node + script). Throws on an unknown or value-less flag. */
 export function parseArgs(argv: readonly string[]): CliArgs {
   const args: CliArgs = { workspace: process.cwd(), help: false };
@@ -53,7 +92,8 @@ export function parseArgs(argv: readonly string[]): CliArgs {
     const flag = argv[i];
     const value = (): string => {
       const v = argv[i + 1];
-      if (v === undefined || v.startsWith("--")) throw new Error(`vibewaiting: ${flag} needs a value`);
+      if (v === undefined || v.startsWith("--"))
+        throw new Error(`vibewaiting: ${flag} needs a value`);
       i += 1;
       return v;
     };
@@ -73,7 +113,8 @@ export function parseArgs(argv: readonly string[]): CliArgs {
         break;
       case "--policy": {
         const v = value();
-        if (v !== "default" && v !== "yolo") throw new Error(`vibewaiting: --policy must be 'default' or 'yolo'`);
+        if (v !== "default" && v !== "yolo")
+          throw new Error(`vibewaiting: --policy must be 'default' or 'yolo'`);
         args.policy = v;
         break;
       }
@@ -93,8 +134,12 @@ async function loadWidgetHtml(): Promise<string> {
     process.stdout.write("building widget bundle…\n");
     // Resolved at runtime (`widget/` is a sibling of `dist/`, outside this program's rootDir) — the
     // builder is only needed on a fresh install, so it stays off the CLI's static import graph.
-    const mod = (await import(new URL("../widget/build.mjs", import.meta.url).href)) as {
-      buildWidget: (opts?: { outFile?: string }) => Promise<{ outFile: string; bytes: number }>;
+    const mod = (await import(
+      new URL("../widget/build.mjs", import.meta.url).href
+    )) as {
+      buildWidget: (opts?: {
+        outFile?: string;
+      }) => Promise<{ outFile: string; bytes: number }>;
     };
     const { outFile } = await mod.buildWidget({ outFile: path });
     return await readFile(outFile, "utf8");
@@ -102,7 +147,16 @@ async function loadWidgetHtml(): Promise<string> {
 }
 
 async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+  if (argv[0] === "native-host") {
+    await runNativeHost();
+    return;
+  }
+  if (argv[0] === "native" && argv[1] === "install") {
+    await runNativeInstall(argv.slice(2));
+    return;
+  }
+  const args = parseArgs(argv);
   if (args.help) {
     process.stdout.write(USAGE);
     return;
@@ -111,10 +165,17 @@ async function main(): Promise<void> {
   const baseUrl = process.env["LUCARNE_URL"] ?? DEFAULT_ENGINE_URL;
   const token = process.env["LUCARNE_TOKEN"];
   const lucarne = new LucarneClient({ baseUrl, ...(token ? { token } : {}) });
-  const localCommandMarker = fileURLToPath(new URL("../node_modules/.cache/vibewaiting/local-supercode-bin", import.meta.url));
-  const command = process.env["SUPERCODE_BIN"] ?? await readFile(localCommandMarker, "utf8")
-    .then((value) => value.trim() || undefined)
-    .catch(() => undefined);
+  const localCommandMarker = fileURLToPath(
+    new URL(
+      "../node_modules/.cache/vibewaiting/local-supercode-bin",
+      import.meta.url,
+    ),
+  );
+  const command =
+    process.env["SUPERCODE_BIN"] ??
+    (await readFile(localCommandMarker, "utf8")
+      .then((value) => value.trim() || undefined)
+      .catch(() => undefined));
 
   const html = await loadWidgetHtml();
 
@@ -173,14 +234,13 @@ async function main(): Promise<void> {
   } catch (e) {
     await harnessClient.close().catch(() => undefined);
     await discoveryClient.close().catch(() => undefined);
-    if (createdSession) await lucarne.destroy(session.id).catch(() => undefined);
+    if (createdSession)
+      await lucarne.destroy(session.id).catch(() => undefined);
     throw e;
   }
 
   const state = daemon.lastPushed();
-  process.stdout.write(
-    `  widget: ${state?.pill.label ?? "starting"}\n`,
-  );
+  process.stdout.write(`  widget: ${state?.pill.label ?? "starting"}\n`);
 
   let shuttingDown = false;
   const shutdown = async (): Promise<void> => {
@@ -190,7 +250,8 @@ async function main(): Promise<void> {
     await daemon.stop();
     await discoveryClient.close().catch(() => undefined);
     // Only what this process created: an adopted session belongs to whoever is browsing in it.
-    if (createdSession) await lucarne.destroy(session.id).catch(() => undefined);
+    if (createdSession)
+      await lucarne.destroy(session.id).catch(() => undefined);
     process.exit(0);
   };
   process.on("SIGINT", () => void shutdown());

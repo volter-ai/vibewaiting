@@ -2,7 +2,7 @@
   "name": "vibewaiting",
   "version": "0.1.0",
   "private": true,
-  "description": "Vibe code without leaving your browser: a lucarne glass widget wired to your CLI coding agent via supercode.",
+  "description": "Vibe code without leaving your browser: a messenger overlay wired to local coding-agent sessions through Supercode.",
   "type": "module",
   "license": "MIT",
   "engines": {
@@ -16,11 +16,12 @@
     "widget"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json && node widget/build.mjs",
+    "build": "tsc -p tsconfig.json && node widget/build.mjs && node extension/build.mjs",
     "build:widget": "node widget/build.mjs",
+    "build:extension": "node extension/build.mjs",
     "sync:local": "node scripts/sync-local-supercode.mjs",
     "sync:local-ui": "npm run sync:local",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.widget.json && tsc -p tsconfig.test.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.widget.json && tsc -p tsconfig.extension.json && tsc -p tsconfig.test.json",
     "test": "vitest run",
     "test:widget": "npm run build:widget && playwright test",
     "check": "npm run typecheck && npm test && npm run build",
@@ -31,8 +32,8 @@
   "dependencies": {
     "@volter-ai-dev/supercode-client": "^0.3.17",
     "@volter-ai-dev/supercode-harness-sdk": "^0.3.8",
-    "@volter-ai-dev/supercode-ui": "^0.1.24",
-    "@volter-ai-dev/widget-shell": "^0.1.0",
+    "@volter-ai-dev/supercode-ui": "^0.1.25",
+    "@volter-ai-dev/widget-shell": "^0.2.0",
     "esbuild": "^0.28.2",
     "lucarne": "^1.7.4",
     "preact": "^10.19.0"

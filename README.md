@@ -17,6 +17,29 @@ reversible operation; success is rendered only from a disk-verified reduction re
 Vibewaiting appears directly in the attached browser's normal windows and tabs. Lucarne's porthole
 is an optional remote/headless viewing surface, not the primary way a local user browses.
 
+## Browser extension
+
+The native extension is the ordinary-browser path. It injects Widget Shell directly into existing
+Chrome, Chromium, Brave, or Firefox tabs and connects to a small local native-messaging host; it does
+not start, own, or look through a Lucarne browser session.
+
+For a development checkout:
+
+```sh
+npm run build
+node dist/cli.js native install --browser chrome
+```
+
+Load `dist/extension` as an unpacked extension, open its settings, and select an absolute workspace.
+Use `--browser brave`, `chromium`, or `firefox` to register the host for another browser. If a browser
+assigns a different unpacked-extension ID, copy the ID shown on the settings page and reinstall with
+`--extension-id <id>`.
+
+The extension has only `storage` and `nativeMessaging` privileges. Content scripts receive a bounded
+launcher projection—not transcripts, filesystem paths, credentials, or policy. Full messenger state
+is sent only to the extension-owned, origin-isolated iframe; native message frames and reassembly are
+bounded, and unknown harnesses remain hidden instead of receiving a fabricated fallback identity.
+
 ## Local Supercode development
 
 Run `npm run sync:local` to build the adjacent Supercode binary and install its harness SDK, client,

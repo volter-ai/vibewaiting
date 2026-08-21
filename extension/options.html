@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Vibewaiting settings</title>
+    <link rel="stylesheet" href="options.css">
+  </head>
+  <body>
+    <main>
+      <h1>Vibewaiting</h1>
+      <p>Connect the overlay to coding sessions on this machine.</p>
+      <form>
+        <label>Workspace<input id="workspace" type="text" required placeholder="/Users/you/project" spellcheck="false"></label>
+        <label>Preferred harness<select id="harness"><option value="">First available</option><option value="claude-code">Claude Code</option><option value="codex">Codex</option><option value="gemini">Gemini</option><option value="goose">Goose</option><option value="opencode">OpenCode</option><option value="pi">Pi</option><option value="grok">Grok</option></select></label>
+        <label>Execution policy<select id="policy"><option value="">Controller default</option><option value="default">Default</option><option value="yolo">Yolo</option></select></label>
+        <button type="submit">Save and connect</button>
+      </form>
+      <output aria-live="polite"></output>
+      <aside>Before first use, run <code>vibewaiting native install --extension-id <span id="extension-id"></span></code>.</aside>
+    </main>
+    <script type="module" src="options.js"></script>
+  </body>
+</html>
