@@ -5,7 +5,7 @@
 import { SupercodeMessenger } from "@volter-ai-dev/supercode-ui/preact/messenger";
 import { HarnessLogo, hasHarnessLogo } from "@volter-ai-dev/supercode-ui/preact/logo";
 import { normalizeUiState } from "@volter-ai-dev/supercode-ui/core";
-import type { SupercodeUiIntent, SupercodeUiState, TranscriptAttachment, UiAdapter } from "@volter-ai-dev/supercode-ui";
+import type { SupercodeUiIntent, SupercodeUiState, TranscriptAttachment, TranscriptImage, UiAdapter } from "@volter-ai-dev/supercode-ui";
 import { createWidget } from "lucarne/widget/runtime";
 import { render as renderPreact } from "preact";
 import type { JSX } from "preact";
@@ -14,11 +14,15 @@ type PillMode = "connecting" | "idle" | "unread" | "working" | "needs-input" | "
 type WidgetIntent = SupercodeUiIntent
   | { action: "mounted" }
   | { action: "panelVisible" }
-  | { action: "panelHidden" };
+  | { action: "panelHidden" }
+  | { action: "resolveImage"; requestId: string; reference: string };
 
 const NS = "vibewaiting";
 const INTENT_QUEUE = "agent";
 const BRIDGE_ACK_TIMEOUT_MS = 600;
+const IMAGE_RESOLUTION_TIMEOUT_MS = 15_000;
+const MAX_RESOLVED_IMAGE_URL_CHARS = 22_400_000;
+const MAX_RESOLVED_IMAGE_BYTES = 16 * 1024 * 1024;
 const widget = createWidget({ ns: NS, version: 1 });
 const MAX_PICKED_FILES = 8;
 const MAX_FILE_BYTES_READ = 80_000;
@@ -110,6 +114,11 @@ try {
   window.addEventListener("pagehide", () => {
     pageWindow.removeEventListener("resize", onPageResize);
     if (mountedPanelContainer !== null) sendBridgeIntent({ action: "panelHidden" });
+    for (const [requestId, pending] of imageResolutions) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error("The page closed before this image loaded."));
+      imageResolutions.delete(requestId);
+    }
   }, { once: true });
 } catch {
   // Cross-origin embedders retain fixed safe dimensions.
@@ -123,6 +132,12 @@ let bridgeReconnecting = false;
 let bridgeAckTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingBridgeIntent: { id: string; attachKey: string | null; acceptsSnapshot: boolean } | null = null;
 const bridgeCompletions = new Map<string, () => void>();
+let imageRequestSequence = 0;
+const imageResolutions = new Map<string, {
+  resolve: (blob: Blob) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}>();
 
 function resolveBridgeCompletion(id: string): void {
   const resolve = bridgeCompletions.get(id);
@@ -168,6 +183,48 @@ function sendBridgeIntent(intent: WidgetIntent): void | Promise<void> {
   return new Promise<void>((resolve) => bridgeCompletions.set(id, resolve));
 }
 
+function imageBlobFromDataUrl(dataUrl: string): Blob {
+  if (!dataUrl.startsWith("data:image/") || dataUrl.length > MAX_RESOLVED_IMAGE_URL_CHARS) {
+    throw new Error("The host returned an invalid or oversized image.");
+  }
+  const comma = dataUrl.indexOf(",");
+  if (comma < 0 || comma > 200) throw new Error("The host returned an invalid image.");
+  const declaration = dataUrl.slice(5, comma);
+  const mediaType = declaration.split(";", 1)[0]?.toLowerCase() ?? "";
+  if (!mediaType.startsWith("image/")) throw new Error("The host returned an invalid image.");
+  const encoded = dataUrl.slice(comma + 1);
+  let blob: Blob;
+  if (declaration.toLowerCase().endsWith(";base64")) {
+    const binary = atob(encoded);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    blob = new Blob([bytes], { type: mediaType });
+  } else {
+    blob = new Blob([decodeURIComponent(encoded)], { type: mediaType });
+  }
+  if (blob.size > MAX_RESOLVED_IMAGE_BYTES) throw new Error("This image is too large to preview safely.");
+  return blob;
+}
+
+function resolveHistoricalImage(image: TranscriptImage): Promise<Blob> {
+  if (!image.reference) return Promise.reject(new Error("This image has no host retrieval reference."));
+  const reference = image.reference;
+  imageRequestSequence += 1;
+  const requestId = `image-${Date.now().toString(36)}-${imageRequestSequence.toString(36)}`;
+  return new Promise<Blob>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      imageResolutions.delete(requestId);
+      reject(new Error("Loading this image timed out. Try again."));
+    }, IMAGE_RESOLUTION_TIMEOUT_MS);
+    imageResolutions.set(requestId, { resolve, reject, timer });
+    Promise.resolve(sendBridgeIntent({ action: "resolveImage", requestId, reference })).catch((error: unknown) => {
+      clearTimeout(timer);
+      imageResolutions.delete(requestId);
+      reject(error instanceof Error ? error : new Error("Could not request this image."));
+    });
+  });
+}
+
 function reconnectBridge(): void {
   if (bridgeReconnecting) return;
   bridgeReconnecting = true;
@@ -192,6 +249,7 @@ const adapter: UiAdapter = {
   },
   onClose: closeMessenger,
   pickContext: pickAttachments,
+  resolveImage: resolveHistoricalImage,
   copyText(value: string): Promise<void> | void {
     return navigator.clipboard?.writeText(value);
   },
@@ -337,7 +395,26 @@ widget.onPatch((patch) => {
   if (acknowledged || (pendingBridgeIntent?.acceptsSnapshot && includesSnapshot)) clearBridgeWatch();
   if (bridgeReconnecting) bridgeReconnecting = false;
   if (bridgeDisconnected) bridgeDisconnected = false;
-  Object.assign(accumulatedState, patch);
+  const resolution = isRecord(patch.imageResolution) ? patch.imageResolution : null;
+  if (resolution && typeof resolution.requestId === "string") {
+    const pending = imageResolutions.get(resolution.requestId);
+    if (pending) {
+      clearTimeout(pending.timer);
+      imageResolutions.delete(resolution.requestId);
+      if (resolution.status === "resolved" && typeof resolution.dataUrl === "string") {
+        try {
+          pending.resolve(imageBlobFromDataUrl(resolution.dataUrl));
+        } catch (error) {
+          pending.reject(error instanceof Error ? error : new Error("Could not decode this image."));
+        }
+      } else {
+        pending.reject(new Error(typeof resolution.message === "string" && resolution.message ? resolution.message : "Could not load this image."));
+      }
+    }
+  }
+  for (const [key, value] of Object.entries(patch)) {
+    if (key !== "imageResolution") accumulatedState[key] = value;
+  }
   const state = normalizeUiState(accumulatedState);
   lastTone = state.pill.tone;
   const unreadKeys = new Set(state.attention.map((item) => item.key));

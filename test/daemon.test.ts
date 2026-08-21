@@ -139,6 +139,62 @@ async function failingAttachRig(): Promise<Rig> {
 }
 
 describe("bridge invariants", () => {
+  it("keeps large historical images out of state and resolves only a projected reference on demand", async () => {
+    const largeUrl = `data:image/png;base64,${"A".repeat(300_000)}`;
+    const snapshot = {
+      schema: "supercode.client-state.v1",
+      revision: 1,
+      workspace: "/tmp/project",
+      availability: "ready",
+      operation: null,
+      harnesses: [],
+      sessions: [],
+      activeSessionKey: null,
+      activeHarness: "codex",
+      activeSessionId: "history-1",
+      activeSession: null,
+      taskPlan: { source: "none", items: [], residue: [], observedAt: null },
+      connection: { mode: "mirror", strategy: null, follow: "following", ownsRuntime: false, messaging: null },
+      turn: { state: "idle", id: null, startedAt: null },
+      conversation: [{ id: "message-1", kind: "message", role: "user", text: "inspect this", content: "inspect this", metadata: {}, visibility: "conversation", images: [{ id: "image-1", label: "history.png", url: largeUrl }] }],
+      requests: [],
+      availableActions: {},
+      error: null,
+      terminalLaunch: null,
+      delivery: null,
+      reductionReceipt: null,
+    } as unknown as SupercodeClientSnapshot;
+    const controller: AgentController = {
+      getSnapshot: () => snapshot,
+      subscribe: () => (): void => undefined,
+      initialize: async () => snapshot,
+      dispatch: async () => snapshot,
+      close: async () => undefined,
+    };
+    const host = new FakeWidgetHost();
+    const daemon = await startDaemon({
+      sessionId: "session-images",
+      html: "<html></html>",
+      workspace: "/tmp/project",
+      controller,
+      attachHost: async () => host,
+      discoverIntervalMs: 0,
+      persistence: false,
+    });
+    running.push(daemon);
+
+    const image = daemon.lastPushed()!.transcript[0]!.images![0]!;
+    expect(image).toMatchObject({ label: "history.png", mediaType: "image/png", byteSize: 225_000, reference: expect.any(String) });
+    expect(image.url).toBeUndefined();
+    expect(JSON.stringify(host.pushes)).not.toContain("AAAAAA");
+
+    await host.fireIntent(INTENT_QUEUE, { action: "resolveImage", requestId: "request-1", reference: image.reference });
+    expect(host.pushes).toContainEqual({ imageResolution: expect.objectContaining({ requestId: "request-1", status: "resolved", dataUrl: largeUrl }) });
+
+    await host.fireIntent(INTENT_QUEUE, { action: "resolveImage", requestId: "request-2", reference: "guessed" });
+    expect(host.pushes).toContainEqual({ imageResolution: { requestId: "request-2", status: "failed", message: "This image is no longer in the visible transcript window." } });
+  });
+
   it("drains the untrusted page queue at the messenger cadence without replaying an intent", async () => {
     let tick: (() => unknown) | null = null;
     let fallbackRegistered = false;

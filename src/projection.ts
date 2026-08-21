@@ -2,6 +2,7 @@
 // Keep this seam deliberately thin so every consumer gets the same bounded transcript, request,
 // fidelity, reduction, and harness semantics.
 import {
+  createClientProjection,
   projectClientSnapshot,
   type ClientProjectionOptions,
 } from "@volter-ai-dev/supercode-ui/controller";
@@ -46,6 +47,23 @@ export function project(
 ): WidgetState {
   const maxEntries = options.maxEntries ?? DEFAULT_MAX_ENTRIES;
   return projectClientSnapshot(snapshot, {
+    maxEntries,
+    maxScanEntries: options.maxScanEntries ?? maxEntries * 4,
+    maxEntryChars: options.maxEntryChars ?? DEFAULT_MAX_ENTRY_CHARS,
+  });
+}
+
+/**
+ * The same bounded projection plus its host-only historical-image registry. The browser receives
+ * `state`; the daemon retains `resolveImage` and serves one admitted image only after an explicit
+ * viewer request.
+ */
+export function projectWithImages(
+  snapshot: SupercodeClientSnapshot,
+  options: ProjectionOptions = {},
+): ReturnType<typeof createClientProjection> {
+  const maxEntries = options.maxEntries ?? DEFAULT_MAX_ENTRIES;
+  return createClientProjection(snapshot, {
     maxEntries,
     maxScanEntries: options.maxScanEntries ?? maxEntries * 4,
     maxEntryChars: options.maxEntryChars ?? DEFAULT_MAX_ENTRY_CHARS,
