@@ -26,6 +26,7 @@ import type {
   SupercodeClientSnapshot,
 } from "@volter-ai-dev/supercode-client";
 import type { DiscoveryQuery, HarnessId, JsonValue, SessionArtifact, SessionDescriptor, SessionFormat } from "@volter-ai-dev/supercode-harness-sdk";
+import { createLucarneInjector } from "@volter-ai-dev/widget-shell/lucarne";
 import { WidgetHost } from "lucarne/widget/host";
 import {
   DEFAULT_MAX_ENTRIES,
@@ -650,9 +651,16 @@ async function defaultAttachHost(opts: {
   html: string;
   engine?: DaemonOptions["engine"];
 }): Promise<WidgetBridge> {
+  const injector = createLucarneInjector({
+    launcherLabel: "Open agent chats",
+    launcherHidden: true,
+    viewport: { width: 390, height: 667, gutter: 16 },
+    theme: { accent: "#5757d9", radius: "12px" },
+  });
   return await WidgetHost.attach(opts.sessionId, {
     ns: opts.ns,
     html: opts.html,
+    injector,
     ...(opts.engine ? { engine: { ...(opts.engine.baseUrl ? { baseUrl: opts.engine.baseUrl } : {}), ...(opts.engine.token ? { token: opts.engine.token } : {}) } } : {}),
   });
 }
