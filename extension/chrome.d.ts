@@ -21,7 +21,7 @@ declare const chrome: {
     sendMessage(message: unknown): Promise<unknown>;
     onConnect: ExtensionEvent<(port: ExtensionPort) => void>;
     onMessage: ExtensionEvent<(message: unknown) => void>;
-    onInstalled: ExtensionEvent<() => void>;
+    onInstalled: ExtensionEvent<(details: { reason: "install" | "update" | "chrome_update" | "shared_module_update" }) => void>;
   };
   storage: {
     local: {
