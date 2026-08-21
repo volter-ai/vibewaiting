@@ -36,8 +36,10 @@ export interface SessionRow {
   title: string;
   /** Latest human-visible conversation message, independently projected from the topic. */
   preview: string;
-  /** Relative age of `updated_at_ms` against the caller's `now`, or `""` when the harness recorded none. */
+  /** Relative age of the rendered preview message, falling back to session recency when unavailable. */
   age: string;
+  /** Timestamp of the rendered preview message; independent from session-store recency. */
+  previewUpdatedAt: number | null;
   updatedAt: number | null;
   messages: number | null;
   /** True for the session the Agent panel is currently showing. */
@@ -164,6 +166,20 @@ function messengerTitle(descriptor: SessionDescriptor): string {
   return compactTopic(conversationPreviewText(openingUserMessages)) || "Untitled chat";
 }
 
+function previewMessage(descriptor: SessionDescriptor): { text: string; updatedAt: number | null } | null {
+  for (const candidate of descriptor.latest_message_candidates ?? []) {
+    const text = conversationPreviewText([candidate]);
+    if (!text) continue;
+    const rawTimestamp = candidate.metadata?.timestamp;
+    const parsedTimestamp = typeof rawTimestamp === "string" ? Date.parse(rawTimestamp) : Number.NaN;
+    return {
+      text,
+      updatedAt: Number.isFinite(parsedTimestamp) && parsedTimestamp > 0 ? parsedTimestamp : null,
+    };
+  }
+  return null;
+}
+
 export interface SessionProjectionOptions {
   /** Epoch ms the ages are measured against. Required — see the module doc. */
   now: number;
@@ -184,14 +200,17 @@ export function projectSession(
 ): SessionRow {
   const home = options.home ?? "";
   const cwd = shortCwd(descriptor.cwd, home);
+  const preview = previewMessage(descriptor);
+  const previewUpdatedAt = preview?.updatedAt ?? null;
   return {
     key: sessionKey(descriptor.locator),
     harness: descriptor.locator.harness,
     name: workspaceName(descriptor.cwd) || "no workspace",
     cwd,
     title: messengerTitle(descriptor),
-    preview: conversationPreviewText(descriptor.latest_message_candidates) ?? "",
-    age: relativeAge(descriptor.updated_at_ms, options.now),
+    preview: preview?.text ?? "",
+    age: relativeAge(previewUpdatedAt ?? descriptor.updated_at_ms, options.now),
+    previewUpdatedAt,
     updatedAt: descriptor.updated_at_ms,
     messages: descriptor.message_count,
     active: matchesActive(descriptor, options.active),
