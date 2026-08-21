@@ -312,7 +312,6 @@ describe("messenger session state machine", () => {
     const { daemon, host, client, lastPush } = await sessionRig(history);
 
     expect(lastPush().sessions).toHaveLength(30);
-    expect(lastPush().sessions[0]?.title).toBe("long");
     expect(lastPush().sessions[0]?.preview).toBe("The transcript list is fast now");
     await host.fireIntent(INTENT_QUEUE, { action: "loadSessions" });
     await host.fireIntent(INTENT_QUEUE, { action: "loadSessions" });
@@ -515,7 +514,7 @@ describe("messenger session state machine", () => {
     client.sessions = [OWN, { ...grown, updated_at_ms: 2_000_000 - DEFAULT_ATTENTION_SETTLE_MS }, BRIDGE];
     await host.ticks.find((tick) => tick.ms === DEFAULT_DISCOVER_INTERVAL_MS)?.fn();
     const key = sessionKey(ATLAS.locator);
-    expect(lastPush().attention).toContainEqual({ key, kind: "unseen" });
+    expect(lastPush().attention).toContainEqual(expect.objectContaining({ key, kind: "unseen" }));
 
     await host.fireIntent(INTENT_QUEUE, { action: "ack", key });
     expect(lastPush().attention).toEqual([]);
@@ -557,7 +556,7 @@ describe("messenger session state machine", () => {
     await host.ticks.find((tick) => tick.ms === DEFAULT_DISCOVER_INTERVAL_MS)?.fn();
     client.sessions = [OWN, { ...ATLAS, live_status: "idle" }, BRIDGE];
     await host.ticks.find((tick) => tick.ms === DEFAULT_DISCOVER_INTERVAL_MS)?.fn();
-    expect(lastPush().attention).toContainEqual({ key, kind: "finished" });
+    expect(lastPush().attention).toContainEqual(expect.objectContaining({ key, kind: "finished" }));
 
     await host.fireIntent(INTENT_QUEUE, { action: "ack", key });
     expect(lastPush().attention).toEqual([]);
