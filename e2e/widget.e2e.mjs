@@ -1,23 +1,44 @@
 import { readFile } from "node:fs/promises";
 import { test, expect } from "@playwright/test";
+import { createLucarneInjector } from "@volter-ai-dev/widget-shell/lucarne";
+import { hostElementId, iframeGlobal, intentQueueGlobal } from "lucarne/widget";
 
+const NS = "vibewaiting";
+const HOST = hostElementId(NS);
+const FRAME_GLOBAL = iframeGlobal(NS);
+const INTENT_QUEUE = intentQueueGlobal(NS, "agent");
 const widgetHtml = await readFile(new URL("../dist/widget.html", import.meta.url), "utf8");
+const injector = createLucarneInjector({
+  launcherLabel: "Open agent chats",
+  launcherHidden: true,
+  viewport: { width: 390, height: 667, gutter: 16 },
+  theme: { radius: "12px" },
+});
 
 async function mountWidget(page) {
-  await page.setViewportSize({ width: 800, height: 700 });
-  await page.setContent('<iframe id="widget" title="Vibewaiting widget" style="width:500px;height:600px;border:0"></iframe>');
-  await page.locator("#widget").evaluate((element, html) => { element.srcdoc = html; }, widgetHtml);
-  const frame = page.frameLocator("#widget");
-  await frame.locator(".pill").waitFor({ state: "attached", timeout: 1000 });
-  return frame;
+  await page.setViewportSize({ width: 900, height: 800 });
+  await page.setContent("<!doctype html><title>Host application</title><main>Host application</main>");
+  await page.addScriptTag({ content: injector({ ns: NS, html: widgetHtml }) });
+  const host = page.locator(`#${HOST}`);
+  await host.waitFor({ state: "attached", timeout: 1000 });
+  const frame = page.frameLocator(`#${HOST} iframe`);
+  await frame.locator("#app").waitFor({ state: "attached", timeout: 1000 });
+  return { frame, host };
 }
 
 async function push(page, patch) {
-  const frame = page.frames().find((candidate) => candidate !== page.mainFrame());
-  if (!frame) throw new Error("widget frame did not mount");
-  await frame.evaluate((nextPatch) => {
-    window.postMessage({ lwState: { v: 1, ns: "vibewaiting", identity: "browser-test", patch: nextPatch } }, "*");
-  }, patch);
+  await page.evaluate(({ frameGlobal, nextPatch }) => {
+    const frame = window[frameGlobal];
+    frame.contentWindow.postMessage(
+      { lwState: { v: 1, ns: "vibewaiting", identity: { profile: "browser-test" }, patch: nextPatch } },
+      window.location.origin === "null" ? "*" : window.location.origin,
+    );
+  }, { frameGlobal: FRAME_GLOBAL, nextPatch: patch });
+}
+
+async function latestIntentId(page) {
+  await page.waitForFunction((queueGlobal) => Array.isArray(window[queueGlobal]) && window[queueGlobal].length > 0, INTENT_QUEUE, { timeout: 1000 });
+  return await page.evaluate((queueGlobal) => window[queueGlobal].at(-1).id, INTENT_QUEUE);
 }
 
 function readyState(overrides = {}) {
@@ -35,62 +56,79 @@ function readyState(overrides = {}) {
   };
 }
 
-test("collapsed messenger uses the active harness and keeps notification chrome inside its safe area", async ({ page }) => {
-  const frame = await mountWidget(page);
-  await push(page, readyState({ attention: [{ key: "one", kind: "unseen" }] }));
+async function acknowledgeMounted(page, overrides = {}) {
+  const bridgeAck = await latestIntentId(page);
+  await push(page, readyState({ ...overrides, bridgeAck }));
+}
 
-  const launcher = frame.locator(".pill");
-  await expect(launcher).toHaveAttribute("data-mode", "unread", { timeout: 1000 });
-  await expect(frame.locator('.scui-logo[data-harness="codex"]')).toHaveCount(1, { timeout: 1000 });
-  const geometry = await frame.locator(".wrap").evaluate((wrap) => {
-    const pill = wrap.querySelector(".pill").getBoundingClientRect();
-    const badge = wrap.querySelector(".badge").getBoundingClientRect();
-    const bounds = wrap.getBoundingClientRect();
+async function acknowledgeLatest(page, patch = {}) {
+  const bridgeAck = await latestIntentId(page);
+  await push(page, { ...patch, bridgeAck });
+}
+
+test("the Lucarne adapter delivers the canonical harness launcher without clipping its badge", async ({ page }) => {
+  await mountWidget(page);
+  await acknowledgeMounted(page, { attention: [{ key: "one", kind: "unseen" }] });
+
+  const launcher = page.getByRole("button", { name: /Open agent chats/ });
+  await expect(launcher).toBeVisible({ timeout: 1000 });
+  await expect(launcher.locator("img")).toHaveAttribute("src", /^data:image\/svg\+xml/, { timeout: 1000 });
+  const geometry = await page.locator(`#${HOST}`).evaluate((host) => {
+    const launcher = host.shadowRoot.querySelector(".ws-launcher").getBoundingClientRect();
+    const badge = host.shadowRoot.querySelector(".ws-badge").getBoundingClientRect();
     return {
-      pill: { width: pill.width, height: pill.height },
-      contained: badge.left >= bounds.left && badge.top >= bounds.top && badge.right <= bounds.right && badge.bottom <= bounds.bottom,
-      bounds: { width: bounds.width, height: bounds.height },
+      launcher: { width: launcher.width, height: launcher.height },
+      badgeInsideViewport: badge.top >= 0 && badge.right <= innerWidth && badge.bottom <= innerHeight,
     };
   });
-  expect(geometry.pill).toEqual({ width: 56, height: 56 });
-  expect(geometry.bounds).toEqual({ width: 64, height: 64 });
-  expect(geometry.contained).toBe(true);
+  expect(geometry.launcher).toEqual({ width: 54, height: 54 });
+  expect(geometry.badgeInsideViewport).toBe(true);
 });
 
-test("identical state patches do not rebuild or replay the collapsed launcher", async ({ page }) => {
-  const frame = await mountWidget(page);
+test("identical state patches do not rebuild or replay the launcher", async ({ page }) => {
+  await mountWidget(page);
   const state = readyState();
-  await push(page, state);
-  await expect(frame.locator('.scui-logo[data-harness="codex"]')).toHaveCount(1, { timeout: 1000 });
-  await frame.locator(".brand").evaluate((brand) => {
+  await acknowledgeMounted(page);
+  const launcher = page.getByRole("button", { name: /Open agent chats/ });
+  await launcher.evaluate((element) => {
     window.__vibewaitingMutationCount = 0;
-    new MutationObserver((records) => { window.__vibewaitingMutationCount += records.length; }).observe(brand, { childList: true, subtree: true, attributes: true });
+    new MutationObserver((records) => { window.__vibewaitingMutationCount += records.length; })
+      .observe(element, { childList: true, subtree: true, attributes: true });
   });
   await push(page, state);
   await push(page, state);
-  const mutations = await frame.locator(".brand").evaluate(() => window.__vibewaitingMutationCount);
-  expect(mutations).toBe(0);
+  expect(await launcher.evaluate(() => window.__vibewaitingMutationCount)).toBe(0);
 });
 
-test("the expanded shell is a compact messenger dialog and closes back to the launcher", async ({ page }) => {
-  const frame = await mountWidget(page);
-  await push(page, readyState({ attached: { key: "one", harness: "codex", name: "widget", cwd: "/work", title: "Widget audit" }, transcript: [{ id: "u1", role: "user", text: "Review the widget", ts: null, truncated: false }] }));
-  await frame.getByRole("button", { name: /Open agent chats/ }).click({ timeout: 1000 });
-  await expect(frame.getByRole("dialog", { name: "Agent chats" })).toBeVisible({ timeout: 1000 });
-  await frame.locator(".panel").evaluate((element) => Promise.all(element.getAnimations().map((animation) => animation.finished)));
-  const panel = await frame.locator(".vw-dialog").evaluate((element) => {
-    const rect = element.getBoundingClientRect();
+test("the expanded surface is one stable mobile messenger viewport and closes through the outer shell", async ({ page }) => {
+  const { frame, host } = await mountWidget(page);
+  await acknowledgeMounted(page, {
+    attached: { key: "one", harness: "codex", name: "widget", cwd: "/work", title: "Widget audit" },
+    transcript: [{ id: "u1", role: "user", text: "Review the widget", ts: null, truncated: false }],
+  });
+  const launcher = page.getByRole("button", { name: /Open agent chats/ });
+  await launcher.click({ timeout: 1000 });
+  await acknowledgeLatest(page);
+  await frame.getByRole("button", { name: /Widget audit/ }).click({ timeout: 1000 });
+  await acknowledgeLatest(page, {
+    attached: { key: "one", harness: "codex", name: "widget", cwd: "/work", title: "Widget audit" },
+    transcript: [{ id: "u1", role: "user", text: "Review the widget", ts: null, truncated: false }],
+  });
+  await expect(frame.getByText("Review the widget")).toBeVisible({ timeout: 1000 });
+  const panel = await host.evaluate((element) => {
+    const rect = element.shadowRoot.querySelector(".ws-panel").getBoundingClientRect();
     return { width: rect.width, height: rect.height };
   });
-  expect(panel).toEqual({ width: 420, height: 480 });
+  expect(panel).toEqual({ width: 390, height: 667 });
   await frame.getByRole("button", { name: "Close" }).click({ timeout: 1000 });
-  await expect(frame.getByRole("button", { name: /Open agent chats/ })).toBeFocused({ timeout: 1000 });
+  expect(await host.evaluate((element) => element.shadowRoot.activeElement?.classList.contains("ws-launcher"))).toBe(true);
+  await acknowledgeLatest(page);
 });
 
-test("a stale mounted widget reports a dead bridge instead of opening forever", async ({ page }) => {
-  const frame = await mountWidget(page);
-  await push(page, readyState());
-  await frame.getByRole("button", { name: /Open agent chats/ }).click({ timeout: 1000 });
+test("a stale guest reports a dead bridge instead of looking frozen", async ({ page }) => {
+  const { frame } = await mountWidget(page);
+  await acknowledgeMounted(page);
+  await page.getByRole("button", { name: /Open agent chats/ }).click({ timeout: 1000 });
   await frame.getByRole("button", { name: /Widget audit/ }).click({ timeout: 1000 });
   await expect(frame.getByRole("alert")).toContainText("Agent bridge disconnected", { timeout: 1000 });
 });

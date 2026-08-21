@@ -26,6 +26,10 @@ const lucarneSource = resolve(process.env.LUCARNE_DIR ?? join(root, "../lucarne"
 if (existsSync(join(lucarneSource, "packages/lucarne/package.json"))) {
   packages.push([join(lucarneSource, "packages/lucarne"), "lucarne"]);
 }
+const widgetShellSource = resolve(process.env.WIDGET_SHELL_DIR ?? join(root, "../widget-shell"));
+if (existsSync(join(widgetShellSource, "package.json"))) {
+  packages.push([widgetShellSource, "@volter-ai-dev/widget-shell"]);
+}
 
 function run(program, args, options) {
   const result = spawnSync(program, args, { stdio: "inherit", ...options });
@@ -41,6 +45,7 @@ function installPackage(packageRoot, expectedName, scratch) {
   const pack = spawnSync("npm", ["pack", "--ignore-scripts", "--json", "--pack-destination", scratch], {
     cwd: packageRoot,
     encoding: "utf8",
+    env: { ...process.env, npm_config_cache: join(scratch, "npm-cache") },
   });
   if (pack.error) throw pack.error;
   if (pack.status !== 0) {
@@ -73,15 +78,20 @@ function latestRustInputMtime(sourceRoot) {
 }
 
 const startedAt = performance.now();
-const binary = join(source, "target/debug/supercode");
-if (!existsSync(binary) || statSync(binary).mtimeMs < latestRustInputMtime(source)) {
+const binary = resolve(process.env.SUPERCODE_BINARY ?? join(source, "target/debug/supercode"));
+if (!process.env.SUPERCODE_BINARY && (!existsSync(binary) || statSync(binary).mtimeMs < latestRustInputMtime(source))) {
   run("cargo", ["build", "-p", "supercode-cli", "--bin", "supercode"], { cwd: source });
+} else if (process.env.SUPERCODE_BINARY && !existsSync(binary)) {
+  throw new Error(`SUPERCODE_BINARY does not exist: ${binary}`);
 } else {
   process.stdout.write("local Supercode binary is current; skipping Rust rebuild\n");
 }
 run("npm", ["run", "build"], { cwd: join(source, "sdk/ui") });
 if (packages.some(([, name]) => name === "lucarne")) {
   run("npm", ["run", "build"], { cwd: join(lucarneSource, "packages/lucarne") });
+}
+if (packages.some(([, name]) => name === "@volter-ai-dev/widget-shell")) {
+  run("npm", ["run", "build"], { cwd: widgetShellSource });
 }
 
 const scratch = mkdtempSync(join(tmpdir(), "vibewaiting-supercode-"));
