@@ -3,17 +3,14 @@
 export const PANEL_CSS = `
 :root { color-scheme:light dark }
 html,body,#app { width:100%; height:100%; margin:0; overflow:hidden }
-body { background:#14161c }
+body { background:transparent }
 
 .vw-dialog { position:relative; width:100%; height:100%; outline:0 }
 .vw-dialog > .scui-root {
   --scui-width:100%;
   --scui-height:100%;
-  --scui-bg:#14161c;
   width:100%; height:100%; border:0; border-radius:0;
 }
-:root[data-theme="light"] body { background:#f8f9fb }
-:root[data-theme="light"] .vw-dialog > .scui-root { --scui-bg:#f8f9fb }
 
 .vw-bridge-disconnected { position:absolute; inset:0; z-index:20; display:grid; place-content:center; justify-items:center; gap:8px;
   box-sizing:border-box; padding:28px; text-align:center; color:var(--scui-fg); background:color-mix(in srgb,var(--scui-bg-raised) 94%,transparent); backdrop-filter:blur(8px) }
