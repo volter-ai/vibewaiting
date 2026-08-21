@@ -4,7 +4,10 @@ import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const root = resolve(import.meta.dirname, "..");
-const requested = process.argv[2] ?? process.env.SUPERCODE_DIR;
+// Persist the selected worktree outside node_modules so `npm ci` cannot silently forget it.
+const sourceMarker = join(root, ".vibewaiting/local-supercode-source");
+const remembered = existsSync(sourceMarker) ? readFileSync(sourceMarker, "utf8").trim() : "";
+const requested = (process.argv[2] ?? process.env.SUPERCODE_DIR ?? remembered) || undefined;
 const candidates = requested
   ? [resolve(requested)]
   : [resolve(root, "../supercode-live-cc"), resolve(root, "../supercode")];
@@ -23,11 +26,11 @@ const packages = [
   [join(source, "sdk/ui"), "@volter-ai-dev/supercode-ui"],
 ];
 const lucarneSource = resolve(process.env.LUCARNE_DIR ?? join(root, "../lucarne"));
-if (existsSync(join(lucarneSource, "packages/lucarne/package.json"))) {
+if (process.env.VIBEWAITING_SUPERCODE_ONLY !== "1" && existsSync(join(lucarneSource, "packages/lucarne/package.json"))) {
   packages.push([join(lucarneSource, "packages/lucarne"), "lucarne"]);
 }
 const widgetShellSource = resolve(process.env.WIDGET_SHELL_DIR ?? join(root, "../widget-shell"));
-if (existsSync(join(widgetShellSource, "package.json"))) {
+if (process.env.VIBEWAITING_SUPERCODE_ONLY !== "1" && existsSync(join(widgetShellSource, "package.json"))) {
   packages.push([widgetShellSource, "@volter-ai-dev/widget-shell"]);
 }
 
@@ -102,7 +105,12 @@ try {
   ]);
   const marker = join(root, "node_modules/.cache/vibewaiting/local-supercode-bin");
   mkdirSync(resolve(marker, ".."), { recursive: true });
-  writeFileSync(marker, `${binary}\n`, "utf8");
+  mkdirSync(resolve(sourceMarker, ".."), { recursive: true });
+  const writeChanged = (path, value) => {
+    if (!existsSync(path) || readFileSync(path, "utf8") !== value) writeFileSync(path, value, "utf8");
+  };
+  writeChanged(marker, `${binary}\n`);
+  writeChanged(sourceMarker, `${source}\n`);
   process.stdout.write(
     `local Supercode stack synced from ${source} in ${Math.round(performance.now() - startedAt)}ms\n`
       + installed.map(([name, version]) => `  ${name}@${version}`).join("\n") + "\n",

@@ -25,7 +25,7 @@ import type {
   SupercodeClientAction,
   SupercodeClientSnapshot,
 } from "@volter-ai-dev/supercode-client";
-import type { DiscoveryQuery, HarnessId, JsonValue, SessionArtifact, SessionDescriptor, SessionFormat } from "@volter-ai-dev/supercode-harness-sdk";
+import type { DiscoveryQuery, HarnessId, HarnessSettingChange, JsonValue, SessionArtifact, SessionDescriptor, SessionFormat } from "@volter-ai-dev/supercode-harness-sdk";
 import { createLucarneInjector } from "@volter-ai-dev/widget-shell/lucarne";
 import { WidgetHost } from "lucarne/widget/host";
 import {
@@ -487,6 +487,12 @@ export interface ReduceIntent {
   targetHarness: HarnessId | null;
 }
 
+export interface ConfigureHarnessIntent {
+  harness: HarnessId;
+  changes: HarnessSettingChange[];
+  expectedRevision: string;
+}
+
 const SESSION_FORMATS = new Set<string>([
   "claude-code",
   "codex",
@@ -523,6 +529,28 @@ export function parseReduceIntent(payload: unknown): ReduceIntent | null {
   if (targetHarness === undefined) return { targetHarness: null };
   if (typeof targetHarness !== "string" || targetHarness.trim() === "") return null;
   return { targetHarness: targetHarness.trim() as HarnessId };
+}
+
+/**
+ * Parse only the bounded, revisioned setting choice projected by Supercode's UI. The trusted
+ * controller still checks this against the active harness and its freshly inspected controls.
+ */
+export function parseConfigureHarnessIntent(payload: unknown): ConfigureHarnessIntent | null {
+  if (!payload || typeof payload !== "object") return null;
+  if (Object.keys(payload).some((key) => !["action", "harness", "changes", "expectedRevision"].includes(key))) return null;
+  const { action, harness, changes, expectedRevision } = payload as Record<string, unknown>;
+  if (action !== "configureHarness" || typeof harness !== "string" || harness.length < 1 || harness.length > 100) return null;
+  if (typeof expectedRevision !== "string" || expectedRevision.length < 1 || expectedRevision.length > 500) return null;
+  if (!Array.isArray(changes) || changes.length < 1 || changes.length > 20) return null;
+  const parsed: HarnessSettingChange[] = [];
+  for (const change of changes) {
+    if (!change || typeof change !== "object" || Object.keys(change).some((key) => key !== "key" && key !== "value")) return null;
+    const { key, value } = change as Record<string, unknown>;
+    if (typeof key !== "string" || key.length < 1 || key.length > 200) return null;
+    if (value !== null && (typeof value !== "string" || value.length > 500)) return null;
+    parsed.push({ key, value: value as string | null });
+  }
+  return { harness: harness as HarnessId, changes: parsed, expectedRevision };
 }
 
 /** A newly mounted iframe asks for one forced snapshot; no page-chosen target or state is trusted. */
@@ -693,6 +721,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       // persisted session first only performs a redundant full transcript load.
       autoObserve: false,
       mirrorView: PASSIVE_MIRROR_VIEW,
+      allowHarnessConfiguration: true,
       ...(options.policy ? { policy: options.policy } : {}),
     });
 
@@ -1113,6 +1142,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         autoObserve: false,
         mirrorView: { ...PASSIVE_MIRROR_VIEW, tailMessages: opts.tailMessages },
         mirrorCache,
+        allowHarnessConfiguration: true,
       }));
 
   /**
@@ -1416,6 +1446,24 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       await pushNow();
       return;
     }
+    const harnessConfiguration = parseConfigureHarnessIntent(intent.payload);
+    if (harnessConfiguration !== null) {
+      actionError = null;
+      try {
+        await activeController().dispatch({
+          type: "configureHarness",
+          harness: harnessConfiguration.harness,
+          changes: harnessConfiguration.changes,
+          expectedRevision: harnessConfiguration.expectedRevision,
+        });
+        log(`updated ${harnessConfiguration.harness} interoperability settings`);
+      } catch (e) {
+        actionError = message(e);
+        log(`harness settings update failed: ${actionError}`);
+      }
+      await pushNow();
+      return;
+    }
     const newChat = parseNewChatIntent(intent.payload);
     if (newChat !== null) {
       actionError = null;
@@ -1676,7 +1724,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       else await task;
       return;
     }
-    if (action === "send" || action === "new") {
+    if (action === "send" || action === "new" || action === "configureHarness") {
       actionError = `Invalid ${action} intent payload.`;
       log(`${action} rejected: ${actionError}`);
       await pushNow();

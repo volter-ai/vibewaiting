@@ -43,8 +43,9 @@ bounded, and unknown harnesses remain hidden instead of receiving a fabricated f
 ### Zero-touch development
 
 Run `npm run dev:extension` once. It owns a persistent, isolated Brave/Chromium development profile,
-installs the matching native host, watches extension, messenger, and host sources, and after every
-successful build reloads the extension and refreshes its ordinary web tabs. The profile and settings
+installs the matching native host, syncs the remembered local Supercode worktree, watches both
+projects' relevant sources, and after every successful build reloads the extension and refreshes
+its ordinary web tabs. The profile and settings
 survive restarts, so neither developers nor reviewers need to revisit the extensions page. Override
 the browser, CDP port, profile, or initial page with `VIBEWAITING_DEV_BROWSER`,
 `VIBEWAITING_DEV_CDP_PORT`, `VIBEWAITING_DEV_PROFILE`, or `VIBEWAITING_DEV_URL`. A new profile is
@@ -60,13 +61,22 @@ and UI packages directly into Vibewaiting's working `node_modules`. When adjacen
 Shell checkouts exist, the same command builds and installs those too. Pass another Supercode checkout
 as the final argument or set `SUPERCODE_DIR`; set `LUCARNE_DIR` or `WIDGET_SHELL_DIR` when either
 repository is not a sibling. The command
-records the local binary beside those packages, so Vibewaiting cannot accidentally pair local UI with
-the published runtime. It does not contact npm or modify `package.json`/`package-lock.json`; a later
-`npm ci` restores the published dependencies for release and CI parity. `sync:local-ui` remains an
+records both the local binary and selected source worktree in ignored local-development state, so Vibewaiting
+cannot accidentally pair local UI with the published runtime. `dev:extension` reuses that selection
+and automatically resyncs Supercode source changes; no repeated manual command is needed. It does
+not contact npm or modify `package.json`/`package-lock.json`; a later
+`npm ci` restores the published dependencies for release and CI parity without forgetting which
+local worktree the next development run should resync. `sync:local-ui` remains an
 alias for the complete coherent-stack sync so older development commands are safe.
 
 When the selected Supercode worktree is UI-only, `SUPERCODE_BINARY=/absolute/path/to/supercode` reuses
 an explicitly named local binary and skips an unnecessary Rust rebuild.
+
+Harness interoperability settings follow the same trust boundary. The browser renders only
+Supercode's bounded, revisioned controls and returns a declared choice. Vibewaiting's local daemon
+strictly parses that intent, while Supercode revalidates the active harness, control, choice, reset
+capability, and revision before atomically changing a native settings file. This is intentionally
+not a general harness preferences editor.
 
 ## Test inclusion bar
 
