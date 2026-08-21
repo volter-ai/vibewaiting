@@ -40,6 +40,19 @@ launcher projection—not transcripts, filesystem paths, credentials, or policy.
 is sent only to the extension-owned, origin-isolated iframe; native message frames and reassembly are
 bounded, and unknown harnesses remain hidden instead of receiving a fabricated fallback identity.
 
+### Zero-touch development
+
+Run `npm run dev:extension` once. It owns a persistent, isolated Brave/Chromium development profile,
+installs the matching native host, watches extension, messenger, and host sources, and after every
+successful build reloads the extension and refreshes its ordinary web tabs. The profile and settings
+survive restarts, so neither developers nor reviewers need to revisit the extensions page. Override
+the browser, CDP port, profile, or initial page with `VIBEWAITING_DEV_BROWSER`,
+`VIBEWAITING_DEV_CDP_PORT`, `VIBEWAITING_DEV_PROFILE`, or `VIBEWAITING_DEV_URL`. A new profile is
+configured to the checkout automatically; set `VIBEWAITING_DEV_WORKSPACE` to use another project.
+
+This loop is development-only and never runs in CI. Store installations use the browser's normal
+signed automatic-update mechanism.
+
 ## Local Supercode development
 
 Run `npm run sync:local` to build the adjacent Supercode binary and install its harness SDK, client,

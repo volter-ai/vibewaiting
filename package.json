@@ -19,6 +19,7 @@
     "build": "tsc -p tsconfig.json && node widget/build.mjs && node extension/build.mjs",
     "build:widget": "node widget/build.mjs",
     "build:extension": "node extension/build.mjs",
+    "dev:extension": "npm run build && node scripts/dev-extension.mjs",
     "sync:local": "node scripts/sync-local-supercode.mjs",
     "sync:local-ui": "npm run sync:local",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.widget.json && tsc -p tsconfig.extension.json && tsc -p tsconfig.test.json",
