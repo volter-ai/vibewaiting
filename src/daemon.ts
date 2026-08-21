@@ -888,10 +888,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     const transcriptWindowKey = activeForeignKey ?? "@owned";
     const transcriptLimit = transcriptLimits.get(transcriptWindowKey) ?? initialTranscriptLimit;
     const observedAt = now();
-    const sessions = projectSessions(descriptors, { now: observedAt, home, active: ref, max: sessionLimit });
+    const sessions = projectSessions(descriptors, { now: observedAt, home, active: ref, max: sessionLimit, preserveOrder: true });
     const ownSnapshot = controller.getSnapshot();
     const ownRef = activeRef(ownSnapshot);
-    const ownRows = projectSessions(descriptors, { now: observedAt, home, active: ownRef, max: sessionLimit });
+    const ownRows = projectSessions(descriptors, { now: observedAt, home, active: ownRef, max: sessionLimit, preserveOrder: true });
     imageProjection = projectWithImages(snapshot, { ...options.projection, maxEntries: transcriptLimit });
     const projected = imageProjection.state;
     const startupLabel = startup === "connecting"
@@ -1006,7 +1006,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     const retained = topicCandidatesBySession.get(key);
     return retained?.length ? { ...descriptor, preview_candidates: retained } : descriptor;
   };
-  const rebuildDescriptors = (): void => {
+  const rebuildDescriptors = (preserveVisibleOrder = panelVisible): void => {
     const all = [...sessionsByHarness.values()].flat();
     all.sort((left, right) =>
       (right.updated_at_ms ?? Number.MIN_SAFE_INTEGER) - (left.updated_at_ms ?? Number.MIN_SAFE_INTEGER)
@@ -1014,7 +1014,21 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       || left.locator.session_id.localeCompare(right.locator.session_id));
     hasMoreSessions = all.length > sessionLimit
       || [...sessionsByHarness.values()].some((sessions) => sessions.length > sessionLimit);
-    descriptors = all.slice(0, sessionLimit);
+    if (!preserveVisibleOrder || descriptors.length === 0) {
+      descriptors = all.slice(0, sessionLimit);
+      return;
+    }
+    const updatedByKey = new Map(all.map((descriptor) => [sessionKey(descriptor.locator), descriptor]));
+    const stable = descriptors.flatMap((descriptor) => {
+      const key = sessionKey(descriptor.locator);
+      const updated = updatedByKey.get(key);
+      if (!updated) return [];
+      updatedByKey.delete(key);
+      return [updated];
+    });
+    // New conversations append while the panel is open instead of displacing the row under the
+    // pointer. Closing the panel restores ordinary newest-first ordering before the next open.
+    descriptors = [...stable, ...updatedByKey.values()].slice(0, sessionLimit);
   };
   const refreshSessions = (): Promise<void> => {
     if (stopped || !discovery) return Promise.resolve();
@@ -1274,12 +1288,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     }
     if (parseMountedIntent(intent.payload)) {
       panelVisible = false;
+      rebuildDescriptors(false);
       await pushNow(true);
       return;
     }
     const panelVisibility = parsePanelVisibilityIntent(intent.payload);
     if (panelVisibility !== null) {
       panelVisible = panelVisibility;
+      if (!panelVisible) rebuildDescriptors(false);
       if (panelVisible) await pushNow(true);
       return;
     }
