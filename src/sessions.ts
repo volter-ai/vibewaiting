@@ -173,6 +173,8 @@ export interface SessionProjectionOptions {
   active?: ActiveSessionRef | null;
   /** Row cap. Default `MAX_SESSION_ROWS`. */
   max?: number;
+  /** Keep the caller's order instead of applying the default newest-first sort. */
+  preserveOrder?: boolean;
 }
 
 /** One descriptor → one row. Exported for the test that pins a single row's shape. */
@@ -211,7 +213,10 @@ export function projectSessions(
   const max = options.max ?? MAX_SESSION_ROWS;
   const seen = new Set<string>();
   const rows: SessionRow[] = [];
-  for (const descriptor of [...descriptors].sort((a, b) => (b.updated_at_ms ?? 0) - (a.updated_at_ms ?? 0))) {
+  const ordered = options.preserveOrder
+    ? descriptors
+    : [...descriptors].sort((a, b) => (b.updated_at_ms ?? 0) - (a.updated_at_ms ?? 0));
+  for (const descriptor of ordered) {
     const row = projectSession(descriptor, options);
     if (seen.has(row.key)) continue;
     seen.add(row.key);

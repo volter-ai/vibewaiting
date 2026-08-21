@@ -504,7 +504,7 @@ describe("messenger session state machine", () => {
     expect(client.activeFollows).toBe(1);
   });
 
-  it("does not turn heartbeat churn into unread attention and acknowledges settled growth", async () => {
+  it("keeps visible rows stable through heartbeat churn and acknowledges settled growth", async () => {
     const { host, client, lastPush } = await sessionRig();
     client.sessions = [OWN, { ...ATLAS, updated_at_ms: 2_000_050 }, BRIDGE];
     await host.ticks.find((tick) => tick.ms === DEFAULT_DISCOVER_INTERVAL_MS)?.fn();
@@ -518,6 +518,16 @@ describe("messenger session state machine", () => {
 
     await host.fireIntent(INTENT_QUEUE, { action: "ack", key });
     expect(lastPush().attention).toEqual([]);
+
+    const visibleOrder = lastPush().sessions.map((session) => session.key);
+    await host.fireIntent(INTENT_QUEUE, { action: "panelVisible" });
+    client.sessions = [OWN, grown, { ...BRIDGE, updated_at_ms: 3_000_000 }];
+    await host.ticks.find((tick) => tick.ms === DEFAULT_DISCOVER_INTERVAL_MS)?.fn();
+    expect(lastPush().sessions.map((session) => session.key)).toEqual(visibleOrder);
+
+    await host.fireIntent(INTENT_QUEUE, { action: "panelHidden" });
+    await host.fireIntent(INTENT_QUEUE, { action: "panelVisible" });
+    expect(lastPush().sessions[0]?.key).toBe(sessionKey(BRIDGE.locator));
   });
 
   it("marks completed conversations only while they are in the background", async () => {
