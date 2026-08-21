@@ -308,12 +308,14 @@ describe("messenger session state machine", () => {
     expect(completionAt).toBeGreaterThan(acceptedAt);
     const continued = daemon.activeController();
     const context = [{ id: "readme", kind: "file", label: "README.md", detail: "# Contract\nKeep the UI modular." }];
-    await host.fireIntent(INTENT_QUEUE, { action: "send", text: "continue", context });
+    const images = [{ id: "diagram", label: "architecture.png", url: "data:image/png;base64,aGVsbG8=" }];
+    await host.fireIntent(INTENT_QUEUE, { action: "send", text: "continue", context, images });
     expect(continued.getSnapshot().conversation).toContainEqual(expect.objectContaining({
       kind: "message",
       role: "user",
       text: "continue",
       context,
+      images,
     }));
     await host.fireIntent(INTENT_QUEUE, { action: "release" });
 
