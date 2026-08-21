@@ -28,7 +28,9 @@ export const PANEL_CSS = `
   box-sizing:border-box; padding:28px; text-align:center; color:var(--fg); background:color-mix(in srgb,var(--bg2) 94%,transparent); backdrop-filter:blur(8px) }
 .vw-bridge-disconnected strong { font-size:15px }
 .vw-bridge-disconnected small { max-width:260px; color:var(--mut); line-height:1.45 }
+.vw-bridge-disconnected span { display:flex; gap:7px; margin-top:6px }
 .vw-bridge-disconnected button { margin-top:6px; padding:7px 14px; border:1px solid var(--bd); border-radius:8px; color:var(--fg); background:var(--fill); cursor:pointer }
+.vw-bridge-disconnected span button { margin-top:0 }.vw-bridge-disconnected button:disabled { opacity:.55; cursor:default }.vw-bridge-disconnected .vw-secondary { border-color:transparent; background:transparent; color:var(--mut) }
 
 /* Lucarne owns the collapsed control; Supercode supplies its canonical harness identity. */
 .pill { position:relative; box-sizing:border-box; width:56px; height:56px; justify-content:center; margin:4px; padding:0; border:0;

@@ -56,6 +56,7 @@ let mountedPanelContainer: HTMLElement | null = null;
 let restoreLauncherFocus = false;
 let lastPanelState: unknown = {};
 let bridgeDisconnected = false;
+let bridgeReconnecting = false;
 let bridgeAckTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingBridgeIntent: { id: string; attachKey: string | null; acceptsSnapshot: boolean } | null = null;
 const bridgeCompletions = new Map<string, () => void>();
@@ -87,6 +88,7 @@ function watchBridge(id: string, intent: WidgetIntent): void {
   bridgeAckTimer = setTimeout(() => {
     bridgeAckTimer = null;
     resolveBridgeCompletion(id);
+    bridgeReconnecting = false;
     bridgeDisconnected = true;
     lastTone = "dead";
     collapsedMode = "error";
@@ -101,6 +103,16 @@ function sendBridgeIntent(intent: WidgetIntent): void | Promise<void> {
   if (intent.action !== "draft" && intent.action !== "ack") watchBridge(id, intent);
   if (intent.action === "draft" || intent.action === "ack" || intent.action === "mounted" || intent.action === "panelVisible" || intent.action === "panelHidden") return;
   return new Promise<void>((resolve) => bridgeCompletions.set(id, resolve));
+}
+
+function reconnectBridge(): void {
+  if (bridgeReconnecting) return;
+  bridgeReconnecting = true;
+  collapsedMode = "connecting";
+  collapsedLabel = "Reconnecting agent bridge";
+  renderCurrentPanel();
+  syncCollapsedChrome();
+  sendBridgeIntent({ action: "mounted" });
 }
 
 function closeMessenger(): void {
@@ -149,7 +161,7 @@ function MessengerDialog({ state }: { state: unknown }): JSX.Element {
       }}
     >
       <SupercodeMessenger state={displayState} adapter={adapter} components={{ TaskPlan: () => null }} />
-      {bridgeDisconnected ? <section class="vw-bridge-disconnected" role="alert"><strong>Agent bridge disconnected</strong><small>Restart Vibewaiting for this browser session.</small><button type="button" onClick={closeMessenger}>Close</button></section> : null}
+      {bridgeDisconnected ? <section class="vw-bridge-disconnected" role="alert"><strong>{bridgeReconnecting ? "Reconnecting…" : "Agent bridge disconnected"}</strong><small>{bridgeReconnecting ? "Checking the local agent bridge." : "The local controller stopped responding."}</small><span><button type="button" disabled={bridgeReconnecting} onClick={reconnectBridge}>{bridgeReconnecting ? "Reconnecting…" : "Reconnect"}</button><button type="button" class="vw-secondary" onClick={closeMessenger}>Close</button></span></section> : null}
     </div>
   );
 }
@@ -259,6 +271,7 @@ widget.onPatch((patch) => {
   const includesSnapshot = Object.keys(patch).some((key) => key !== "bridgeAck" && key !== "bridgeDone");
   if (typeof patch.bridgeDone === "string") resolveBridgeCompletion(patch.bridgeDone);
   if (acknowledged || (pendingBridgeIntent?.acceptsSnapshot && includesSnapshot)) clearBridgeWatch();
+  if (bridgeReconnecting) bridgeReconnecting = false;
   if (bridgeDisconnected) bridgeDisconnected = false;
   Object.assign(accumulatedState, patch);
   const state = normalizeUiState(accumulatedState);
