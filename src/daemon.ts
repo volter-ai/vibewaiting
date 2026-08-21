@@ -425,7 +425,7 @@ export function parseSendIntent(payload: unknown): SendIntent | null {
   const trimmed = text.trim();
   const context = parsePromptContext(contextValue);
   const images = parsePromptImages(imageValue);
-  return trimmed === "" || context === null || images === null ? null : { text: trimmed, context, images };
+  return (trimmed === "" && !images?.length) || context === null || images === null ? null : { text: trimmed, context, images };
 }
 
 /** The Stop button's entire payload. No target is accepted from the page. */
@@ -567,7 +567,7 @@ export function parseNewChatIntent(payload: unknown): NewChatIntent | null {
   const trimmedText = text.trim();
   const context = parsePromptContext(contextValue);
   const images = parsePromptImages(imageValue);
-  if (trimmedHarness === "" || trimmedText === "" || context === null || images === null) return null;
+  if (trimmedHarness === "" || (trimmedText === "" && !images?.length) || context === null || images === null) return null;
   return { harness: trimmedHarness as HarnessId, text: trimmedText, context, images };
 }
 
