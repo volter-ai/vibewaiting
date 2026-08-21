@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { access, watch } from "node:fs";
+import { access, readFileSync, watch } from "node:fs";
 import { homedir, platform } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -363,6 +363,7 @@ await reloadExtensionAndTabs();
 
 let buildRunning = false;
 let buildPending = false;
+let localSyncPending = false;
 let debounce;
 
 async function rebuild() {
@@ -373,6 +374,12 @@ async function rebuild() {
   buildRunning = true;
   const started = performance.now();
   try {
+    if (localSyncPending) {
+      localSyncPending = false;
+      await command(process.execPath, [join(root, "scripts/sync-local-supercode.mjs")], {
+        env: { ...process.env, VIBEWAITING_SUPERCODE_ONLY: "1" },
+      });
+    }
     await command("npm", ["run", "build"]);
     await launchBrowser(choice);
     await ensureDevSettings();
@@ -396,6 +403,11 @@ function scheduleRebuild() {
   debounce = setTimeout(() => void rebuild(), 100);
 }
 
+function scheduleLocalStackRebuild() {
+  localSyncPending = true;
+  scheduleRebuild();
+}
+
 const watchers = [];
 for (const path of ["extension", "src", "widget"]) {
   watchers.push(watch(join(root, path), { recursive: true }, scheduleRebuild));
@@ -408,15 +420,45 @@ for (const path of [
 ]) {
   watchers.push(watch(join(root, path), scheduleRebuild));
 }
-const localStackMarker = join(
+const localSourceMarker = join(
   root,
-  "node_modules/.cache/vibewaiting/local-supercode-bin",
+  ".vibewaiting/local-supercode-source",
 );
-if (await exists(localStackMarker))
-  watchers.push(watch(localStackMarker, scheduleRebuild));
+if (await exists(localSourceMarker)) {
+  const localSource = readFileSync(localSourceMarker, "utf8").trim();
+  const sourceDirectories = [
+    "crates",
+    "sdk/ui/src",
+  ];
+  const sourceFiles = [
+    "Cargo.lock",
+    "crates/cli/Cargo.toml",
+    "crates/harness/Cargo.toml",
+    "sdk/typescript/client.mjs",
+    "sdk/typescript/index.d.ts",
+    "sdk/typescript/package.json",
+    "sdk/client/client.mjs",
+    "sdk/client/index.d.ts",
+    "sdk/client/package.json",
+    "sdk/ui/core.mjs",
+    "sdk/ui/controller.mjs",
+    "sdk/ui/index.d.ts",
+    "sdk/ui/package.json",
+    "sdk/ui/styles.css",
+  ];
+  for (const path of sourceDirectories) {
+    const absolute = join(localSource, path);
+    if (await exists(absolute)) watchers.push(watch(absolute, { recursive: true }, scheduleLocalStackRebuild));
+  }
+  for (const path of sourceFiles) {
+    const absolute = join(localSource, path);
+    if (await exists(absolute)) watchers.push(watch(absolute, scheduleLocalStackRebuild));
+  }
+  process.stdout.write(`local Supercode source: ${localSource}\n`);
+}
 
 process.stdout.write(
-  `watching extension, messenger, host, and local-stack sources\n` +
+  `watching extension, messenger, host, and remembered local Supercode sources\n` +
     `open ${startUrl}; future successful builds reload automatically\n`,
 );
 

@@ -11,6 +11,8 @@ import type {
 } from "@volter-ai-dev/supercode-client";
 import type {
   HarnessId,
+  HarnessSettingChange,
+  HarnessSettingsReport,
   LocalHarness,
   ManagedSession,
   NormalizedRuntimeEvent,
@@ -212,6 +214,7 @@ export class FakeHarnessClient implements HarnessClientAdapter {
   activeFollows = 0;
   closeCalls = 0;
   readonly messages: Array<{ locator: SessionLocator; text: string }> = [];
+  readonly configuredHarnesses: Array<{ harness: HarnessId; changes: HarnessSettingChange[]; expectedRevision?: string }> = [];
   #failStart: string | undefined;
 
   constructor(options: FakeHarnessClientOptions = {}) {
@@ -231,6 +234,8 @@ export class FakeHarnessClient implements HarnessClientAdapter {
         "harness.v1.sessions.branch",
         "harness.v1.sessions.reduce",
         "harness.v1.sessions.export",
+        "harness.v1.harnesses.settings",
+        "harness.v1.harnesses.configure",
       ],
     };
   }
@@ -266,6 +271,41 @@ export class FakeHarnessClient implements HarnessClientAdapter {
         status: "busy",
       },
       courier: { model: "haiku", report: "SENT" },
+      inbound_controls: null,
+      inbound_controls_error: null,
+    };
+  }
+
+  async harnessSettings(harness: HarnessId): Promise<HarnessSettingsReport> {
+    return this.#settingsReport(harness, "hold");
+  }
+
+  async configureHarness(harness: HarnessId, changes: HarnessSettingChange[], expectedRevision?: string): Promise<HarnessSettingsReport> {
+    this.configuredHarnesses.push({ harness, changes, ...(expectedRevision ? { expectedRevision } : {}) });
+    return this.#settingsReport(harness, changes[0]?.value ?? null);
+  }
+
+  #settingsReport(harness: HarnessId, value: string | null): HarnessSettingsReport {
+    return {
+      schema: "supercode.harness-interop-settings.v1", harness, revision: `revision-${value ?? "default"}`,
+      controls: [{
+        key: "cross_session_inbound", native_key: "crossSessionInbound", label: "Messages from other sessions",
+        description: "Inbound policy.", scope: "user", source_path: "/tmp/.claude/settings.json",
+        configured_value: value, effective_value: null, effective_known: false, effective_note: "User-level evidence.",
+        choices: [
+          { value: "accept", label: "Allow", description: "Deliver automatically." },
+          { value: "hold", label: "Ask", description: "Hold for review." },
+          { value: "refuse", label: "Refuse", description: "Do not deliver." },
+        ], writable: true, resettable: value !== null, requires_restart: false,
+      }],
+      advisories: value === "accept" ? [] : [{
+        code: "claude_cross_session_inbound_accept", severity: "warning", title: "Messages may be held",
+        message: "Review inbound policy.", setting: "cross_session_inbound",
+        recommendation: {
+          label: "Allow messages", description: "Set accept.", consequence: "Trust peer sessions.",
+          change: { key: "cross_session_inbound", value: "accept" }, command: "supercode harness configure claude-code --cross-session-inbound accept",
+        },
+      }],
     };
   }
 

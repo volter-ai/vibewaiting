@@ -348,6 +348,29 @@ describe("messenger session state machine", () => {
     });
     expect(client.messages).toEqual([{ locator: live.locator, text: "please wrap up" }]);
     expect(lastPush().transcript.some((entry) => entry.text === "please wrap up")).toBe(false);
+
+    const settings = lastPush().interopSettings!;
+    await host.fireIntent(INTENT_QUEUE, {
+      action: "configureHarness",
+      harness: settings.harness,
+      changes: [settings.advisories[0]!.recommendation.change],
+      expectedRevision: settings.revision,
+    });
+    await daemon.flush();
+    expect(client.configuredHarnesses).toEqual([{
+      harness: "claude-code",
+      changes: [{ key: "cross_session_inbound", value: "accept" }],
+      expectedRevision: "revision-hold",
+    }]);
+    expect(lastPush().interopSettings?.advisories).toEqual([]);
+    await host.fireIntent(INTENT_QUEUE, {
+      action: "configureHarness", harness: "claude-code",
+      changes: [{ key: "cross_session_inbound", value: "unprojected-value" }],
+      expectedRevision: "revision-accept",
+    });
+    await daemon.flush();
+    expect(client.configuredHarnesses).toHaveLength(1);
+    expect(lastPush().error).toContain("not writable");
   });
 
   it("retains a resumed conversation across switching and closes it only with the daemon", async () => {
