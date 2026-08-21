@@ -1,4 +1,6 @@
 :root {
+  --vw-accent: #2458b8;
+  --vw-accent-border: #3f73cc;
   color-scheme: light dark;
   font:
     15px/1.5 system-ui,
@@ -45,8 +47,8 @@ button {
   background: #191c24;
 }
 button {
-  border-color: #6868ee;
-  background: #5757d9;
+  border-color: var(--vw-accent-border);
+  background: var(--vw-accent);
   cursor: pointer;
 }
 output {

@@ -4,6 +4,7 @@ import {
   createExtensionIframeContent,
   createOverlay,
 } from "@volter-ai-dev/widget-shell";
+import { VIBEWAITING_ACCENT, VIBEWAITING_RADIUS } from "../src/theme.js";
 
 const overlay = createOverlay({
   id: "vibewaiting",
@@ -15,7 +16,7 @@ const overlay = createOverlay({
   behavior: {
     persistence: createExtensionGeometryPersistence(chrome.storage.local),
   },
-  theme: { accent: "#5757d9", radius: "12px" },
+  theme: { accent: VIBEWAITING_ACCENT, radius: VIBEWAITING_RADIUS },
 });
 
 overlay.mount();
