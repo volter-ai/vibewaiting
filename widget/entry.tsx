@@ -5,7 +5,7 @@
 import { SupercodeMessenger } from "@volter-ai-dev/supercode-ui/preact/messenger";
 import { HarnessLogo, hasHarnessLogo } from "@volter-ai-dev/supercode-ui/preact/logo";
 import { normalizeUiState } from "@volter-ai-dev/supercode-ui/core";
-import type { SupercodeUiIntent, SupercodeUiState, TranscriptContext, UiAdapter } from "@volter-ai-dev/supercode-ui";
+import type { SupercodeUiIntent, SupercodeUiState, TranscriptAttachment, UiAdapter } from "@volter-ai-dev/supercode-ui";
 import { createWidget } from "lucarne/widget/runtime";
 import { render as renderPreact } from "preact";
 import type { JSX } from "preact";
@@ -22,18 +22,34 @@ const BRIDGE_ACK_TIMEOUT_MS = 600;
 const widget = createWidget({ ns: NS, version: 1 });
 const MAX_PICKED_FILES = 8;
 const MAX_FILE_BYTES_READ = 80_000;
+const MAX_IMAGE_FILES = 4;
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const TEXT_FILE_PATTERN = /\.(?:c|cc|cpp|css|csv|go|h|hpp|html|ini|java|js|json|jsx|md|mjs|py|rb|rs|sh|sql|toml|ts|tsx|txt|xml|ya?ml)$/i;
 
-function pickTextContext(): Promise<TranscriptContext[] | null> {
+function readImage(file: File): Promise<TranscriptAttachment> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve({
+      id: `browser-image:${file.name}:${file.size}:${file.lastModified}`,
+      label: file.name || "Attached image",
+      url: String(reader.result),
+    });
+    reader.onerror = () => reject(reader.error ?? new Error(`Could not read ${file.name || "image"}.`));
+    reader.readAsDataURL(file);
+  });
+}
+
+function pickAttachments(): Promise<TranscriptAttachment[] | null> {
   const input = document.createElement("input");
   input.type = "file";
   input.multiple = true;
-  input.accept = "text/*,.json,.md,.mjs,.toml,.tsx,.ts,.yaml,.yml";
+  input.accept = "image/png,image/jpeg,image/gif,image/webp,text/*,.json,.md,.mjs,.toml,.tsx,.ts,.yaml,.yml";
   input.hidden = true;
   document.body.append(input);
   return new Promise((resolve, reject) => {
     let settled = false;
-    const finish = (value: TranscriptContext[] | null, error?: Error): void => {
+    const finish = (value: TranscriptAttachment[] | null, error?: Error): void => {
       if (settled) return;
       settled = true;
       input.remove();
@@ -45,9 +61,14 @@ function pickTextContext(): Promise<TranscriptContext[] | null> {
       const files = [...(input.files ?? [])];
       if (!files.length) return finish(null);
       if (files.length > MAX_PICKED_FILES) return finish(null, new Error(`Attach at most ${MAX_PICKED_FILES} files at a time.`));
-      const unsupported = files.find((file) => !(file.type.startsWith("text/") || TEXT_FILE_PATTERN.test(file.name)));
-      if (unsupported) return finish(null, new Error(`${unsupported.name} is not a supported text file.`));
-      void Promise.all(files.map(async (file): Promise<TranscriptContext> => {
+      const images = files.filter((file) => file.type.startsWith("image/"));
+      if (images.length > MAX_IMAGE_FILES) return finish(null, new Error(`Attach at most ${MAX_IMAGE_FILES} images at a time.`));
+      const unsupported = files.find((file) => !(IMAGE_TYPES.has(file.type) || file.type.startsWith("text/") || TEXT_FILE_PATTERN.test(file.name)));
+      if (unsupported) return finish(null, new Error(`${unsupported.name} is not a supported text or image file.`));
+      const oversized = images.find((file) => file.size > MAX_IMAGE_BYTES);
+      if (oversized) return finish(null, new Error(`${oversized.name} is larger than 5 MB.`));
+      void Promise.all(files.map(async (file): Promise<TranscriptAttachment> => {
+        if (IMAGE_TYPES.has(file.type)) return readImage(file);
         const source = await file.slice(0, MAX_FILE_BYTES_READ).text();
         const truncated = file.size > MAX_FILE_BYTES_READ || source.length > 20_000;
         const suffix = truncated ? "\n\n[…file truncated to the messenger context limit]" : "";
@@ -170,7 +191,7 @@ const adapter: UiAdapter = {
     return sendBridgeIntent(intent);
   },
   onClose: closeMessenger,
-  pickContext: pickTextContext,
+  pickContext: pickAttachments,
   copyText(value: string): Promise<void> | void {
     return navigator.clipboard?.writeText(value);
   },

@@ -21,6 +21,7 @@ import type {
   FrontendHarness,
   HarnessClientAdapter,
   PromptContextItem,
+  PromptImageItem,
   SupercodeClientAction,
   SupercodeClientSnapshot,
 } from "@volter-ai-dev/supercode-client";
@@ -370,6 +371,7 @@ export function chooseHarness(snapshot: SupercodeClientSnapshot, preferred?: Har
 export interface SendIntent {
   text: string;
   context: PromptContextItem[];
+  images: PromptImageItem[];
 }
 
 function parsePromptContext(value: unknown): PromptContextItem[] | null {
@@ -394,15 +396,36 @@ function parsePromptContext(value: unknown): PromptContextItem[] | null {
   return parsed;
 }
 
+function parsePromptImages(value: unknown): PromptImageItem[] | null {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 4) return null;
+  const parsed: PromptImageItem[] = [];
+  let totalBytes = 0;
+  for (const candidate of value) {
+    if (!candidate || typeof candidate !== "object") return null;
+    if (Object.keys(candidate).some((key) => !["id", "label", "url"].includes(key))) return null;
+    const { id, label, url } = candidate as Record<string, unknown>;
+    if (typeof label !== "string" || label.trim() === "" || label.length > 200) return null;
+    if (typeof url !== "string" || !(url.startsWith("data:image/") || url.startsWith("https://") || url.startsWith("http://"))) return null;
+    if (url.length > 12 * 1024 * 1024) return null;
+    totalBytes += url.length;
+    if (totalBytes > 32 * 1024 * 1024) return null;
+    if (id !== undefined && (typeof id !== "string" || id === "" || id.length > 2_000)) return null;
+    parsed.push({ ...(typeof id === "string" ? { id } : {}), label: label.trim(), url });
+  }
+  return parsed;
+}
+
 /** The composer's intent shape. Anything else is ignored (and logged) rather than guessed at. */
 export function parseSendIntent(payload: unknown): SendIntent | null {
   if (!payload || typeof payload !== "object") return null;
-  if (Object.keys(payload).some((key) => !["action", "text", "context"].includes(key))) return null;
-  const { action, text, context: contextValue } = payload as { action?: unknown; text?: unknown; context?: unknown };
+  if (Object.keys(payload).some((key) => !["action", "text", "context", "images"].includes(key))) return null;
+  const { action, text, context: contextValue, images: imageValue } = payload as { action?: unknown; text?: unknown; context?: unknown; images?: unknown };
   if (action !== "send" || typeof text !== "string") return null;
   const trimmed = text.trim();
   const context = parsePromptContext(contextValue);
-  return trimmed === "" || context === null ? null : { text: trimmed, context };
+  const images = parsePromptImages(imageValue);
+  return trimmed === "" || context === null || images === null ? null : { text: trimmed, context, images };
 }
 
 /** The Stop button's entire payload. No target is accepted from the page. */
@@ -531,19 +554,21 @@ export interface NewChatIntent {
   harness: HarnessId;
   text: string;
   context: PromptContextItem[];
+  images: PromptImageItem[];
 }
 
 /** A new chat is lazy: the runtime is replaced only when the first message is actually sent. */
 export function parseNewChatIntent(payload: unknown): NewChatIntent | null {
   if (!payload || typeof payload !== "object") return null;
-  if (Object.keys(payload).some((key) => !["action", "harness", "text", "context"].includes(key))) return null;
-  const { action, harness, text, context: contextValue } = payload as { action?: unknown; harness?: unknown; text?: unknown; context?: unknown };
+  if (Object.keys(payload).some((key) => !["action", "harness", "text", "context", "images"].includes(key))) return null;
+  const { action, harness, text, context: contextValue, images: imageValue } = payload as { action?: unknown; harness?: unknown; text?: unknown; context?: unknown; images?: unknown };
   if (action !== "new" || typeof harness !== "string" || typeof text !== "string") return null;
   const trimmedHarness = harness.trim();
   const trimmedText = text.trim();
   const context = parsePromptContext(contextValue);
-  if (trimmedHarness === "" || trimmedText === "" || context === null) return null;
-  return { harness: trimmedHarness as HarnessId, text: trimmedText, context };
+  const images = parsePromptImages(imageValue);
+  if (trimmedHarness === "" || trimmedText === "" || context === null || images === null) return null;
+  return { harness: trimmedHarness as HarnessId, text: trimmedText, context, images };
 }
 
 /** Reading a chat is explicit acknowledgement; inventory counts are never treated as unread. */
@@ -1281,7 +1306,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       try {
         await releaseForeignView();
         await controller.dispatch({ type: "start", harness: newChat.harness });
-        await controller.dispatch({ type: "send", text: newChat.text, ...(newChat.context.length ? { context: newChat.context } : {}) });
+        await controller.dispatch({ type: "send", text: newChat.text, ...(newChat.context.length ? { context: newChat.context } : {}), ...(newChat.images.length ? { images: newChat.images } : {}) });
       } catch (e) {
         actionError = message(e);
         log(`new chat failed: ${actionError}`);
@@ -1295,7 +1320,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       try {
         // The ACTIVE controller: a mirror will refuse (`send` is not among its available actions),
         // and that refusal is the honest answer — the panel never fabricates a send path.
-        await activeController().dispatch({ type: "send", text: send.text, ...(send.context.length ? { context: send.context } : {}) });
+        await activeController().dispatch({ type: "send", text: send.text, ...(send.context.length ? { context: send.context } : {}), ...(send.images.length ? { images: send.images } : {}) });
       } catch (e) {
         actionError = message(e);
         log(`send failed: ${actionError}`);
