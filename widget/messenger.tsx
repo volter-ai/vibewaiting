@@ -387,8 +387,12 @@ export function mountMessenger(widget: MessengerTransport): () => void {
       state.sessions.find((session) => session.active)?.harness ||
       "";
     const unreadKeys = new Set(state.attention.map((item) => item.key));
-    if (state.needsInput)
-      unreadKeys.add(state.attached?.key || state.owned?.key || "@needs-input");
+    let unreadCount = state.attention.reduce((total, item) => total + (item.unreadCount ?? 1), 0);
+    if (state.needsInput) {
+      const key = state.attached?.key || state.owned?.key || "@needs-input";
+      if (!unreadKeys.has(key)) unreadCount += 1;
+      unreadKeys.add(key);
+    }
     const label = state.pill.label
       ? `Open agent chats · ${state.pill.label}`
       : "Open agent chats";
@@ -397,7 +401,7 @@ export function mountMessenger(widget: MessengerTransport): () => void {
         hidden: true,
         icon: null,
         label,
-        badge: unreadKeys.size,
+        badge: unreadCount,
       });
       return;
     }
@@ -407,7 +411,7 @@ export function mountMessenger(widget: MessengerTransport): () => void {
     widget.setLauncher({
       hidden: false,
       label,
-      badge: unreadKeys.size,
+      badge: unreadCount,
       ...(icon ? { icon } : {}),
     });
   }

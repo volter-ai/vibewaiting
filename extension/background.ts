@@ -45,26 +45,29 @@ function launcherFromPatch(patch: unknown): {
           : "";
   const pill = record(state?.pill);
   const pillLabel = typeof pill?.label === "string" ? pill.label : "";
-  const attentionKeys = new Set(
-    (Array.isArray(state?.attention) ? state.attention : [])
-      .map(record)
-      .map((item) => item?.key)
-      .filter((key): key is string => typeof key === "string"),
+  const attentionItems = (Array.isArray(state?.attention) ? state.attention : [])
+    .map(record)
+    .filter((item): item is Record<string, unknown> => typeof item?.key === "string");
+  const attentionKeys = new Set(attentionItems.map((item) => item.key as string));
+  let badge = attentionItems.reduce(
+    (total, item) => total + (Number.isSafeInteger(item.unreadCount) ? Math.max(1, item.unreadCount as number) : 1),
+    0,
   );
   if (state?.needsInput === true) {
     const owned = record(state?.owned);
-    attentionKeys.add(
+    const key =
       typeof attached?.key === "string"
         ? attached.key
         : typeof owned?.key === "string"
           ? owned.key
-          : "@needs-input",
-    );
+          : "@needs-input";
+    if (!attentionKeys.has(key)) badge += 1;
+    attentionKeys.add(key);
   }
   return {
     harness,
     label: pillLabel ? `Open agent chats · ${pillLabel}` : "Open agent chats",
-    badge: attentionKeys.size,
+    badge,
     hidden: !harness,
   };
 }

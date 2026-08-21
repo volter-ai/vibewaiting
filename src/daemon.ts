@@ -71,6 +71,8 @@ export const DEFAULT_INTENT_POLL_MS = 100;
 export const DEFAULT_REPUSH_INTERVAL_MS = 0;
 /** How often the machine is re-scanned for coding sessions. Cheap: one RPC, capped result. */
 export const DEFAULT_DISCOVER_INTERVAL_MS = 5000;
+/** Re-check a still-untitled new Claude/Codex session without rescanning topic history every tick. */
+const TOPIC_RETRY_MS = 30_000;
 /** Tool-stream churn is not unread. A no-status peer must be quiet this long before it asks for attention. */
 export const DEFAULT_ATTENTION_SETTLE_MS = 15_000;
 /** A broken harness attach must become a visible row error, never an eternal local spinner. */
@@ -740,7 +742,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // The first inventory establishes a baseline; only later transcript changes become unread.
   const observedUpdates = new Map<
     string,
-    Pick<SessionRow, "messages" | "runtimeStatus"> & { announcedMessages: number | null }
+    Pick<SessionRow, "messages" | "preview" | "runtimeStatus"> & { announcedMessages: number | null }
   >();
   const attention = new Map<string, SessionAttention>(persisted.attention.map((item) => [item.key, item]));
   const drafts = new Map<string, string>(Object.entries(persisted.drafts));
@@ -763,7 +765,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     persistenceTimer.unref?.();
   };
   const markAttention = (key: string, kind: SessionAttentionKind, preview?: string): void => {
-    const next: SessionAttention = { key, kind, ...(preview ? { preview: preview.slice(0, 240) } : {}) };
+    const prior = attention.get(key);
+    const boundedPreview = preview?.slice(0, 240);
+    const sameEvent = boundedPreview
+      ? prior?.preview === boundedPreview
+      : prior?.kind === kind && prior.preview === undefined;
+    const unreadCount = sameEvent ? (prior?.unreadCount ?? 1) : Math.min((prior?.unreadCount ?? 0) + 1, 999);
+    const next: SessionAttention = { key, kind, unreadCount, ...(boundedPreview ? { preview: boundedPreview } : {}) };
     if (JSON.stringify(attention.get(key)) === JSON.stringify(next)) return;
     attention.set(key, next);
     schedulePersistence();
@@ -805,12 +813,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const prior = observedUpdates.get(row.key);
       let announcedMessages = prior?.announcedMessages ?? row.messages;
       if (prior === undefined) {
-        observedUpdates.set(row.key, { messages: row.messages, runtimeStatus: row.runtimeStatus, announcedMessages });
+        observedUpdates.set(row.key, { messages: row.messages, preview: row.preview, runtimeStatus: row.runtimeStatus, announcedMessages });
         continue;
       }
       if (panelVisible && row.key === attached?.key) {
         announcedMessages = row.messages;
-        observedUpdates.set(row.key, { messages: row.messages, runtimeStatus: row.runtimeStatus, announcedMessages });
+        observedUpdates.set(row.key, { messages: row.messages, preview: row.preview, runtimeStatus: row.runtimeStatus, announcedMessages });
         continue;
       }
       // A live peer can refresh its descriptor timestamp on every heartbeat. That is recency, not
@@ -818,23 +826,22 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       // others, hold message growth until the transcript has gone quiet: tool-stream churn should
       // never make the launcher's badge climb every five seconds.
       if (prior.runtimeStatus === "busy" && row.runtimeStatus === "idle") {
-        markAttention(row.key, "finished");
+        markAttention(row.key, "finished", row.preview);
         announcedMessages = row.messages;
       } else if (
         row.runtimeStatus !== "busy" &&
-        row.messages !== null &&
-        announcedMessages !== null &&
-        row.messages > announcedMessages &&
+        ((row.messages !== null && announcedMessages !== null && row.messages > announcedMessages) ||
+          (row.preview !== "" && row.preview !== prior.preview)) &&
         row.updatedAt !== null &&
         observedAt - row.updatedAt >= DEFAULT_ATTENTION_SETTLE_MS
       ) {
-        markAttention(row.key, "unseen");
+        markAttention(row.key, "unseen", row.preview);
         announcedMessages = row.messages;
       } else if (row.messages !== null && prior.messages !== null && row.messages < prior.messages) {
         // A rewritten/compacted session establishes a new baseline; it is not negative unread.
         announcedMessages = row.messages;
       }
-      observedUpdates.set(row.key, { messages: row.messages, runtimeStatus: row.runtimeStatus, announcedMessages });
+      observedUpdates.set(row.key, { messages: row.messages, preview: row.preview, runtimeStatus: row.runtimeStatus, announcedMessages });
     }
 
     const runtimeActive =
@@ -988,6 +995,17 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   /** Re-scan each native store, publishing completed inbox slices as they arrive. */
   let refreshInFlight: Promise<void> | null = null;
   const sessionsByHarness = new Map<HarnessId, SessionDescriptor[]>();
+  const topicCandidatesBySession = new Map<string, SessionDescriptor["preview_candidates"]>();
+  const topicAttemptedAtBySession = new Map<string, number>();
+  const retainTopic = (descriptor: SessionDescriptor): SessionDescriptor => {
+    const key = sessionKey(descriptor.locator);
+    if (descriptor.preview_candidates?.length) {
+      topicCandidatesBySession.set(key, descriptor.preview_candidates);
+      return descriptor;
+    }
+    const retained = topicCandidatesBySession.get(key);
+    return retained?.length ? { ...descriptor, preview_candidates: retained } : descriptor;
+  };
   const rebuildDescriptors = (): void => {
     const all = [...sessionsByHarness.values()].flat();
     all.sort((left, right) =>
@@ -1010,10 +1028,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       try {
         const result = await discovery.discover({ harnesses: [harness], limit: sessionLimit + 1 });
         if (stopped) return;
-        sessionsByHarness.set(harness, result.sessions);
+        const sessions = result.sessions.map(retainTopic);
+        sessionsByHarness.set(harness, sessions);
         rebuildDescriptors();
         if (reportTimings) {
-          log(`discovered ${result.sessions.length} ${harness} sessions in ${Math.round(performance.now() - startedAt)}ms`);
+          log(`discovered ${sessions.length} ${harness} sessions in ${Math.round(performance.now() - startedAt)}ms`);
         }
         await pushNow(false, "inventory");
       } catch (e) {
@@ -1021,7 +1040,38 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           log(`session discovery failed for ${harness} after ${Math.round(performance.now() - startedAt)}ms (continuing): ${message(e)}`);
         }
       }
-    })).then(() => undefined).finally(() => {
+    })).then(async () => {
+      if (stopped) return;
+      const now = performance.now();
+      const pendingTopicKeys = descriptors
+        .filter((descriptor) => descriptor.locator.harness === "claude-code" || descriptor.locator.harness === "codex")
+        .map((descriptor) => sessionKey(descriptor.locator))
+        .filter((key) => !topicCandidatesBySession.has(key)
+          && now - (topicAttemptedAtBySession.get(key) ?? Number.NEGATIVE_INFINITY) >= TOPIC_RETRY_MS);
+      if (pendingTopicKeys.length === 0) return;
+      for (const key of pendingTopicKeys) topicAttemptedAtBySession.set(key, now);
+      const startedAt = performance.now();
+      try {
+        const result = await discovery.discover({
+          harnesses: ["claude-code", "codex"],
+          limit: sessionLimit,
+          include_topic_candidates: true,
+        });
+        if (stopped) return;
+        for (const descriptor of result.sessions) retainTopic(descriptor);
+        for (const harness of ["claude-code", "codex"] as const) {
+          const sessions = sessionsByHarness.get(harness);
+          if (sessions) sessionsByHarness.set(harness, sessions.map(retainTopic));
+        }
+        rebuildDescriptors();
+        log(`discovered ${result.sessions.length} Claude Code/Codex topics in ${Math.round(performance.now() - startedAt)}ms`);
+        await pushNow(false, "inventory");
+      } catch (e) {
+        if (!stopped) {
+          log(`topic discovery failed after ${Math.round(performance.now() - startedAt)}ms (continuing): ${message(e)}`);
+        }
+      }
+    }).finally(() => {
       refreshInFlight = null;
     });
     return refreshInFlight;

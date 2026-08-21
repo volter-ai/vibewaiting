@@ -29,9 +29,13 @@ export function readPersistedMessengerState(raw: unknown): PersistedMessengerSta
       if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
       const item = candidate as Record<string, unknown>;
       if (typeof item["key"] !== "string" || !ATTENTION_KINDS.has(item["kind"] as SessionAttentionKind)) continue;
+      const unreadCount = Number.isSafeInteger(item["unreadCount"])
+        ? Math.max(1, Math.min(999, item["unreadCount"] as number))
+        : 1;
       attention.push({
         key: item["key"],
         kind: item["kind"] as SessionAttentionKind,
+        unreadCount,
         ...(typeof item["preview"] === "string" && item["preview"] !== ""
           ? { preview: item["preview"].slice(0, MAX_PREVIEW_CHARS) }
           : {}),
@@ -51,7 +55,7 @@ export function readPersistedMessengerState(raw: unknown): PersistedMessengerSta
 export class FileMessengerPersistence implements MessengerPersistence {
   readonly path: string;
 
-  constructor(path = join(homedir(), ".vibewaiting", "messenger-state-v1.json")) {
+  constructor(path = join(homedir(), ".vibewaiting", "messenger-state-v2.json")) {
     this.path = path;
   }
 
