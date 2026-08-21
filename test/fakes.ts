@@ -158,7 +158,7 @@ export function descriptor(over: {
   text?: string;
   messages?: string[];
   liveEndpoint?: string | null;
-  liveStatus?: "busy" | "idle" | null;
+  liveStatus?: "running" | "busy" | "idle" | null;
 } = {}): SessionDescriptor & { text: string } {
   const harness = over.harness ?? "claude-code";
   const sessionId = over.sessionId ?? "sess-1";
