@@ -307,7 +307,14 @@ describe("messenger session state machine", () => {
     expect(acceptedAt).toBeGreaterThanOrEqual(0);
     expect(completionAt).toBeGreaterThan(acceptedAt);
     const continued = daemon.activeController();
-    await host.fireIntent(INTENT_QUEUE, { action: "send", text: "continue" });
+    const context = [{ id: "readme", kind: "file", label: "README.md", detail: "# Contract\nKeep the UI modular." }];
+    await host.fireIntent(INTENT_QUEUE, { action: "send", text: "continue", context });
+    expect(continued.getSnapshot().conversation).toContainEqual(expect.objectContaining({
+      kind: "message",
+      role: "user",
+      text: "continue",
+      context,
+    }));
     await host.fireIntent(INTENT_QUEUE, { action: "release" });
 
     client.resumedRuntimes[0]?.assistantMessage("background result");
