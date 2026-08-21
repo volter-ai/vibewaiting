@@ -1473,9 +1473,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         if (!foreign || !snapshot || snapshot.connection.mode !== "mirror" || key === null) {
           throw new Error("open a persisted read-only conversation before continuing it here");
         }
-        // Native resume starts another writer. A process-reported live state is authoritative, so
+        // Native resume starts another writer. A process-proven live state is authoritative, so
         // never race it; live-peer messaging remains available where the harness supports that.
-        if (activeSession?.liveStatus === "busy" || activeSession?.liveStatus === "idle") {
+        if (
+          activeSession?.liveStatus === "running" ||
+          activeSession?.liveStatus === "busy" ||
+          activeSession?.liveStatus === "idle"
+        ) {
           throw new Error("this session is active in another agent window; message it live or start a separate continuation");
         }
         if (!snapshot.availableActions.resume) {

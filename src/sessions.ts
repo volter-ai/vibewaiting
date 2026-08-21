@@ -44,8 +44,8 @@ export interface SessionRow {
   active: boolean;
   /** True when the store was written within `LIVENESS_WINDOW_MS` of the caller's `now` — see `isLive`. */
   live: boolean;
-  /** Process-reported state when the harness publishes one; never inferred from file recency. */
-  runtimeStatus: "busy" | "idle" | null;
+  /** Process-proven state; busy/idle require a finer harness signal and never come from file recency. */
+  runtimeStatus: "running" | "busy" | "idle" | null;
 }
 
 /** Which session the Agent panel is on, in the only terms both a descriptor and a snapshot carry. */
@@ -197,7 +197,9 @@ export function projectSession(
     active: matchesActive(descriptor, options.active),
     live: isLive(descriptor.updated_at_ms, options.now),
     runtimeStatus:
-      descriptor.live_status === "busy" || descriptor.live_status === "idle" ? descriptor.live_status : null,
+      descriptor.live_status === "running" || descriptor.live_status === "busy" || descriptor.live_status === "idle"
+        ? descriptor.live_status
+        : null,
   };
 }
 
