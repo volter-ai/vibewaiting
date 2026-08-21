@@ -33,7 +33,7 @@
   "dependencies": {
     "@volter-ai-dev/supercode-client": "^0.3.17",
     "@volter-ai-dev/supercode-harness-sdk": "^0.3.9",
-    "@volter-ai-dev/supercode-ui": "^0.1.27",
+    "@volter-ai-dev/supercode-ui": "^0.1.28",
     "@volter-ai-dev/widget-shell": "^0.2.0",
     "esbuild": "^0.28.2",
     "lucarne": "^1.7.4",
