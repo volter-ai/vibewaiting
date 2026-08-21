@@ -54,7 +54,7 @@ import {
   type ActiveSessionRef,
   type SessionRow,
 } from "./sessions.js";
-import { VIBEWAITING_ACCENT, VIBEWAITING_RADIUS } from "./theme.js";
+import { VIBEWAITING_RADIUS } from "./theme.js";
 
 /** Namespaces every page global / element id / sticky-injection id the widget mints (see `lucarne/widget/ns`). */
 export const WIDGET_NS = "vibewaiting";
@@ -658,7 +658,7 @@ async function defaultAttachHost(opts: {
     launcherLabel: "Open agent chats",
     launcherHidden: true,
     viewport: { width: 390, height: 667, gutter: 16 },
-    theme: { accent: VIBEWAITING_ACCENT, radius: VIBEWAITING_RADIUS },
+    theme: { radius: VIBEWAITING_RADIUS },
   });
   return await WidgetHost.attach(opts.sessionId, {
     ns: opts.ns,
