@@ -141,6 +141,29 @@ function firstNonEmpty(...values: Array<string | null | undefined>): string {
   return "";
 }
 
+function compactTopic(value: string | null | undefined): string {
+  if (!value) return "";
+  const text = value.replace(/\s+/g, " ").trim();
+  if (text.length <= 72) return text;
+  const prefix = text.slice(0, 71);
+  const boundary = prefix.lastIndexOf(" ");
+  return `${prefix.slice(0, boundary >= 40 ? boundary : 71).trimEnd()}…`;
+}
+
+function messengerTitle(descriptor: SessionDescriptor): string {
+  const nativeTitle = descriptor.title?.trim() ?? "";
+  const workspace = workspaceName(descriptor.cwd);
+  const nativeIsWorkspace = nativeTitle === workspace || nativeTitle === descriptor.cwd;
+  if (nativeTitle && !nativeIsWorkspace) return compactTopic(nativeTitle);
+  if (descriptor.locator.harness !== "claude-code" && descriptor.locator.harness !== "codex") {
+    return firstNonEmpty(nativeTitle, workspace, descriptor.locator.session_id.slice(0, 8));
+  }
+  const openingUserMessages = (descriptor.preview_candidates ?? []).filter(
+    (candidate) => candidate.role === undefined || candidate.role === "user",
+  );
+  return compactTopic(conversationPreviewText(openingUserMessages)) || "Untitled chat";
+}
+
 export interface SessionProjectionOptions {
   /** Epoch ms the ages are measured against. Required — see the module doc. */
   now: number;
@@ -164,11 +187,7 @@ export function projectSession(
     harness: descriptor.locator.harness,
     name: workspaceName(descriptor.cwd) || "no workspace",
     cwd,
-    title: firstNonEmpty(
-      descriptor.title,
-      workspaceName(descriptor.cwd),
-      descriptor.locator.session_id.slice(0, 8),
-    ),
+    title: messengerTitle(descriptor),
     preview: conversationPreviewText(descriptor.latest_message_candidates) ?? "",
     age: relativeAge(descriptor.updated_at_ms, options.now),
     updatedAt: descriptor.updated_at_ms,
