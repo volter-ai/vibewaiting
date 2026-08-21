@@ -29,7 +29,7 @@ import type { DiscoveryQuery, HarnessId, JsonValue, SessionArtifact, SessionDesc
 import { WidgetHost } from "lucarne/widget/host";
 import {
   DEFAULT_MAX_ENTRIES,
-  project,
+  projectWithImages,
   toAttachError,
   type AttachError,
   type ProjectionOptions,
@@ -93,6 +93,9 @@ const PASSIVE_MIRROR_VIEW = Object.freeze({
 });
 /** Each explicit history request adds one bounded page, never the entire transcript/session store. */
 export const TRANSCRIPT_PAGE_SIZE = DEFAULT_MAX_ENTRIES;
+/** A historical image is fetched only on click, but each request still has a hard memory bound. */
+export const MAX_HISTORICAL_IMAGE_BYTES = 16 * 1024 * 1024;
+export const MAX_HISTORICAL_IMAGE_URL_CHARS = 22_400_000;
 
 /** The slice of `WidgetHost` this daemon uses — the seam a test replaces with a recorder. */
 export interface WidgetBridge {
@@ -540,6 +543,21 @@ export function parseLoadEarlierIntent(payload: unknown): boolean {
   return Boolean(payload && typeof payload === "object" && (payload as { action?: unknown }).action === "loadEarlier" && Object.keys(payload).length === 1);
 }
 
+export interface ResolveImageIntent {
+  requestId: string;
+  reference: string;
+}
+
+/** A page may echo only a projection-minted opaque reference; the current host registry resolves it. */
+export function parseResolveImageIntent(payload: unknown): ResolveImageIntent | null {
+  if (!payload || typeof payload !== "object") return null;
+  if (Object.keys(payload).some((key) => key !== "action" && key !== "requestId" && key !== "reference")) return null;
+  const { action, requestId, reference } = payload as { action?: unknown; requestId?: unknown; reference?: unknown };
+  if (action !== "resolveImage" || typeof requestId !== "string" || typeof reference !== "string") return null;
+  if (requestId.length < 1 || requestId.length > 200 || reference.length < 1 || reference.length > 4_000) return null;
+  return { requestId, reference };
+}
+
 export interface DraftIntent { text: string }
 
 /** Drafts are scoped to the daemon-selected conversation; the page supplies neither key nor path. */
@@ -686,6 +704,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   let stopped = false;
   let lastPushed: WidgetState | null = null;
+  let imageProjection: ReturnType<typeof projectWithImages> | null = null;
   let lastQueuedFingerprint: string | null = null;
   let lastInventoryFingerprint: string | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -858,7 +877,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     const ownSnapshot = controller.getSnapshot();
     const ownRef = activeRef(ownSnapshot);
     const ownRows = projectSessions(descriptors, { now: observedAt, home, active: ownRef, max: sessionLimit });
-    const projected = project(snapshot, { ...options.projection, maxEntries: transcriptLimit });
+    imageProjection = projectWithImages(snapshot, { ...options.projection, maxEntries: transcriptLimit });
+    const projected = imageProjection.state;
     const startupLabel = startup === "connecting"
       ? "Connecting to coding agents…"
       : startup === "starting"
@@ -1264,6 +1284,28 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         }
       }
       await pushNow();
+      return;
+    }
+    const imageRequest = parseResolveImageIntent(intent.payload);
+    if (imageRequest !== null) {
+      const resolved = imageProjection?.resolveImage(imageRequest.reference) ?? null;
+      let response: Record<string, unknown>;
+      if (!resolved) {
+        response = { requestId: imageRequest.requestId, status: "failed", message: "This image is no longer in the visible transcript window." };
+      } else if (!resolved.url.startsWith("data:image/") || resolved.url.length > MAX_HISTORICAL_IMAGE_URL_CHARS || (resolved.byteSize !== undefined && resolved.byteSize > MAX_HISTORICAL_IMAGE_BYTES)) {
+        response = { requestId: imageRequest.requestId, status: "failed", message: "This image is too large to preview safely." };
+      } else {
+        response = {
+          requestId: imageRequest.requestId,
+          status: "resolved",
+          dataUrl: resolved.url,
+          ...(resolved.mediaType ? { mediaType: resolved.mediaType } : {}),
+          ...(resolved.byteSize !== undefined ? { byteSize: resolved.byteSize } : {}),
+        };
+      }
+      await host.push({ imageResolution: response }).catch((error: unknown) => {
+        log(`historical image delivery failed (continuing): ${message(error)}`);
+      });
       return;
     }
     const draft = parseDraftIntent(intent.payload);
