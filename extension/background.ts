@@ -4,6 +4,7 @@ import {
   type NativeHostEvent,
   VIBEWAITING_EXTENSION_PROTOCOL,
 } from "../src/extension-protocol.js";
+import { VIBEWAITING_ACCENT } from "../src/theme.js";
 
 const SETTINGS_KEY = "vibewaiting:settings";
 const contentPorts = new Set<ExtensionPort>();
@@ -101,7 +102,7 @@ function broadcastStatus(): void {
       ? "#c44141"
       : lastStatus.phase === "setup"
         ? "#a06b1f"
-        : "#5757d9";
+        : VIBEWAITING_ACCENT;
   const title =
     lastStatus.phase === "ready"
       ? "Vibewaiting · Connected"
