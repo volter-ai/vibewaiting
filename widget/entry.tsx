@@ -5,7 +5,7 @@
 import { SupercodeMessenger } from "@volter-ai-dev/supercode-ui/preact/messenger";
 import { HarnessLogo, hasHarnessLogo } from "@volter-ai-dev/supercode-ui/preact/logo";
 import { normalizeUiState } from "@volter-ai-dev/supercode-ui/core";
-import type { SupercodeUiIntent, SupercodeUiState, UiAdapter } from "@volter-ai-dev/supercode-ui";
+import type { SupercodeUiIntent, SupercodeUiState, TranscriptContext, UiAdapter } from "@volter-ai-dev/supercode-ui";
 import { createWidget } from "lucarne/widget/runtime";
 import { render as renderPreact } from "preact";
 import type { JSX } from "preact";
@@ -20,6 +20,48 @@ const NS = "vibewaiting";
 const INTENT_QUEUE = "agent";
 const BRIDGE_ACK_TIMEOUT_MS = 600;
 const widget = createWidget({ ns: NS, version: 1 });
+const MAX_PICKED_FILES = 8;
+const MAX_FILE_BYTES_READ = 80_000;
+const TEXT_FILE_PATTERN = /\.(?:c|cc|cpp|css|csv|go|h|hpp|html|ini|java|js|json|jsx|md|mjs|py|rb|rs|sh|sql|toml|ts|tsx|txt|xml|ya?ml)$/i;
+
+function pickTextContext(): Promise<TranscriptContext[] | null> {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.multiple = true;
+  input.accept = "text/*,.json,.md,.mjs,.toml,.tsx,.ts,.yaml,.yml";
+  input.hidden = true;
+  document.body.append(input);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (value: TranscriptContext[] | null, error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      input.remove();
+      if (error) reject(error);
+      else resolve(value);
+    };
+    input.addEventListener("cancel", () => finish(null), { once: true });
+    input.addEventListener("change", () => {
+      const files = [...(input.files ?? [])];
+      if (!files.length) return finish(null);
+      if (files.length > MAX_PICKED_FILES) return finish(null, new Error(`Attach at most ${MAX_PICKED_FILES} files at a time.`));
+      const unsupported = files.find((file) => !(file.type.startsWith("text/") || TEXT_FILE_PATTERN.test(file.name)));
+      if (unsupported) return finish(null, new Error(`${unsupported.name} is not a supported text file.`));
+      void Promise.all(files.map(async (file): Promise<TranscriptContext> => {
+        const source = await file.slice(0, MAX_FILE_BYTES_READ).text();
+        const truncated = file.size > MAX_FILE_BYTES_READ || source.length > 20_000;
+        const suffix = truncated ? "\n\n[…file truncated to the messenger context limit]" : "";
+        return {
+          id: `browser-file:${file.name}:${file.size}:${file.lastModified}`,
+          kind: "file",
+          label: file.name,
+          detail: `${source.slice(0, Math.max(0, 20_000 - suffix.length)) || "[Empty file]"}${suffix}`,
+        };
+      })).then((items) => finish(items), (error: unknown) => finish(null, error instanceof Error ? error : new Error("Could not read the selected files.")));
+    }, { once: true });
+    input.click();
+  });
+}
 
 function syncPanelViewport(requestResize = true): void {
   let pageWidth = 436;
@@ -128,6 +170,7 @@ const adapter: UiAdapter = {
     return sendBridgeIntent(intent);
   },
   onClose: closeMessenger,
+  pickContext: pickTextContext,
   copyText(value: string): Promise<void> | void {
     return navigator.clipboard?.writeText(value);
   },

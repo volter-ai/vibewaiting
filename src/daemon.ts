@@ -20,6 +20,7 @@ import { SessionWindowCache, SupercodeController } from "@volter-ai-dev/supercod
 import type {
   FrontendHarness,
   HarnessClientAdapter,
+  PromptContextItem,
   SupercodeClientAction,
   SupercodeClientSnapshot,
 } from "@volter-ai-dev/supercode-client";
@@ -366,13 +367,42 @@ export function chooseHarness(snapshot: SupercodeClientSnapshot, preferred?: Har
   return startable[0]?.id ?? null;
 }
 
+export interface SendIntent {
+  text: string;
+  context: PromptContextItem[];
+}
+
+function parsePromptContext(value: unknown): PromptContextItem[] | null {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 32) return null;
+  const parsed: PromptContextItem[] = [];
+  for (const candidate of value) {
+    if (!candidate || typeof candidate !== "object") return null;
+    if (Object.keys(candidate).some((key) => !["id", "kind", "label", "detail"].includes(key))) return null;
+    const { id, kind, label, detail } = candidate as Record<string, unknown>;
+    if (typeof label !== "string" || label.trim() === "" || label.length > 200) return null;
+    if (typeof detail !== "string" || detail === "" || detail.length > 20_000) return null;
+    if (id !== undefined && (typeof id !== "string" || id === "" || id.length > 2_000)) return null;
+    if (kind !== undefined && (typeof kind !== "string" || kind === "" || kind.length > 100)) return null;
+    parsed.push({
+      ...(typeof id === "string" ? { id } : {}),
+      ...(typeof kind === "string" ? { kind } : {}),
+      label: label.trim(),
+      detail,
+    });
+  }
+  return parsed;
+}
+
 /** The composer's intent shape. Anything else is ignored (and logged) rather than guessed at. */
-export function parseSendIntent(payload: unknown): string | null {
+export function parseSendIntent(payload: unknown): SendIntent | null {
   if (!payload || typeof payload !== "object") return null;
-  const { action, text } = payload as { action?: unknown; text?: unknown };
+  if (Object.keys(payload).some((key) => !["action", "text", "context"].includes(key))) return null;
+  const { action, text, context: contextValue } = payload as { action?: unknown; text?: unknown; context?: unknown };
   if (action !== "send" || typeof text !== "string") return null;
   const trimmed = text.trim();
-  return trimmed === "" ? null : trimmed;
+  const context = parsePromptContext(contextValue);
+  return trimmed === "" || context === null ? null : { text: trimmed, context };
 }
 
 /** The Stop button's entire payload. No target is accepted from the page. */
@@ -500,17 +530,20 @@ export function parseDraftIntent(payload: unknown): DraftIntent | null {
 export interface NewChatIntent {
   harness: HarnessId;
   text: string;
+  context: PromptContextItem[];
 }
 
 /** A new chat is lazy: the runtime is replaced only when the first message is actually sent. */
 export function parseNewChatIntent(payload: unknown): NewChatIntent | null {
   if (!payload || typeof payload !== "object") return null;
-  const { action, harness, text } = payload as { action?: unknown; harness?: unknown; text?: unknown };
+  if (Object.keys(payload).some((key) => !["action", "harness", "text", "context"].includes(key))) return null;
+  const { action, harness, text, context: contextValue } = payload as { action?: unknown; harness?: unknown; text?: unknown; context?: unknown };
   if (action !== "new" || typeof harness !== "string" || typeof text !== "string") return null;
   const trimmedHarness = harness.trim();
   const trimmedText = text.trim();
-  if (trimmedHarness === "" || trimmedText === "") return null;
-  return { harness: trimmedHarness as HarnessId, text: trimmedText };
+  const context = parsePromptContext(contextValue);
+  if (trimmedHarness === "" || trimmedText === "" || context === null) return null;
+  return { harness: trimmedHarness as HarnessId, text: trimmedText, context };
 }
 
 /** Reading a chat is explicit acknowledgement; inventory counts are never treated as unread. */
@@ -1248,7 +1281,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       try {
         await releaseForeignView();
         await controller.dispatch({ type: "start", harness: newChat.harness });
-        await controller.dispatch({ type: "send", text: newChat.text });
+        await controller.dispatch({ type: "send", text: newChat.text, ...(newChat.context.length ? { context: newChat.context } : {}) });
       } catch (e) {
         actionError = message(e);
         log(`new chat failed: ${actionError}`);
@@ -1256,13 +1289,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       await pushNow();
       return;
     }
-    const text = parseSendIntent(intent.payload);
-    if (text !== null) {
+    const send = parseSendIntent(intent.payload);
+    if (send !== null) {
       actionError = null;
       try {
         // The ACTIVE controller: a mirror will refuse (`send` is not among its available actions),
         // and that refusal is the honest answer — the panel never fabricates a send path.
-        await activeController().dispatch({ type: "send", text });
+        await activeController().dispatch({ type: "send", text: send.text, ...(send.context.length ? { context: send.context } : {}) });
       } catch (e) {
         actionError = message(e);
         log(`send failed: ${actionError}`);
@@ -1495,6 +1528,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       // running. Keep its pump free; the attach task itself owns failure projection and cleanup.
       if (host.drainIntentsWithContext !== undefined) void task.catch(() => undefined);
       else await task;
+      return;
+    }
+    if (action === "send" || action === "new") {
+      actionError = `Invalid ${action} intent payload.`;
+      log(`${action} rejected: ${actionError}`);
+      await pushNow();
       return;
     }
     log(`ignoring unrecognized intent payload: ${JSON.stringify(intent.payload)}`);
