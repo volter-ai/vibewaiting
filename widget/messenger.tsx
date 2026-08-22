@@ -525,7 +525,7 @@ export function mountMessenger(
             {...(terminals
               ? {
                   slots: {
-                    footer: () => (
+                    headerActions: () => (
                       <button
                         ref={terminalLauncher}
                         type="button"

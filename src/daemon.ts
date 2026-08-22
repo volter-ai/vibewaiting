@@ -90,11 +90,6 @@ export const DEFAULT_ATTACH_TIMEOUT_MS = 45_000;
 export const HARNESS_PREFERENCE: readonly string[] = [
   "claude-code",
   "codex",
-  "gemini",
-  "goose",
-  "opencode",
-  "pi",
-  "grok",
 ];
 /** The widget renders this many entries, so its passive transport should never fetch more. */
 const PASSIVE_MIRROR_VIEW = Object.freeze({
@@ -1154,8 +1149,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       recoverable: actionError === null && projected.recoverable,
       canResume,
       canExport: typeof activeController().exportSession === "function" && snapshot.operation === null && Boolean(snapshot.activeSessionKey || snapshot.activeSessionId),
-      canReduce: projected.canReduce,
-      harnesses: projected.harnesses.map((item) => {
+      // Vibewaiting's first complete product lane is intentionally Claude Code + Codex. Supercode
+      // retains its full translation/reduction surface; this thin consumer does not advertise
+      // unfinished targets or reduction until their messenger journeys are deliberately admitted.
+      canReduce: false,
+      harnesses: projected.harnesses.filter((item) => item.id === "claude-code" || item.id === "codex").map((item) => {
         const launchModes: ContinuationMode[] = item.startable
           ? [
               "headless",
