@@ -15,6 +15,7 @@ import type {
   TranscriptImage,
   UiAdapter,
 } from "@volter-ai-dev/supercode-ui";
+import type { TerminalUiState } from "@volter-ai-dev/supercode-terminal/ui";
 import { render as renderPreact } from "preact";
 import type { ComponentType, JSX } from "preact";
 import { useRef, useState } from "preact/hooks";
@@ -39,20 +40,7 @@ type WidgetIntent =
   | TerminalIntent
   | { action: "resolveImage"; requestId: string; reference: string };
 
-export interface TerminalSessionRow {
-  id: string;
-  label: string;
-  cwd: string | null;
-  activeCommand: string | null;
-  owned: boolean;
-}
-
-export interface TerminalHostState {
-  available: boolean;
-  error: string | null;
-  sessions: TerminalSessionRow[];
-  attachment: { id: string; baseUrl: string; mode: "observe" | "control" } | null;
-}
+export type TerminalHostState = TerminalUiState;
 
 export interface TerminalPanelProps {
   state: TerminalHostState;
@@ -79,7 +67,7 @@ function terminalHostState(value: unknown): TerminalHostState | null {
         }
       : null;
   const sessions = Array.isArray(host.sessions)
-    ? host.sessions.flatMap((item): TerminalSessionRow[] => {
+    ? host.sessions.flatMap((item): TerminalUiState["sessions"][number][] => {
         if (
           !isRecord(item) ||
           typeof item.id !== "string" ||

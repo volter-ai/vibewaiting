@@ -104,6 +104,9 @@ if (!process.env.SUPERCODE_BINARY && (!existsSync(binary) || statSync(binary).mt
   process.stdout.write("local Supercode binary is current; skipping Rust rebuild\n");
 }
 run("npm", ["run", "build"], { cwd: join(source, "sdk/ui") });
+if (terminalSource) {
+  run("npm", ["run", "build"], { cwd: terminalSource });
+}
 if (packages.some(([, name]) => name === "lucarne")) {
   run("npm", ["run", "build"], { cwd: join(lucarneSource, "packages/lucarne") });
 }

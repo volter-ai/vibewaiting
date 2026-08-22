@@ -42,7 +42,8 @@ await build({
 
 const supercodeCss = await readFile(fileURLToPath(import.meta.resolve("@volter-ai-dev/supercode-ui/styles.css")), "utf8");
 const xtermCss = await readFile(fileURLToPath(import.meta.resolve("@xterm/xterm/css/xterm.css")), "utf8");
-await writeFile(join(output, "app.css"), `${supercodeCss}\n${xtermCss}\n${PANEL_CSS}`, "utf8");
+const terminalCss = await readFile(fileURLToPath(import.meta.resolve("@volter-ai-dev/supercode-terminal/ui/styles.css")), "utf8");
+await writeFile(join(output, "app.css"), `${supercodeCss}\n${xtermCss}\n${terminalCss}\n${PANEL_CSS}`, "utf8");
 for (const name of ["manifest.json", "app.html", "options.html", "options.css"]) {
   await cp(join(source, name), join(output, name));
 }

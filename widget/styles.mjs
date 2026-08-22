@@ -25,41 +25,6 @@ body { background:transparent }
   padding:0 2px; border:2px solid var(--scui-bg-raised); border-radius:8px; background:var(--scui-muted); color:var(--scui-bg);
   font:700 8px/1 var(--scui-font) }
 
-.vw-terminal-panel { position:absolute; inset:0; z-index:12; display:flex; flex-direction:column; box-sizing:border-box;
-  color:var(--scui-fg); background:var(--scui-bg); font-family:var(--scui-font) }
-.vw-terminal-panel > header { display:grid; grid-template-columns:32px minmax(0,1fr) auto; align-items:center; gap:7px;
-  min-height:49px; padding:6px 10px; border-bottom:1px solid var(--scui-border); background:var(--scui-bg-raised) }
-.vw-terminal-panel header span { display:flex; min-width:0; flex-direction:column; gap:2px }
-.vw-terminal-panel header strong { font-size:13px; line-height:1.2 }
-.vw-terminal-panel header small { overflow:hidden; color:var(--scui-muted); font-size:10px; text-overflow:ellipsis; white-space:nowrap }
-.vw-terminal-panel button { min-height:28px; padding:4px 8px; border:1px solid var(--scui-border); border-radius:7px;
-  color:var(--scui-fg); background:var(--scui-fill); font:600 11px/1.2 var(--scui-font); cursor:pointer }
-.vw-terminal-panel button:hover:not(:disabled) { border-color:var(--scui-border-strong); background:var(--scui-fill-strong) }
-.vw-terminal-panel button:disabled { opacity:.5; cursor:default }
-.vw-terminal-panel header > button:first-child { padding:0; border-color:transparent; background:transparent; font-size:17px }
-.vw-terminal-create { display:grid; grid-template-columns:1fr 1fr; gap:7px; padding:10px; border-bottom:1px solid var(--scui-border) }
-.vw-terminal-create button { min-height:34px }
-.vw-terminal-list { min-height:0; overflow:auto }
-.vw-terminal-list article { display:grid; grid-template-columns:minmax(0,1fr) auto auto auto; align-items:center; gap:5px;
-  padding:9px 10px; border-bottom:1px solid var(--scui-border) }
-.vw-terminal-list article > span { display:flex; min-width:0; flex-direction:column; gap:3px }
-.vw-terminal-list article strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
-.vw-terminal-list article strong { font-size:12px }
-.vw-terminal-path { display:flex; min-width:0; overflow:hidden; color:var(--scui-muted); font-size:10px; font-style:normal; white-space:nowrap }
-.vw-terminal-path > span { flex:0 1 auto; overflow:hidden; text-overflow:ellipsis }
-.vw-terminal-path > i { flex:none; font-style:normal }
-.vw-terminal-path > b { flex:none; max-width:58%; overflow:hidden; direction:rtl; font-weight:400; text-align:left; text-overflow:ellipsis; unicode-bidi:plaintext }
-.vw-terminal-list .vw-danger { color:var(--scui-danger,#b94747); background:transparent }
-.vw-terminal-error,.vw-terminal-empty { margin:10px; padding:9px; border:1px solid var(--scui-border); border-radius:8px;
-  color:var(--scui-muted); background:var(--scui-bg-raised); font-size:11px; line-height:1.4 }
-.vw-terminal-error { color:var(--scui-danger,#b94747) }
-.vw-terminal-live { display:flex; min-height:0; flex:1; flex-direction:column; padding:8px; gap:7px; background:#111315 }
-.vw-terminal-status { flex:none; color:#9ca3aa; font:500 10px/1.2 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace }
-.vw-terminal-screen { min-height:0; flex:1; overflow:auto }
-.vw-terminal-screen .xterm { height:100% }
-.vw-terminal-screen .xterm-viewport { overflow-y:auto }
-.vw-terminal-live > button { align-self:flex-start; color:#e6e8ea; border-color:#363a3e; background:#222529 }
-
 .vw-bridge-disconnected { position:absolute; inset:0; z-index:20; display:grid; place-content:center; justify-items:center; gap:8px;
   box-sizing:border-box; padding:28px; text-align:center; color:var(--scui-fg); background:color-mix(in srgb,var(--scui-bg-raised) 94%,transparent); backdrop-filter:blur(8px) }
 .vw-bridge-disconnected strong { font-size:15px }
