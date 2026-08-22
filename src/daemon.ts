@@ -200,12 +200,6 @@ interface SessionIndexEventSource {
 const DISCOVERY_HARNESSES: readonly HarnessId[] = [
   "claude-code",
   "codex",
-  "gemini",
-  "goose",
-  "opencode",
-  "pi",
-  "grok",
-  "supercode",
 ];
 
 /**
@@ -1257,6 +1251,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   /** Re-scan each native store, publishing completed inbox slices as they arrive. */
   let refreshInFlight: Promise<void> | null = null;
+  let initialInventorySettled = false;
   const sessionsByHarness = new Map<HarnessId, SessionDescriptor[]>();
   const topicCandidatesBySession = new Map<string, SessionDescriptor["preview_candidates"]>();
   const topicAttemptedAtBySession = new Map<string, number>();
@@ -1271,7 +1266,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     const retained = topicCandidatesBySession.get(key);
     return retained?.length ? { ...descriptor, preview_candidates: retained } : descriptor;
   };
-  const rebuildDescriptors = (preserveVisibleOrder = panelVisible): void => {
+  const rebuildDescriptors = (preserveVisibleOrder = panelVisible && initialInventorySettled): void => {
     const all = [...sessionsByHarness.values()].flat().map((descriptor) => {
       const activity = activityBySession.get(
         `${descriptor.locator.harness}\0${descriptor.locator.session_id}`,
@@ -1476,8 +1471,19 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           log(`topic discovery failed after ${Math.round(performance.now() - startedAt)}ms (continuing): ${message(e)}`);
         }
       }
-    }).finally(() => {
-      refreshInFlight = null;
+    }).finally(async () => {
+      try {
+        // Progressive slices make the first rows useful quickly, but an early panel open must not
+        // freeze whichever native store happened to answer first. Normalize once after the initial
+        // inventory is complete; subsequent updates retain the row under the pointer until close.
+        if (!stopped && !initialInventorySettled) {
+          initialInventorySettled = true;
+          rebuildDescriptors(false);
+          await pushNow(false, "inventory");
+        }
+      } finally {
+        refreshInFlight = null;
+      }
     });
     return refreshInFlight;
   };
