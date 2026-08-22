@@ -15,7 +15,7 @@ export async function buildWidget({ outFile = WIDGET_HTML_PATH, minify = true } 
   const supercodeUiCss = await readFile(fileURLToPath(import.meta.resolve("@volter-ai-dev/supercode-ui/styles.css")), "utf8");
   const { html } = await buildSrcdoc({
     entryPoints: fileURLToPath(new URL("./entry.tsx", import.meta.url)),
-    css: supercodeUiCss + PANEL_CSS,
+    css: `${supercodeUiCss}\n${PANEL_CSS}`,
     title: "vibewaiting",
     jsxImportSource: "preact",
     minify,

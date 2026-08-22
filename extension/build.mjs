@@ -11,29 +11,38 @@ const output = fileURLToPath(new URL("../dist/extension/", import.meta.url));
 
 await rm(output, { recursive: true, force: true });
 await mkdir(output, { recursive: true });
-await build({
+const browserBuild = {
   absWorkingDir: root,
+  bundle: true,
+  entryNames: "[name]",
+  format: "esm",
+  jsx: "automatic",
+  jsxImportSource: "preact",
+  sourcemap: false,
+  logLevel: "warning",
+  minify: true,
+  outdir: output,
+  platform: "browser",
+  target: "chrome116",
+};
+await build({
+  ...browserBuild,
   entryPoints: {
     background: "extension/background.ts",
     content: "extension/content.ts",
-    app: "extension/app.tsx",
     options: "extension/options.ts",
   },
-  outdir: output,
-  entryNames: "[name]",
-  bundle: true,
-  format: "esm",
-  platform: "browser",
-  target: "chrome116",
-  jsx: "automatic",
-  jsxImportSource: "preact",
-  minify: true,
-  sourcemap: false,
-  logLevel: "warning",
+});
+await build({
+  ...browserBuild,
+  chunkNames: "chunks/[name]-[hash]",
+  entryPoints: { app: "extension/app.tsx" },
+  splitting: true,
 });
 
 const supercodeCss = await readFile(fileURLToPath(import.meta.resolve("@volter-ai-dev/supercode-ui/styles.css")), "utf8");
-await writeFile(join(output, "app.css"), `${supercodeCss}\n${PANEL_CSS}`, "utf8");
+const xtermCss = await readFile(fileURLToPath(import.meta.resolve("@xterm/xterm/css/xterm.css")), "utf8");
+await writeFile(join(output, "app.css"), `${supercodeCss}\n${xtermCss}\n${PANEL_CSS}`, "utf8");
 for (const name of ["manifest.json", "app.html", "options.html", "options.css"]) {
   await cp(join(source, name), join(output, name));
 }

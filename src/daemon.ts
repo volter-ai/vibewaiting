@@ -55,6 +55,7 @@ import {
   type SessionRow,
 } from "./sessions.js";
 import { VIBEWAITING_RADIUS } from "./theme.js";
+import type { TerminalServiceSnapshot } from "./terminal-service.js";
 
 /** Namespaces every page global / element id / sticky-injection id the widget mints (see `lucarne/widget/ns`). */
 export const WIDGET_NS = "vibewaiting";
@@ -285,6 +286,66 @@ export interface DaemonOptions {
   persistence?: MessengerPersistence | false | undefined;
   /** Materialize a verified export. Default: a private bundle under `<workspace>/.supercode/exports`. */
   materializeArtifact?: ((artifact: SessionArtifact) => Promise<ExportReceipt>) | undefined;
+  /** Optional native tmux companion; absent in browser-only and Lucarne-only hosts. */
+  terminalService?: TerminalService | undefined;
+}
+
+export interface TerminalService {
+  snapshot(): Promise<TerminalServiceSnapshot>;
+  create(
+    harness: "claude-code" | "codex",
+    cwd: string,
+  ): Promise<TerminalServiceSnapshot>;
+  attach(
+    sessionId: string,
+    mode: "observe" | "control",
+  ): Promise<TerminalServiceSnapshot>;
+  close(sessionId: string): Promise<TerminalServiceSnapshot>;
+  dismiss(): Promise<TerminalServiceSnapshot>;
+}
+
+type TerminalIntent =
+  | { action: "terminalRefresh" }
+  | { action: "terminalCreate"; harness: "claude-code" | "codex" }
+  | {
+      action: "terminalAttach";
+      sessionId: string;
+      mode: "observe" | "control";
+    }
+  | { action: "terminalClose"; sessionId: string }
+  | { action: "terminalDismiss" };
+
+function parseTerminalHostIntent(payload: unknown): TerminalIntent | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload))
+    return null;
+  const value = payload as Record<string, unknown>;
+  if (value.action === "terminalRefresh" && Object.keys(value).length === 1)
+    return { action: "terminalRefresh" };
+  if (value.action === "terminalDismiss" && Object.keys(value).length === 1)
+    return { action: "terminalDismiss" };
+  if (
+    value.action === "terminalCreate" &&
+    (value.harness === "claude-code" || value.harness === "codex") &&
+    Object.keys(value).length === 2
+  ) {
+    return { action: "terminalCreate", harness: value.harness };
+  }
+  if (
+    value.action === "terminalClose" &&
+    typeof value.sessionId === "string" &&
+    Object.keys(value).length === 2
+  ) {
+    return { action: "terminalClose", sessionId: value.sessionId };
+  }
+  if (
+    value.action === "terminalAttach" &&
+    typeof value.sessionId === "string" &&
+    (value.mode === "observe" || value.mode === "control") &&
+    Object.keys(value).length === 3
+  ) {
+    return { action: "terminalAttach", mode: value.mode, sessionId: value.sessionId };
+  }
+  return null;
 }
 
 /**
@@ -765,6 +826,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   /** A page action can fail before the controller publishes a structured error. Keep it visible. */
   let actionError: string | null = null;
   let exportReceipt: ExportReceipt | null = null;
+  let terminalHost = options.terminalService ? await options.terminalService.snapshot() : null;
   const materializeArtifact = options.materializeArtifact
     ?? ((artifact: SessionArtifact): Promise<ExportReceipt> => writeSessionArtifact(artifact, join(options.workspace, ".supercode", "exports")));
 
@@ -941,7 +1003,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       activeDescriptor.message_count > loadedMessages
     );
     const draftKey = activeForeignKey ?? (activeDescriptor ? sessionKey(activeDescriptor.locator) : null);
-    const state: WidgetState = {
+    const state: WidgetState & { terminalHost?: TerminalServiceSnapshot } = {
       ...projected,
       pill: startup === "ready" ? projected.pill : { tone: "off", label: startupLabel },
       startup,
@@ -966,6 +1028,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       history: { sessionLimit, hasMoreSessions, transcriptLimit, hasEarlier },
       savedDraft: draftKey ? drafts.get(draftKey) ?? "" : "",
       attention: observeAttention(snapshot, sessions, attached, observedAt),
+      ...(terminalHost ? { terminalHost } : {}),
     };
     lastPushed = state;
     const inventoryPatch: Partial<WidgetState> = {
@@ -985,6 +1048,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       exportReceipt: state.exportReceipt,
       reductionReceipt: state.reductionReceipt,
       savedDraft: state.savedDraft,
+      ...(terminalHost ? { terminalHost } : {}),
     };
     const stateFingerprint = JSON.stringify(state);
     const inventoryFingerprint = JSON.stringify(inventoryPatch);
@@ -1389,6 +1453,41 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         }
       }
       await pushNow();
+      return;
+    }
+    const terminalIntent = parseTerminalHostIntent(intent.payload);
+    if (terminalIntent !== null) {
+      if (!options.terminalService) {
+        actionError = "This host does not provide local terminal sessions.";
+      } else {
+        try {
+          if (terminalIntent.action === "terminalRefresh")
+            terminalHost = await options.terminalService.snapshot();
+          else if (terminalIntent.action === "terminalCreate")
+            terminalHost = await options.terminalService.create(
+              terminalIntent.harness,
+              options.workspace,
+            );
+          else if (terminalIntent.action === "terminalAttach")
+            terminalHost = await options.terminalService.attach(
+              terminalIntent.sessionId,
+              terminalIntent.mode,
+            );
+          else if (terminalIntent.action === "terminalClose")
+            terminalHost = await options.terminalService.close(
+              terminalIntent.sessionId,
+            );
+          else terminalHost = await options.terminalService.dismiss();
+        } catch (error) {
+          terminalHost = {
+            attachment: null,
+            available: false,
+            error: message(error),
+            sessions: terminalHost?.sessions ?? [],
+          };
+        }
+      }
+      await pushNow(true);
       return;
     }
     const imageRequest = parseResolveImageIntent(intent.payload);

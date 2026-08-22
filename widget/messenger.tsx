@@ -16,15 +16,97 @@ import type {
   UiAdapter,
 } from "@volter-ai-dev/supercode-ui";
 import { render as renderPreact } from "preact";
-import type { JSX } from "preact";
+import type { ComponentType, JSX } from "preact";
+import { useRef, useState } from "preact/hooks";
 import type { MessengerTransport } from "./transport.js";
+
+export type TerminalIntent =
+  | { action: "terminalRefresh" }
+  | { action: "terminalCreate"; harness: "claude-code" | "codex" }
+  | {
+      action: "terminalAttach";
+      sessionId: string;
+      mode: "observe" | "control";
+    }
+  | { action: "terminalClose"; sessionId: string }
+  | { action: "terminalDismiss" };
 
 type WidgetIntent =
   | SupercodeUiIntent
   | { action: "mounted" }
   | { action: "panelVisible" }
   | { action: "panelHidden" }
+  | TerminalIntent
   | { action: "resolveImage"; requestId: string; reference: string };
+
+export interface TerminalSessionRow {
+  id: string;
+  label: string;
+  cwd: string | null;
+  activeCommand: string | null;
+  owned: boolean;
+}
+
+export interface TerminalHostState {
+  available: boolean;
+  error: string | null;
+  sessions: TerminalSessionRow[];
+  attachment: { id: string; baseUrl: string; mode: "observe" | "control" } | null;
+}
+
+export interface TerminalPanelProps {
+  state: TerminalHostState;
+  send(intent: TerminalIntent): void | Promise<void>;
+  onClose(): void;
+}
+
+export interface MessengerOptions {
+  TerminalPanel?: ComponentType<TerminalPanelProps>;
+}
+
+function terminalHostState(value: unknown): TerminalHostState | null {
+  if (!isRecord(value) || !isRecord(value.terminalHost)) return null;
+  const host = value.terminalHost;
+  const attachment =
+    isRecord(host.attachment) &&
+    typeof host.attachment.id === "string" &&
+    typeof host.attachment.baseUrl === "string" &&
+    (host.attachment.mode === "observe" || host.attachment.mode === "control")
+      ? {
+          baseUrl: host.attachment.baseUrl,
+          id: host.attachment.id,
+          mode: host.attachment.mode as "observe" | "control",
+        }
+      : null;
+  const sessions = Array.isArray(host.sessions)
+    ? host.sessions.flatMap((item): TerminalSessionRow[] => {
+        if (
+          !isRecord(item) ||
+          typeof item.id !== "string" ||
+          typeof item.label !== "string"
+        )
+          return [];
+        return [
+          {
+            activeCommand:
+              typeof item.activeCommand === "string"
+                ? item.activeCommand
+                : null,
+            cwd: typeof item.cwd === "string" ? item.cwd : null,
+            id: item.id,
+            label: item.label,
+            owned: item.owned === true,
+          },
+        ];
+      })
+    : [];
+  return {
+    attachment,
+    available: host.available === true,
+    error: typeof host.error === "string" ? host.error : null,
+    sessions,
+  };
+}
 
 const INTENT_QUEUE = "agent";
 const BRIDGE_ACK_TIMEOUT_MS = 600;
@@ -152,7 +234,10 @@ function pickAttachments(): Promise<TranscriptAttachment[] | null> {
   });
 }
 
-export function mountMessenger(widget: MessengerTransport): () => void {
+export function mountMessenger(
+  widget: MessengerTransport,
+  options: MessengerOptions = {},
+): () => void {
   const appRoot = document.getElementById("app") ?? document.body;
   let lastPanelState: unknown = {};
   let bridgeDisconnected = false;
@@ -307,7 +392,11 @@ export function mountMessenger(widget: MessengerTransport): () => void {
   };
 
   function MessengerDialog({ state }: { state: unknown }): JSX.Element {
+    const [terminalsOpen, setTerminalsOpen] = useState(false);
+    const terminalLauncher = useRef<HTMLButtonElement>(null);
     const normalized = normalizeUiState(state);
+    const terminals = options.TerminalPanel ? terminalHostState(state) : null;
+    const TerminalPanel = options.TerminalPanel;
     const message =
       "Vibewaiting is no longer connected to its local agent bridge.";
     const displayState = bridgeDisconnected
@@ -327,17 +416,58 @@ export function mountMessenger(widget: MessengerTransport): () => void {
         class="vw-dialog"
         tabIndex={-1}
         onKeyDown={(event): void => {
-          if (event.key !== "Escape") return;
+          if (event.key !== "Escape" || terminalsOpen) return;
           event.preventDefault();
           event.stopPropagation();
           closeMessenger();
         }}
       >
-        <SupercodeMessenger
-          state={displayState}
-          adapter={adapter}
-          components={{ TaskPlan: () => null }}
-        />
+        <div
+          class="vw-messenger-layer"
+          aria-hidden={terminalsOpen ? "true" : undefined}
+          inert={terminalsOpen}
+        >
+          <SupercodeMessenger
+            state={displayState}
+            adapter={adapter}
+            components={{ TaskPlan: () => null }}
+            {...(terminals
+              ? {
+                  slots: {
+                    footer: () => (
+                      <button
+                        ref={terminalLauncher}
+                        type="button"
+                        class="vw-terminal-launch"
+                        aria-label={`Terminals · ${terminals.sessions.length} local sessions`}
+                        onClick={() => {
+                          setTerminalsOpen(true);
+                          void sendBridgeIntent({ action: "terminalRefresh" });
+                        }}
+                      >
+                        <span aria-hidden="true">&gt;_</span>
+                        <small>{terminals.sessions.length}</small>
+                      </button>
+                    ),
+                  },
+                }
+              : {})}
+          />
+        </div>
+        {terminalsOpen && terminals && TerminalPanel ? (
+          <TerminalPanel
+            state={terminals}
+            send={sendBridgeIntent}
+            onClose={() => {
+              setTerminalsOpen(false);
+              queueMicrotask(() =>
+                terminalLauncher.current?.focus({ preventScroll: true }),
+              );
+              if (terminals.attachment)
+                void sendBridgeIntent({ action: "terminalDismiss" });
+            }}
+          />
+        ) : null}
         {bridgeDisconnected ? (
           <section class="vw-bridge-disconnected" role="alert">
             <strong>

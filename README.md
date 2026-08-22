@@ -40,6 +40,13 @@ launcher projection—not transcripts, filesystem paths, credentials, or policy.
 is sent only to the extension-owned, origin-isolated iframe; native message frames and reassembly are
 bounded, and unknown harnesses remain hidden instead of receiving a fabricated fallback identity.
 
+The extension can also mirror local tmux sessions as a familiar terminal surface. Existing sessions
+are read-only and attach without changing their tmux window size. Sessions created from Vibewaiting
+run only the structured Claude Code or Codex command and may be controlled or stopped from the
+widget. The browser receives a short-lived, one-use attachment grant rather than a tmux session or
+socket handle; the loopback stream accepts only the exact extension origin, and closing the viewer
+releases its PTY without killing the durable tmux session.
+
 ### Zero-touch development
 
 Run `npm run dev:extension` once. It owns a persistent, isolated Brave/Chromium development profile,
@@ -57,10 +64,10 @@ signed automatic-update mechanism.
 ## Local Supercode development
 
 Run `npm run sync:local` to build the adjacent Supercode binary and install its harness SDK, client,
-and UI packages directly into Vibewaiting's working `node_modules`. When adjacent Lucarne and Widget
-Shell checkouts exist, the same command builds and installs those too. Pass another Supercode checkout
-as the final argument or set `SUPERCODE_DIR`; set `LUCARNE_DIR` or `WIDGET_SHELL_DIR` when either
-repository is not a sibling. The command
+UI, and optional terminal packages directly into Vibewaiting's working `node_modules`. Pass another
+Supercode checkout as the final argument or set `SUPERCODE_DIR`. Local Lucarne and Widget Shell
+sources are intentionally opt-in: set `VIBEWAITING_LOCAL_SURFACES=1`, plus `LUCARNE_DIR` or
+`WIDGET_SHELL_DIR` when either repository is not a sibling. The command
 records both the local binary and selected source worktree in ignored local-development state, so Vibewaiting
 cannot accidentally pair local UI with the published runtime. `dev:extension` reuses that selection
 and automatically resyncs Supercode source changes; no repeated manual command is needed. It does
