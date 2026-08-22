@@ -1,7 +1,36 @@
 import { connectOverlayApp } from "@volter-ai-dev/widget-shell/frame";
+import { TerminalPanel } from "@volter-ai-dev/supercode-terminal/ui";
+import type { JSX } from "preact";
 import { mountMessenger } from "../widget/messenger.js";
+import type { TerminalPanelProps } from "../widget/messenger.js";
 import type { MessengerTransport } from "../widget/transport.js";
-import { TerminalPanel } from "./terminal-panel.js";
+
+function LocalTerminalPanel({
+  state,
+  send,
+  onClose,
+}: TerminalPanelProps): JSX.Element {
+  return (
+    <TerminalPanel
+      state={state}
+      createActions={[
+        { id: "claude-code", label: "New Claude Code" },
+        { id: "codex", label: "New Codex" },
+      ]}
+      onClose={onClose}
+      onRefresh={() => send({ action: "terminalRefresh" })}
+      onCreate={(harness) => {
+        if (harness !== "claude-code" && harness !== "codex") return;
+        return send({ action: "terminalCreate", harness });
+      }}
+      onAttach={(sessionId, mode) =>
+        send({ action: "terminalAttach", sessionId, mode })
+      }
+      onStop={(sessionId) => send({ action: "terminalClose", sessionId })}
+      onDismiss={() => send({ action: "terminalDismiss" })}
+    />
+  );
+}
 
 const shell = connectOverlayApp();
 const port = chrome.runtime.connect({ name: "vibewaiting:guest" });
@@ -36,4 +65,4 @@ const transport: MessengerTransport = {
   },
 };
 
-mountMessenger(transport, { TerminalPanel });
+mountMessenger(transport, { TerminalPanel: LocalTerminalPanel });
