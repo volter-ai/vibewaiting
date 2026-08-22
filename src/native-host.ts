@@ -17,6 +17,7 @@ import {
   NativeMessageDecoder,
 } from "./native-messaging.js";
 import { FileMessengerPersistence } from "./persistence.js";
+import { LocalTerminalService } from "./terminal-service.js";
 
 const HARNESS_IDS = new Set<HarnessId>([
   "claude-code",
@@ -147,8 +148,12 @@ async function localSupercodeCommand(): Promise<string | undefined> {
   );
 }
 
-export async function runNativeHost(): Promise<void> {
+export async function runNativeHost(extensionOrigin: string | undefined): Promise<void> {
+  if (!extensionOrigin)
+    throw new Error("native host did not receive its browser extension origin");
   const decoder = new NativeMessageDecoder();
+  const terminalService = new LocalTerminalService(extensionOrigin);
+  await terminalService.start();
   let daemon: Daemon | null = null;
   let bridge: NativeWidgetBridge | null = null;
   let activeDiscoveryClient: SupercodeHarnessClient | null = null;
@@ -208,6 +213,7 @@ export async function runNativeHost(): Promise<void> {
         attachHost: async () => nextBridge,
         intentPollMs: 0,
         log: (message) => process.stderr.write(`[vibewaiting] ${message}\n`),
+        terminalService,
       });
       bridge = nextBridge;
       daemon = nextDaemon;
@@ -262,8 +268,12 @@ export async function runNativeHost(): Promise<void> {
     }
   });
 
-  await once(process.stdin, "end");
-  await commandQueue;
-  decoder.finish();
-  await stopDaemon();
+  try {
+    await once(process.stdin, "end");
+    await commandQueue;
+    decoder.finish();
+  } finally {
+    await stopDaemon();
+    await terminalService.stop();
+  }
 }

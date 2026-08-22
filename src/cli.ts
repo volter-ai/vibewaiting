@@ -149,7 +149,7 @@ async function loadWidgetHtml(): Promise<string> {
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   if (argv[0] === "native-host") {
-    await runNativeHost();
+    await runNativeHost(argv[1]);
     return;
   }
   if (argv[0] === "native" && argv[1] === "install") {

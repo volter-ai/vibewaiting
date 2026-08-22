@@ -25,12 +25,26 @@ const packages = [
   [join(source, "sdk/client"), "@volter-ai-dev/supercode-client"],
   [join(source, "sdk/ui"), "@volter-ai-dev/supercode-ui"],
 ];
+const terminalCandidates = [
+  process.env.SUPERCODE_TERMINAL_DIR,
+  join(source, "sdk/terminal"),
+  resolve(root, "../supercode-terminal-attachments/sdk/terminal"),
+].filter(Boolean).map((candidate) => resolve(candidate));
+const terminalSource = terminalCandidates.find((candidate) =>
+  existsSync(join(candidate, "package.json"))
+);
+if (terminalSource) {
+  packages.push([terminalSource, "@volter-ai-dev/supercode-terminal"]);
+}
 const lucarneSource = resolve(process.env.LUCARNE_DIR ?? join(root, "../lucarne"));
-if (process.env.VIBEWAITING_SUPERCODE_ONLY !== "1" && existsSync(join(lucarneSource, "packages/lucarne/package.json"))) {
+const syncLocalSurfaces =
+  process.env.VIBEWAITING_LOCAL_SURFACES === "1" &&
+  process.env.VIBEWAITING_SUPERCODE_ONLY !== "1";
+if (syncLocalSurfaces && existsSync(join(lucarneSource, "packages/lucarne/package.json"))) {
   packages.push([join(lucarneSource, "packages/lucarne"), "lucarne"]);
 }
 const widgetShellSource = resolve(process.env.WIDGET_SHELL_DIR ?? join(root, "../widget-shell"));
-if (process.env.VIBEWAITING_SUPERCODE_ONLY !== "1" && existsSync(join(widgetShellSource, "package.json"))) {
+if (syncLocalSurfaces && existsSync(join(widgetShellSource, "package.json"))) {
   packages.push([widgetShellSource, "@volter-ai-dev/widget-shell"]);
 }
 
@@ -94,7 +108,13 @@ if (packages.some(([, name]) => name === "lucarne")) {
   run("npm", ["run", "build"], { cwd: join(lucarneSource, "packages/lucarne") });
 }
 if (packages.some(([, name]) => name === "@volter-ai-dev/widget-shell")) {
-  run("npm", ["run", "build"], { cwd: widgetShellSource });
+  if (existsSync(join(widgetShellSource, "node_modules/.bin/tsup"))) {
+    run("npm", ["run", "build"], { cwd: widgetShellSource });
+  } else if (existsSync(join(widgetShellSource, "dist/index.js"))) {
+    process.stdout.write("local Widget Shell build dependencies are absent; reusing its existing dist\n");
+  } else {
+    throw new Error("Local Widget Shell has no dist and cannot build. Run npm install in its checkout.");
+  }
 }
 
 const scratch = mkdtempSync(join(tmpdir(), "vibewaiting-supercode-"));

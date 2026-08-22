@@ -1,6 +1,7 @@
 import { connectOverlayApp } from "@volter-ai-dev/widget-shell/frame";
 import { mountMessenger } from "../widget/messenger.js";
 import type { MessengerTransport } from "../widget/transport.js";
+import { TerminalPanel } from "./terminal-panel.js";
 
 const shell = connectOverlayApp();
 const port = chrome.runtime.connect({ name: "vibewaiting:guest" });
@@ -35,4 +36,4 @@ const transport: MessengerTransport = {
   },
 };
 
-mountMessenger(transport);
+mountMessenger(transport, { TerminalPanel });
