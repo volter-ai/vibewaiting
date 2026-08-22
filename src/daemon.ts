@@ -53,6 +53,7 @@ import {
   matchesActive,
   projectSessions,
   sessionKey,
+  sessionRuntimeStatus,
   type ActiveSessionRef,
   type SessionRow,
 } from "./sessions.js";
@@ -1129,6 +1130,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       : ref?.sessionId
         ? descriptors.find((descriptor) => matchesActive(descriptor, ref))
         : undefined;
+    const activeRuntimeStatus = activeDescriptor
+      ? sessionRuntimeStatus(activeDescriptor)
+      : null;
+    const canResume = projected.canResume && activeDescriptor !== undefined && activeRuntimeStatus === null;
     const loadedMessages = snapshot.activeSession?.messages.length
       ?? snapshot.conversation.filter((entry) => entry.kind === "message").length;
     const hasEarlier = snapshot.conversation.length > transcriptLimit || (
@@ -1153,6 +1158,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       // resume/send/export already retain their own action, so labelling a refresh as a retry is
       // dishonest; the original button or draft remains the real retry path.
       recoverable: actionError === null && projected.recoverable,
+      canResume,
       canExport: typeof activeController().exportSession === "function" && snapshot.operation === null && Boolean(snapshot.activeSessionKey || snapshot.activeSessionId),
       canReduce: projected.canReduce,
       harnesses: projected.harnesses.map((item) => {
@@ -1171,7 +1177,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           preferredLaunchMode: preferred && launchModes.includes(preferred) ? preferred : launchModes[0] ?? null,
         };
       }),
-      continuationModes: projected.canResume
+      continuationModes: canResume
         ? [
             "headless",
             ...(
@@ -1999,6 +2005,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const snapshot = foreign?.controller.getSnapshot();
       const key = snapshot?.activeSessionKey ?? null;
       const activeSession = snapshot?.sessions.find((session) => session.key === key);
+      const descriptor = activeForeignKey
+        ? descriptors.find((candidate) => sessionKey(candidate.locator) === activeForeignKey)
+        : undefined;
+      const runtimeStatus = descriptor ? sessionRuntimeStatus(descriptor) : null;
       try {
         if (!foreign || !snapshot || snapshot.connection.mode !== "mirror" || key === null) {
           throw new Error("open a persisted read-only conversation before continuing it here");
@@ -2008,7 +2018,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         if (
           activeSession?.liveStatus === "running" ||
           activeSession?.liveStatus === "busy" ||
-          activeSession?.liveStatus === "idle"
+          activeSession?.liveStatus === "idle" ||
+          runtimeStatus !== null
         ) {
           throw new Error("this session is active in another agent window; message it live or start a separate continuation");
         }
@@ -2020,9 +2031,6 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           if (!options.terminalService) {
             throw new Error("this host does not provide a local terminal");
           }
-          const descriptor = activeForeignKey
-            ? descriptors.find((candidate) => sessionKey(candidate.locator) === activeForeignKey)
-            : undefined;
           if (!descriptor) throw new Error("this persisted session is no longer available");
           if (descriptor.locator.harness !== "claude-code" && descriptor.locator.harness !== "codex") {
             throw new Error(`${descriptor.locator.harness} terminal continuation is not supported yet`);

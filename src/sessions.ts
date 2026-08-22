@@ -61,7 +61,7 @@ interface NormalizedActivity {
   turn: "unknown" | "idle" | "working" | "needs_input";
 }
 
-function runtimeStatus(descriptor: SessionDescriptor): SessionRow["runtimeStatus"] {
+export function sessionRuntimeStatus(descriptor: SessionDescriptor): SessionRow["runtimeStatus"] {
   const activity = (descriptor as SessionDescriptor & { activity?: NormalizedActivity | null }).activity;
   if (activity) {
     if (activity.presence === "persisted") return null;
@@ -233,7 +233,7 @@ export function projectSession(
     messages: descriptor.message_count,
     active: matchesActive(descriptor, options.active),
     live: isLive(descriptor.updated_at_ms, options.now),
-    runtimeStatus: runtimeStatus(descriptor),
+    runtimeStatus: sessionRuntimeStatus(descriptor),
   };
 }
 
