@@ -105,7 +105,10 @@ function terminalHostState(value: unknown): TerminalHostState | null {
 }
 
 const INTENT_QUEUE = "agent";
-const BRIDGE_ACK_TIMEOUT_MS = 600;
+// A cold native host has to establish messaging and seed its first bounded inventory before it can
+// acknowledge the iframe. Keep that ordinary startup inside the messenger's connecting state;
+// showing the blocking disconnected recovery surface sooner makes a healthy launch flash offline.
+const BRIDGE_ACK_TIMEOUT_MS = 1_500;
 const IMAGE_RESOLUTION_TIMEOUT_MS = 15_000;
 const MAX_RESOLVED_IMAGE_URL_CHARS = 22_400_000;
 const MAX_RESOLVED_IMAGE_BYTES = 16 * 1024 * 1024;
