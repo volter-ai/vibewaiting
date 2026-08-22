@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const root = resolve(import.meta.dirname, "..");
@@ -49,7 +49,15 @@ if (syncLocalSurfaces && existsSync(join(widgetShellSource, "package.json"))) {
 }
 
 function run(program, args, options) {
-  const result = spawnSync(program, args, { stdio: "inherit", ...options });
+  const inheritedEnv = options?.env ?? process.env;
+  const result = spawnSync(program, args, {
+    stdio: "inherit",
+    ...options,
+    env: {
+      ...inheritedEnv,
+      PATH: `${join(root, "node_modules/.bin")}${delimiter}${inheritedEnv.PATH ?? ""}`,
+    },
+  });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`${program} exited ${result.status ?? "without a status"}`);
 }
