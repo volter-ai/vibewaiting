@@ -176,67 +176,6 @@ async function launchBrowser(choice) {
   );
 }
 
-async function enableDeveloperMode() {
-  const response = await fetch(
-    `${cdpBase}/json/new?${encodeURIComponent("chrome://extensions/")}`,
-    { method: "PUT", signal: AbortSignal.timeout(1_000) },
-  );
-  if (!response.ok)
-    throw new Error(
-      `Could not open the browser extensions page (${response.status})`,
-    );
-  const page = await response.json();
-  try {
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      const tree = await cdpCommand(
-        page.webSocketDebuggerUrl,
-        "Accessibility.getFullAXTree",
-      );
-      const developerMode = tree?.nodes?.find(
-        (node) => node.role?.value === "switch",
-      );
-      if (developerMode) {
-        const checked = developerMode.properties?.find(
-          (property) => property.name === "checked",
-        )?.value?.value;
-        if (checked === true || checked === "true") return;
-        const box = await cdpCommand(
-          page.webSocketDebuggerUrl,
-          "DOM.getBoxModel",
-          { backendNodeId: developerMode.backendDOMNodeId },
-        );
-        const bounds = box?.model?.border;
-        if (Array.isArray(bounds) && bounds.length === 8) {
-          const x = (bounds[0] + bounds[2] + bounds[4] + bounds[6]) / 4;
-          const y = (bounds[1] + bounds[3] + bounds[5] + bounds[7]) / 4;
-          await cdpCommand(
-            page.webSocketDebuggerUrl,
-            "Input.dispatchMouseEvent",
-            {
-              type: "mousePressed",
-              x,
-              y,
-              button: "left",
-              clickCount: 1,
-            },
-          );
-          await cdpCommand(
-            page.webSocketDebuggerUrl,
-            "Input.dispatchMouseEvent",
-            { type: "mouseReleased", x, y, button: "left", clickCount: 1 },
-          );
-        }
-      }
-      await delay(100);
-    }
-    throw new Error("Could not enable extension Developer mode automatically");
-  } finally {
-    await cdpCommand(page.webSocketDebuggerUrl, "Page.close", {}, true).catch(
-      () => undefined,
-    );
-  }
-}
-
 function cdpCommand(webSocketUrl, method, params = {}, closeIsSuccess = false) {
   return new Promise((resolveCommand, reject) => {
     const socket = new WebSocket(webSocketUrl);
@@ -357,7 +296,6 @@ await command(process.execPath, [
   extensionId,
 ]);
 await launchBrowser(choice);
-await enableDeveloperMode();
 await ensureDevSettings();
 await reloadExtensionAndTabs();
 
