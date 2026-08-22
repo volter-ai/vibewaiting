@@ -4,6 +4,10 @@ import {
   createExtensionIframeContent,
   createOverlay,
 } from "@volter-ai-dev/widget-shell";
+import {
+  VIBEWAITING_PRESENTATION,
+  VIBEWAITING_PRESENTATIONS,
+} from "../src/presentations.js";
 import { VIBEWAITING_RADIUS } from "../src/theme.js";
 
 const overlay = createOverlay({
@@ -11,7 +15,8 @@ const overlay = createOverlay({
   content: createExtensionIframeContent(chrome.runtime, "app.html", {
     title: "Vibewaiting agent chats",
   }),
-  viewport: { width: 390, height: 667, gutter: 16 },
+  presentations: VIBEWAITING_PRESENTATIONS,
+  initialPresentation: VIBEWAITING_PRESENTATION.messenger,
   launcher: { label: "Open agent chats", hidden: true },
   behavior: {
     persistence: createExtensionGeometryPersistence(chrome.storage.local),

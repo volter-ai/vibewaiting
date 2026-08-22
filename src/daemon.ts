@@ -25,7 +25,8 @@ import type {
   SupercodeClientAction,
   SupercodeClientSnapshot,
 } from "@volter-ai-dev/supercode-client";
-import type { DiscoveryQuery, HarnessId, HarnessSettingChange, JsonValue, SessionArtifact, SessionDescriptor, SessionFormat, SessionLocator } from "@volter-ai-dev/supercode-harness-sdk";
+import type { DiscoveryQuery, HarnessId, HarnessSettingChange, JsonValue, SessionArtifact, SessionDescriptor, SessionFormat, SessionLocator, StructuredLaunch } from "@volter-ai-dev/supercode-harness-sdk";
+import type { ContinuationMode } from "@volter-ai-dev/supercode-ui";
 import { createLucarneInjector } from "@volter-ai-dev/widget-shell/lucarne";
 import { WidgetHost } from "lucarne/widget/host";
 import {
@@ -55,6 +56,10 @@ import {
   type SessionRow,
 } from "./sessions.js";
 import { VIBEWAITING_RADIUS } from "./theme.js";
+import {
+  VIBEWAITING_PRESENTATION,
+  VIBEWAITING_PRESENTATIONS,
+} from "./presentations.js";
 import type { TerminalServiceSnapshot } from "./terminal-service.js";
 
 /** Namespaces every page global / element id / sticky-injection id the widget mints (see `lucarne/widget/ns`). */
@@ -342,6 +347,10 @@ export interface TerminalService {
     harness: "claude-code" | "codex",
     cwd: string,
   ): Promise<TerminalServiceSnapshot>;
+  continueSession(
+    harness: HarnessId,
+    launch: StructuredLaunch,
+  ): Promise<TerminalServiceSnapshot>;
   attach(
     sessionId: string,
     mode: "observe" | "control",
@@ -564,9 +573,16 @@ export function parseReleaseIntent(payload: unknown): boolean {
 }
 
 /** Continue the mirror currently selected by the daemon. The page never supplies a session key. */
-export function parseResumeIntent(payload: unknown): boolean {
-  if (!payload || typeof payload !== "object") return false;
-  return (payload as { action?: unknown }).action === "resume" && Object.keys(payload).length === 1;
+export function parseResumeIntent(payload: unknown): ContinuationMode | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const value = payload as { action?: unknown; mode?: unknown };
+  if (value.action !== "resume") return null;
+  if (Object.keys(value).length === 1) return "headless";
+  if (
+    Object.keys(value).length === 2 &&
+    (value.mode === "headless" || value.mode === "terminal")
+  ) return value.mode;
+  return null;
 }
 
 /** Join the selected mirror's controller-proven live endpoint; the page cannot supply an endpoint. */
@@ -801,7 +817,8 @@ async function defaultAttachHost(opts: {
   const injector = createLucarneInjector({
     launcherLabel: "Open agent chats",
     launcherHidden: true,
-    viewport: { width: 390, height: 667, gutter: 16 },
+    presentations: VIBEWAITING_PRESENTATIONS,
+    initialPresentation: VIBEWAITING_PRESENTATION.messenger,
     theme: { radius: VIBEWAITING_RADIUS },
   });
   return await WidgetHost.attach(opts.sessionId, {
@@ -1102,9 +1119,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         ? `Starting ${startupHarness || "coding agent"}…`
         : "Loading recent sessions…";
     const attached = attachmentFor(ref, sessions, snapshot.workspace, home);
-    const activeDescriptor = ref?.sessionId
-      ? descriptors.find((descriptor) => matchesActive(descriptor, ref))
-      : undefined;
+    const activeDescriptor = activeForeignKey
+      ? descriptors.find((descriptor) => sessionKey(descriptor.locator) === activeForeignKey)
+      : ref?.sessionId
+        ? descriptors.find((descriptor) => matchesActive(descriptor, ref))
+        : undefined;
     const loadedMessages = snapshot.activeSession?.messages.length
       ?? snapshot.conversation.filter((entry) => entry.kind === "message").length;
     const hasEarlier = snapshot.conversation.length > transcriptLimit || (
@@ -1131,6 +1150,18 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       recoverable: actionError === null && projected.recoverable,
       canExport: typeof activeController().exportSession === "function" && snapshot.operation === null && Boolean(snapshot.activeSessionKey || snapshot.activeSessionId),
       canReduce: projected.canReduce,
+      continuationModes: projected.canResume
+        ? [
+            "headless",
+            ...(
+              options.terminalService &&
+              activeDescriptor &&
+              (activeDescriptor.locator.harness === "claude-code" || activeDescriptor.locator.harness === "codex")
+                ? ["terminal" as const]
+                : []
+            ),
+          ]
+        : [],
       exportBackTarget: snapshot.connection.strategy === "branch" || snapshot.connection.strategy === "reduce"
         ? activeForeign()?.sourceHarness ?? null
         : null,
@@ -1154,6 +1185,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       recoverable: state.recoverable,
       canExport: state.canExport,
       canReduce: state.canReduce,
+      continuationModes: state.continuationModes,
       exportBackTarget: state.exportBackTarget,
       exportReceipt: state.exportReceipt,
       reductionReceipt: state.reductionReceipt,
@@ -1920,7 +1952,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       await pushNow();
       return;
     }
-    if (parseResumeIntent(intent.payload)) {
+    const resumeMode = parseResumeIntent(intent.payload);
+    if (resumeMode !== null) {
       actionError = null;
       const foreign = activeForeign();
       const snapshot = foreign?.controller.getSnapshot();
@@ -1943,11 +1976,37 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           throw new Error(`${snapshot.activeHarness ?? "this harness"} cannot resume this persisted session`);
         }
         const resumeStartedAt = performance.now();
-        await foreign.controller.dispatch({ type: "resume", sessionKey: key });
-        log(
-          `resumed ${snapshot.activeHarness ?? "coding agent"} session under local control in ` +
-          `${Math.round(performance.now() - resumeStartedAt)}ms`,
-        );
+        if (resumeMode === "terminal") {
+          if (!options.terminalService) {
+            throw new Error("this host does not provide a local terminal");
+          }
+          const descriptor = activeForeignKey
+            ? descriptors.find((candidate) => sessionKey(candidate.locator) === activeForeignKey)
+            : undefined;
+          if (!descriptor) throw new Error("this persisted session is no longer available");
+          if (descriptor.locator.harness !== "claude-code" && descriptor.locator.harness !== "codex") {
+            throw new Error(`${descriptor.locator.harness} terminal continuation is not supported yet`);
+          }
+          const { launch } = await requireClient(options).resumeInstructions({
+            locator: descriptor.locator,
+            cwd: descriptor.cwd ?? snapshot.workspace,
+            ...(options.policy ? { policy: options.policy } : {}),
+          });
+          terminalHost = await options.terminalService.continueSession(
+            descriptor.locator.harness,
+            launch,
+          );
+          log(
+            `resumed ${snapshot.activeHarness ?? "coding agent"} session in an owned tmux terminal in ` +
+            `${Math.round(performance.now() - resumeStartedAt)}ms`,
+          );
+        } else {
+          await foreign.controller.dispatch({ type: "resume", sessionKey: key });
+          log(
+            `resumed ${snapshot.activeHarness ?? "coding agent"} session headlessly under local control in ` +
+            `${Math.round(performance.now() - resumeStartedAt)}ms`,
+          );
+        }
       } catch (e) {
         actionError = message(e);
         log(`resume failed: ${actionError}`);
