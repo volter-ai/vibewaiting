@@ -69,6 +69,7 @@ async function sessionRig(
   suppliedClient?: FakeHarnessClient,
   persistence?: MessengerPersistence,
   materializeArtifact?: (artifact: SessionArtifact) => Promise<ExportReceipt>,
+  suppliedNow: () => number = () => 2_000_000,
 ): Promise<Rig> {
   const client = suppliedClient ?? new FakeHarnessClient({ sessions });
   const host = new FakeWidgetHost();
@@ -79,7 +80,7 @@ async function sessionRig(
     client,
     pushDebounceMs: 5,
     home: "/home/dev",
-    now: () => 2_000_000,
+    now: suppliedNow,
     attachHost: async () => host,
     ...(persistence ? { persistence } : {}),
     ...(materializeArtifact ? { materializeArtifact } : {}),
@@ -528,15 +529,34 @@ describe("messenger session state machine", () => {
   });
 
   it("keeps visible rows stable through heartbeat churn and acknowledges settled growth", async () => {
-    const { host, client, lastPush } = await sessionRig();
+    let observedAt = 2_000_000;
+    const { daemon, host, client, lastPush } = await sessionRig(
+      [OWN, ATLAS, BRIDGE],
+      undefined,
+      undefined,
+      undefined,
+      () => observedAt,
+    );
     client.sessions = [OWN, { ...ATLAS, updated_at_ms: 2_000_050 }, BRIDGE];
     await host.ticks.find((tick) => tick.ms === DEFAULT_DISCOVER_INTERVAL_MS)?.fn();
     expect(lastPush().attention).toEqual([]);
 
+    client.sessions = [OWN, {
+      ...ATLAS,
+      updated_at_ms: observedAt,
+      latest_message_candidates: [{ role: "assistant", content: "settled preview", metadata: {} }],
+    }, BRIDGE];
+    await host.ticks.find((tick) => tick.ms === DEFAULT_DISCOVER_INTERVAL_MS)?.fn();
+    expect(lastPush().attention).toEqual([]);
+    observedAt += DEFAULT_ATTENTION_SETTLE_MS;
+    await daemon.flush();
+    const key = sessionKey(ATLAS.locator);
+    expect(lastPush().attention).toContainEqual(expect.objectContaining({ key, kind: "unseen" }));
+    await host.fireIntent(INTENT_QUEUE, { action: "ack", key });
+
     const grown = { ...ATLAS, message_count: (ATLAS.message_count ?? 0) + 1 };
     client.sessions = [OWN, { ...grown, updated_at_ms: 2_000_000 - DEFAULT_ATTENTION_SETTLE_MS }, BRIDGE];
     await host.ticks.find((tick) => tick.ms === DEFAULT_DISCOVER_INTERVAL_MS)?.fn();
-    const key = sessionKey(ATLAS.locator);
     expect(lastPush().attention).toContainEqual(expect.objectContaining({ key, kind: "unseen" }));
 
     await host.fireIntent(INTENT_QUEUE, { action: "ack", key });
