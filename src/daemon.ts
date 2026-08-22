@@ -1573,6 +1573,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         workspace: opts.workspace,
         ownsClient: false,
         autoObserve: false,
+        // The daemon already owns the one machine-wide index and activity stream. A disposable
+        // one-session mirror only needs its bounded transcript follower; opening another native
+        // index here queues the requested chat behind an unrelated full inventory scan.
+        inventorySubscriptions: false,
         mirrorView: { ...PASSIVE_MIRROR_VIEW, tailMessages: opts.tailMessages },
         mirrorCache,
         allowHarnessConfiguration: true,
