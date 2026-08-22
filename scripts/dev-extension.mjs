@@ -442,6 +442,11 @@ const localSourceMarker = join(
   root,
   ".vibewaiting/local-supercode-source",
 );
+const localBinaryMarker = join(
+  root,
+  "node_modules/.cache/vibewaiting/local-supercode-bin",
+);
+let localStackWatchdog = null;
 if (await exists(localSourceMarker)) {
   const localSource = readFileSync(localSourceMarker, "utf8").trim();
   const sourceDirectories = [
@@ -480,6 +485,13 @@ if (await exists(localSourceMarker)) {
     const absolute = join(localSource, path);
     if (await exists(absolute)) watchers.push(watch(absolute, scheduleLocalStackRebuild));
   }
+  // `npm ci` replaces node_modules atomically and removes the ignored binary marker while this
+  // watcher remains alive. Detect that broken invariant directly: waiting for an unrelated source
+  // edit would otherwise let the extension restart against an older global/npm Supercode.
+  localStackWatchdog = setInterval(async () => {
+    if (!(await exists(localBinaryMarker))) scheduleLocalStackRebuild();
+  }, 1_000);
+  localStackWatchdog.unref?.();
   process.stdout.write(`local Supercode source: ${localSource}\n`);
 }
 
@@ -490,6 +502,7 @@ process.stdout.write(
 
 function shutdown() {
   clearTimeout(debounce);
+  if (localStackWatchdog) clearInterval(localStackWatchdog);
   for (const watcher of watchers) watcher.close();
   process.exit(0);
 }

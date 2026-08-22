@@ -713,8 +713,26 @@ describe("messenger session state machine", () => {
     expect(lastPush().sessions.map((session) => session.key)).toEqual(visibleOrder);
 
     await host.fireIntent(INTENT_QUEUE, { action: "panelHidden" });
+    client.sessions = [OWN, {
+      ...grown,
+      updated_at_ms: 2_000_000,
+      latest_message_candidates: [{
+        role: "assistant",
+        content: "newer visible conversation",
+        metadata: { timestamp: new Date(1_900_000).toISOString() },
+      }],
+    }, {
+      ...BRIDGE,
+      updated_at_ms: 3_000_000,
+      latest_message_candidates: [{
+        role: "assistant",
+        content: "older visible conversation with a newer heartbeat",
+        metadata: { timestamp: new Date(1_800_000).toISOString() },
+      }],
+    }];
+    await host.ticks.find((tick) => tick.ms === DEFAULT_DISCOVER_INTERVAL_MS)?.fn();
     await host.fireIntent(INTENT_QUEUE, { action: "panelVisible" });
-    expect(lastPush().sessions[0]?.key).toBe(sessionKey(BRIDGE.locator));
+    expect(lastPush().sessions[0]?.key).toBe(sessionKey(ATLAS.locator));
   });
 
   it("marks completed conversations only while they are in the background", async () => {
