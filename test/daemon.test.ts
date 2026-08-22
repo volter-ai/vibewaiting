@@ -415,6 +415,34 @@ describe("messenger session state machine", () => {
     expect(lastPush().error).toContain("not writable");
   });
 
+  it("never resumes a process-proven active session when the controller has only legacy persisted state", async () => {
+    const active = {
+      ...ATLAS,
+      activity: {
+        harness: ATLAS.locator.harness,
+        session_id: ATLAS.locator.session_id,
+        presence: "running" as const,
+        turn: "working" as const,
+        evidence: {
+          source: "codex_rollout",
+          native_state: "busy",
+          observed_at_ms: 2_000_000,
+          harness_version: null,
+        },
+      },
+    };
+    const { host, client, lastPush } = await sessionRig([OWN, active, BRIDGE]);
+    await host.fireIntent(INTENT_QUEUE, { action: "attach", key: sessionKey(active.locator) });
+
+    expect(lastPush()).toMatchObject({ canResume: false, continuationModes: [] });
+    expect(lastPush().sessions.find((row) => row.key === sessionKey(active.locator))?.runtimeStatus)
+      .toBe("busy");
+
+    await host.fireIntent(INTENT_QUEUE, { action: "resume", mode: "headless" });
+    expect(client.resumedWith).toEqual([]);
+    expect(lastPush().error).toContain("active in another agent window");
+  });
+
   it("retains a resumed conversation across switching and closes it only with the daemon", async () => {
     const { daemon, host, client, lastPush } = await sessionRig();
     const atlasKey = sessionKey(ATLAS.locator);
