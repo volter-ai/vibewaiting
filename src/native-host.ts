@@ -134,18 +134,34 @@ async function validateSettings(
 }
 
 async function localSupercodeCommand(): Promise<string | undefined> {
+  if (process.env["SUPERCODE_BIN"]) return process.env["SUPERCODE_BIN"];
   const marker = fileURLToPath(
     new URL(
       "../node_modules/.cache/vibewaiting/local-supercode-bin",
       import.meta.url,
     ),
   );
-  return (
-    process.env["SUPERCODE_BIN"] ??
-    (await readFile(marker, "utf8")
-      .then((value) => value.trim() || undefined)
-      .catch(() => undefined))
+  const localCommand = await readFile(marker, "utf8")
+    .then((value) => value.trim() || undefined)
+    .catch(() => undefined);
+  if (localCommand) return localCommand;
+
+  // The source marker is a deliberate local-development choice. Falling through to whatever
+  // `supercode` happens to be installed on PATH after (for example) `npm ci` deletes node_modules
+  // makes the browser silently exercise old protocol and activity behavior. A missing synced
+  // binary is a broken development stack, not permission to change products underneath the user.
+  const sourceMarker = fileURLToPath(
+    new URL("../.vibewaiting/local-supercode-source", import.meta.url),
   );
+  const configuredSource = await readFile(sourceMarker, "utf8")
+    .then((value) => value.trim())
+    .catch(() => "");
+  if (configuredSource) {
+    throw new Error(
+      `Local Supercode is configured from ${configuredSource}, but its synced binary marker is missing. Run npm run sync:local before starting Vibewaiting.`,
+    );
+  }
+  return undefined;
 }
 
 export async function runNativeHost(extensionOrigin: string | undefined): Promise<void> {

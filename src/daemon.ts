@@ -52,6 +52,7 @@ import {
   attachmentFor,
   matchesActive,
   projectSessions,
+  conversationUpdatedAt,
   sessionKey,
   sessionRuntimeStatus,
   type ActiveSessionRef,
@@ -1272,7 +1273,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       return activity ? { ...descriptor, activity } : descriptor;
     });
     all.sort((left, right) =>
-      (right.updated_at_ms ?? Number.MIN_SAFE_INTEGER) - (left.updated_at_ms ?? Number.MIN_SAFE_INTEGER)
+      (conversationUpdatedAt(right) ?? Number.MIN_SAFE_INTEGER) - (conversationUpdatedAt(left) ?? Number.MIN_SAFE_INTEGER)
       || left.locator.harness.localeCompare(right.locator.harness)
       || left.locator.session_id.localeCompare(right.locator.session_id));
     hasMoreSessions = all.length > sessionLimit

@@ -198,6 +198,18 @@ function previewMessage(descriptor: SessionDescriptor): { text: string; updatedA
   return null;
 }
 
+/**
+ * The timestamp a messenger should sort by.
+ *
+ * Harness processes may touch their session store for heartbeats or runtime bookkeeping without
+ * producing a new visible message. Sorting by that mtime makes quiet conversations jump above new
+ * messages. Prefer the same latest-message timestamp the row actually shows; retain store recency
+ * only for older descriptors that cannot provide one.
+ */
+export function conversationUpdatedAt(descriptor: SessionDescriptor): number | null {
+  return previewMessage(descriptor)?.updatedAt ?? descriptor.updated_at_ms ?? null;
+}
+
 export interface SessionProjectionOptions {
   /** Epoch ms the ages are measured against. Required — see the module doc. */
   now: number;
@@ -251,7 +263,7 @@ export function projectSessions(
   const rows: SessionRow[] = [];
   const ordered = options.preserveOrder
     ? descriptors
-    : [...descriptors].sort((a, b) => (b.updated_at_ms ?? 0) - (a.updated_at_ms ?? 0));
+    : [...descriptors].sort((a, b) => (conversationUpdatedAt(b) ?? 0) - (conversationUpdatedAt(a) ?? 0));
   for (const descriptor of ordered) {
     const row = projectSession(descriptor, options);
     if (seen.has(row.key)) continue;
