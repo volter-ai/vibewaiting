@@ -68,4 +68,9 @@ const transport: MessengerTransport = {
   },
 };
 
-mountMessenger(transport, { TerminalPanel: LocalTerminalPanel });
+mountMessenger(transport, {
+  TerminalPanel: LocalTerminalPanel,
+  requestPresentation: async (name) => {
+    await shell.requestPresentation(name);
+  },
+});

@@ -39,4 +39,7 @@ body { background:transparent }
   .vw-dialog { --scui-bg:#151515; --scui-bg-raised:#1c1c1b; --scui-fill:#242422; --scui-fill-strong:#30302d;
     --scui-fg:#f3f3ef; --scui-muted:#a3a39d; --scui-border:#353532; --scui-border-strong:#4a4a45; --scui-danger:#ff747d }
 }
+.vw-presentation-error { position:absolute; z-index:20; right:12px; bottom:12px; left:12px; padding:10px 12px;
+  border:1px solid color-mix(in srgb, #b42318 36%, transparent); border-radius:10px; color:#7a271a;
+  background:#fffbfa; box-shadow:0 8px 24px rgba(16,24,40,.14); font:500 12px/1.4 var(--scui-font) }
 `;

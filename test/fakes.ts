@@ -9,6 +9,7 @@ import type {
   DiscoverableSessionDescriptor,
   HarnessClientAdapter,
 } from "@volter-ai-dev/supercode-client";
+import type { StructuredLaunch } from "@volter-ai-dev/supercode-harness-sdk";
 import type {
   HarnessId,
   HarnessSettingChange,
@@ -201,6 +202,11 @@ export class FakeHarnessClient implements HarnessClientAdapter {
   readonly startedRuntimes: FakeRuntime[] = [];
   readonly resumedWith: RuntimeResumeParams[] = [];
   readonly resumedRuntimes: FakeRuntime[] = [];
+  readonly resumeInstructionsWith: Array<{
+    locator: SessionLocator;
+    cwd?: string;
+    policy?: "default" | "yolo";
+  }> = [];
   readonly attachedWith: RuntimeAttachExistingParams[] = [];
   readonly attachedRuntimes: FakeRuntime[] = [];
   readonly branchedWith: Array<{ locator: SessionLocator; target_harness?: SessionFormat }> = [];
@@ -395,8 +401,22 @@ export class FakeHarnessClient implements HarnessClientAdapter {
     throw new Error("FakeHarnessClient.handoffSession is not part of this test");
   }
 
-  async resumeInstructions(): Promise<never> {
-    throw new Error("FakeHarnessClient.resumeInstructions is not part of this test");
+  async resumeInstructions(params: {
+    locator: SessionLocator;
+    cwd?: string;
+    policy?: "default" | "yolo";
+  }): Promise<{ launch: StructuredLaunch }> {
+    this.resumeInstructionsWith.push(params);
+    return {
+      launch: {
+        program: params.locator.harness === "claude-code" ? "claude" : params.locator.harness,
+        arguments: params.locator.harness === "codex"
+          ? ["resume", params.locator.session_id]
+          : ["--resume", params.locator.session_id],
+        cwd: params.cwd ?? "/tmp/project",
+        env: {},
+      },
+    };
   }
 
   async close(): Promise<void> {

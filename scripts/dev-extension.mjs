@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { access, readFileSync, watch } from "node:fs";
 import { homedir, platform } from "node:os";
 import { delimiter, join, resolve } from "node:path";
@@ -41,6 +41,27 @@ function command(program, args, options = {}) {
         );
     });
   });
+}
+
+function terminalRuntimeReady() {
+  return (
+    spawnSync(
+      process.execPath,
+      ["-e", 'require("@homebridge/node-pty-prebuilt-multiarch")'],
+      { cwd: root, stdio: "ignore" },
+    ).status === 0
+  );
+}
+
+async function ensureTerminalRuntime() {
+  if (terminalRuntimeReady()) return;
+  process.stdout.write("repairing local terminal runtime\n");
+  await command("npm", [
+    "rebuild",
+    "@homebridge/node-pty-prebuilt-multiarch",
+  ]);
+  if (!terminalRuntimeReady())
+    throw new Error("The local terminal runtime could not be loaded after rebuild");
 }
 
 async function exists(path) {
@@ -286,6 +307,7 @@ async function reloadExtensionAndTabs() {
 }
 
 const choice = await browserChoice();
+await ensureTerminalRuntime();
 await command(process.execPath, [
   cliPath,
   "native",
@@ -352,7 +374,6 @@ for (const path of ["extension", "src", "widget"]) {
 }
 for (const path of [
   "package.json",
-  "package-lock.json",
   "tsconfig.json",
   "tsconfig.extension.json",
 ]) {

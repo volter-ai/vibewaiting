@@ -43,9 +43,13 @@ bounded, and unknown harnesses remain hidden instead of receiving a fabricated f
 The extension can also mirror local tmux sessions as a familiar terminal surface. Existing sessions
 are read-only and attach without changing their tmux window size. Sessions created from Vibewaiting
 run only the structured Claude Code or Codex command and may be controlled or stopped from the
-widget. The browser receives a short-lived, one-use attachment grant rather than a tmux session or
-socket handle; the loopback stream accepts only the exact extension origin, and closing the viewer
-releases its PTY without killing the durable tmux session.
+widget. Persisted Claude Code and Codex chats offer both paths explicitly: “Continue here” starts
+Supercode's headless managed runtime, while “Continue with terminal” asks Supercode for the native
+resume launch and runs it in an owned tmux session. The browser receives a short-lived, one-use
+attachment grant rather than a tmux session or socket handle; the loopback stream accepts only the
+exact extension origin, and closing the viewer
+releases its PTY without killing the durable tmux session. Widget Shell's named presentations keep
+the messenger phone-sized and reshape the same surface for a terminal before terminal UI appears.
 
 ### Zero-touch development
 

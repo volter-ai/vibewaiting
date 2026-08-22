@@ -18,8 +18,9 @@ import type {
 import type { TerminalUiState } from "@volter-ai-dev/supercode-terminal/ui";
 import { render as renderPreact } from "preact";
 import type { ComponentType, JSX } from "preact";
-import { useRef, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import type { MessengerTransport } from "./transport.js";
+import type { VibewaitingPresentation } from "../src/presentations.js";
 
 export type TerminalIntent =
   | { action: "terminalRefresh" }
@@ -51,6 +52,7 @@ export interface TerminalPanelProps {
 
 export interface MessengerOptions {
   TerminalPanel?: ComponentType<TerminalPanelProps>;
+  requestPresentation?(name: VibewaitingPresentation): Promise<void>;
 }
 
 function terminalHostState(value: unknown): TerminalHostState | null {
@@ -383,6 +385,11 @@ export function mountMessenger(
 
   function MessengerDialog({ state }: { state: unknown }): JSX.Element {
     const [terminalsOpen, setTerminalsOpen] = useState(false);
+    const [presentationPending, setPresentationPending] = useState(false);
+    const [presentationError, setPresentationError] = useState<string | null>(
+      null,
+    );
+    const presentationTransition = useRef(false);
     const terminalLauncher = useRef<HTMLButtonElement>(null);
     const normalized = normalizeUiState(state);
     const terminals = options.TerminalPanel ? terminalHostState(state) : null;
@@ -401,6 +408,69 @@ export function mountMessenger(
             : normalized.attachError,
         }
       : normalized;
+    async function requestTerminalPresentation(): Promise<boolean> {
+      if (terminalsOpen) return true;
+      if (presentationTransition.current) return false;
+      if (!options.requestPresentation) {
+        setPresentationError(
+          "The terminal surface is unavailable because its presentation bridge is missing.",
+        );
+        return false;
+      }
+      presentationTransition.current = true;
+      setPresentationPending(true);
+      setPresentationError(null);
+      try {
+        await options.requestPresentation("terminal");
+        setTerminalsOpen(true);
+        return true;
+      } catch (error) {
+        setPresentationError(
+          error instanceof Error
+            ? error.message
+            : "The terminal surface could not be opened.",
+        );
+        return false;
+      } finally {
+        presentationTransition.current = false;
+        setPresentationPending(false);
+      }
+    }
+
+    async function closeTerminalPresentation(): Promise<void> {
+      if (presentationTransition.current) return;
+      if (!options.requestPresentation) {
+        setPresentationError(
+          "The messenger surface is unavailable because its presentation bridge is missing.",
+        );
+        return;
+      }
+      presentationTransition.current = true;
+      setPresentationPending(true);
+      setPresentationError(null);
+      try {
+        await options.requestPresentation("messenger");
+        setTerminalsOpen(false);
+        queueMicrotask(() =>
+          terminalLauncher.current?.focus({ preventScroll: true }),
+        );
+        if (terminals?.attachment)
+          void sendBridgeIntent({ action: "terminalDismiss" });
+      } catch (error) {
+        setPresentationError(
+          error instanceof Error
+            ? error.message
+            : "The messenger surface could not be restored.",
+        );
+      } finally {
+        presentationTransition.current = false;
+        setPresentationPending(false);
+      }
+    }
+
+    useEffect(() => {
+      if (terminals?.attachment?.id) void requestTerminalPresentation();
+    }, [terminals?.attachment?.id]);
     return (
       <div
         class="vw-dialog"
@@ -430,9 +500,15 @@ export function mountMessenger(
                         type="button"
                         class="vw-terminal-launch"
                         aria-label={`Terminals · ${terminals.sessions.length} local sessions`}
+                        aria-busy={presentationPending}
+                        disabled={presentationPending}
                         onClick={() => {
-                          setTerminalsOpen(true);
-                          void sendBridgeIntent({ action: "terminalRefresh" });
+                          void requestTerminalPresentation().then((opened) => {
+                            if (opened)
+                              return sendBridgeIntent({
+                                action: "terminalRefresh",
+                              });
+                          });
                         }}
                       >
                         <span aria-hidden="true">&gt;_</span>
@@ -449,14 +525,14 @@ export function mountMessenger(
             state={terminals}
             send={sendBridgeIntent}
             onClose={() => {
-              setTerminalsOpen(false);
-              queueMicrotask(() =>
-                terminalLauncher.current?.focus({ preventScroll: true }),
-              );
-              if (terminals.attachment)
-                void sendBridgeIntent({ action: "terminalDismiss" });
+              void closeTerminalPresentation();
             }}
           />
+        ) : null}
+        {presentationError ? (
+          <div class="vw-presentation-error" role="alert">
+            {presentationError}
+          </div>
         ) : null}
         {bridgeDisconnected ? (
           <section class="vw-bridge-disconnected" role="alert">

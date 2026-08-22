@@ -8,8 +8,10 @@ import {
   startDaemon,
   type AgentController,
   type Daemon,
+  type TerminalService,
   type WidgetBridge,
 } from "../src/daemon.js";
+import type { TerminalServiceSnapshot } from "../src/terminal-service.js";
 import { DEFAULT_MAX_ENTRIES, DEFAULT_MAX_ENTRY_CHARS } from "../src/projection.js";
 import type { ExportReceipt, WidgetState } from "../src/projection.js";
 import type { MessengerPersistence, PersistedMessengerState } from "../src/persistence.js";
@@ -70,6 +72,7 @@ async function sessionRig(
   persistence?: MessengerPersistence,
   materializeArtifact?: (artifact: SessionArtifact) => Promise<ExportReceipt>,
   suppliedNow: () => number = () => 2_000_000,
+  terminalService?: TerminalService,
 ): Promise<Rig> {
   const client = suppliedClient ?? new FakeHarnessClient({ sessions });
   const host = new FakeWidgetHost();
@@ -84,9 +87,47 @@ async function sessionRig(
     attachHost: async () => host,
     ...(persistence ? { persistence } : {}),
     ...(materializeArtifact ? { materializeArtifact } : {}),
+    ...(terminalService ? { terminalService } : {}),
   });
   running.push(daemon);
   return { daemon, host, client, lastPush: () => daemon.lastPushed() as WidgetState };
+}
+
+class RecordingTerminalService implements TerminalService {
+  readonly continued: Array<{
+    harness: string;
+    launch: Parameters<TerminalService["continueSession"]>[1];
+  }> = [];
+  state: TerminalServiceSnapshot = {
+    available: true,
+    canOpenLocal: true,
+    sessions: [],
+    attachment: null,
+    error: null,
+  };
+
+  async snapshot(): Promise<TerminalServiceSnapshot> { return this.state; }
+  async create(): Promise<TerminalServiceSnapshot> { return this.state; }
+  async continueSession(
+    harness: Parameters<TerminalService["continueSession"]>[0],
+    launch: Parameters<TerminalService["continueSession"]>[1],
+  ): Promise<TerminalServiceSnapshot> {
+    this.continued.push({ harness, launch });
+    this.state = {
+      ...this.state,
+      attachment: {
+        id: "opaque-terminal-grant",
+        mode: "control",
+        expiresAt: Date.now() + 30_000,
+        baseUrl: "http://127.0.0.1:49999",
+      },
+    };
+    return this.state;
+  }
+  async attach(): Promise<TerminalServiceSnapshot> { return this.state; }
+  async close(): Promise<TerminalServiceSnapshot> { return this.state; }
+  async openLocal(): Promise<TerminalServiceSnapshot> { return this.state; }
+  async dismiss(): Promise<TerminalServiceSnapshot> { return this.state; }
 }
 
 class MemoryPersistence implements MessengerPersistence {
@@ -410,6 +451,41 @@ describe("messenger session state machine", () => {
     await daemon.stop();
     running.length = 0;
     expect(client.resumedRuntimes[0]?.closed).toBe(true);
+  });
+
+  it("continues a persisted session in tmux without starting the headless runtime lane", async () => {
+    const terminalService = new RecordingTerminalService();
+    const { daemon, host, client, lastPush } = await sessionRig(
+      [OWN, ATLAS, BRIDGE],
+      undefined,
+      undefined,
+      undefined,
+      () => 2_000_000,
+      terminalService,
+    );
+    await host.fireIntent(INTENT_QUEUE, { action: "attach", key: sessionKey(ATLAS.locator) });
+    expect(lastPush().continuationModes).toEqual(["headless", "terminal"]);
+
+    await host.fireIntent(INTENT_QUEUE, { action: "resume", mode: "terminal" });
+
+    expect(lastPush().error).toBeNull();
+    expect(client.resumedWith).toEqual([]);
+    expect(client.resumeInstructionsWith).toEqual([{
+      locator: ATLAS.locator,
+      cwd: ATLAS.cwd,
+    }]);
+    expect(terminalService.continued).toEqual([{
+      harness: "claude-code",
+      launch: {
+        program: "claude",
+        arguments: ["--resume", "atlas-1"],
+        cwd: ATLAS.cwd,
+        env: {},
+      },
+    }]);
+    expect(daemon.activeController().getSnapshot().connection.mode).toBe("mirror");
+    expect((lastPush() as WidgetState & { terminalHost: TerminalServiceSnapshot }).terminalHost.attachment?.id)
+      .toBe("opaque-terminal-grant");
   });
 
   it("branches a mirror and rekeys the retained controller when its native session appears", async () => {

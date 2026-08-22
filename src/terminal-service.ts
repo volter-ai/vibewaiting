@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import { homedir } from "node:os";
 import type { Duplex } from "node:stream";
+import type { HarnessId, StructuredLaunch } from "@volter-ai-dev/supercode-harness-sdk";
 import { TmuxTerminalHost, type TerminalAttachmentGrant, type TerminalSession } from "@volter-ai-dev/supercode-terminal";
 import { WebSocketServer } from "ws";
 import { shortCwd } from "./sessions.js";
@@ -82,6 +83,25 @@ export class LocalTerminalService {
     const session = await this.host.createSession({
       command: { program },
       cwd,
+      name: `vibewaiting-${label}-${randomUUID().slice(0, 8)}`,
+    });
+    const grant = this.host.issueAttachment(session.id, { mode: "control" });
+    this.attachment = { ...grant, baseUrl: this.baseUrl };
+    return await this.snapshot();
+  }
+
+  async continueSession(
+    harness: HarnessId,
+    launch: StructuredLaunch,
+  ): Promise<TerminalServiceSnapshot> {
+    const label = harness === "claude-code" ? "claude" : harness;
+    const session = await this.host.createSession({
+      command: {
+        program: launch.program,
+        arguments: launch.arguments,
+      },
+      cwd: launch.cwd,
+      env: launch.env,
       name: `vibewaiting-${label}-${randomUUID().slice(0, 8)}`,
     });
     const grant = this.host.issueAttachment(session.id, { mode: "control" });
