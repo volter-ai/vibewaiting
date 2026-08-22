@@ -73,4 +73,7 @@ mountMessenger(transport, {
   requestPresentation: async (name) => {
     await shell.requestPresentation(name);
   },
+  reportContentSize: async (size) => {
+    await shell.reportContentSize(size);
+  },
 });

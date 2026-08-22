@@ -20,7 +20,10 @@ import { render as renderPreact } from "preact";
 import type { ComponentType, JSX } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import type { MessengerTransport } from "./transport.js";
-import type { VibewaitingPresentation } from "../src/presentations.js";
+import {
+  terminalPresentationSize,
+  type VibewaitingPresentation,
+} from "../src/presentations.js";
 
 export type TerminalIntent =
   | { action: "terminalRefresh" }
@@ -53,6 +56,7 @@ export interface TerminalPanelProps {
 export interface MessengerOptions {
   TerminalPanel?: ComponentType<TerminalPanelProps>;
   requestPresentation?(name: VibewaitingPresentation): Promise<void>;
+  reportContentSize?(size: { width: number; height: number }): Promise<void>;
 }
 
 function terminalHostState(value: unknown): TerminalHostState | null {
@@ -471,6 +475,33 @@ export function mountMessenger(
     useEffect(() => {
       if (terminals?.attachment?.id) void requestTerminalPresentation();
     }, [terminals?.attachment?.id]);
+    useEffect(() => {
+      if (!terminalsOpen || !terminals || !options.reportContentSize) return;
+      let active = true;
+      void options
+        .reportContentSize(
+          terminalPresentationSize({
+            attached: terminals.attachment !== null,
+            sessionCount: terminals.sessions.length,
+          }),
+        )
+        .catch((error: unknown) => {
+          if (!active) return;
+          setPresentationError(
+            error instanceof Error
+              ? error.message
+              : "The terminal surface could not be resized.",
+          );
+        });
+      return () => {
+        active = false;
+      };
+    }, [
+      terminalsOpen,
+      terminals?.attachment?.id,
+      terminals?.sessions.length,
+      options.reportContentSize,
+    ]);
     return (
       <div
         class="vw-dialog"
