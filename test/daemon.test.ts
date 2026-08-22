@@ -94,9 +94,9 @@ async function sessionRig(
 }
 
 class RecordingTerminalService implements TerminalService {
-  readonly continued: Array<{
+  readonly launched: Array<{
     harness: string;
-    launch: Parameters<TerminalService["continueSession"]>[1];
+    launch: Parameters<TerminalService["launchSession"]>[1];
   }> = [];
   state: TerminalServiceSnapshot = {
     available: true,
@@ -108,11 +108,11 @@ class RecordingTerminalService implements TerminalService {
 
   async snapshot(): Promise<TerminalServiceSnapshot> { return this.state; }
   async create(): Promise<TerminalServiceSnapshot> { return this.state; }
-  async continueSession(
-    harness: Parameters<TerminalService["continueSession"]>[0],
-    launch: Parameters<TerminalService["continueSession"]>[1],
+  async launchSession(
+    harness: Parameters<TerminalService["launchSession"]>[0],
+    launch: Parameters<TerminalService["launchSession"]>[1],
   ): Promise<TerminalServiceSnapshot> {
-    this.continued.push({ harness, launch });
+    this.launched.push({ harness, launch });
     this.state = {
       ...this.state,
       attachment: {
@@ -131,7 +131,7 @@ class RecordingTerminalService implements TerminalService {
 }
 
 class MemoryPersistence implements MessengerPersistence {
-  state: PersistedMessengerState = { attention: [], drafts: {} };
+  state: PersistedMessengerState = { attention: [], drafts: {}, preferredLaunchModes: {} };
 
   async load(): Promise<PersistedMessengerState> {
     return structuredClone(this.state);
@@ -474,7 +474,7 @@ describe("messenger session state machine", () => {
       locator: ATLAS.locator,
       cwd: ATLAS.cwd,
     }]);
-    expect(terminalService.continued).toEqual([{
+    expect(terminalService.launched).toEqual([{
       harness: "claude-code",
       launch: {
         program: "claude",
@@ -486,6 +486,50 @@ describe("messenger session state machine", () => {
     expect(daemon.activeController().getSnapshot().connection.mode).toBe("mirror");
     expect((lastPush() as WidgetState & { terminalHost: TerminalServiceSnapshot }).terminalHost.attachment?.id)
       .toBe("opaque-terminal-grant");
+  });
+
+  it("starts a new native terminal session without entering the headless runtime lane", async () => {
+    const terminalService = new RecordingTerminalService();
+    const persistence = new MemoryPersistence();
+    const { daemon, host, client, lastPush } = await sessionRig(
+      [OWN, ATLAS, BRIDGE],
+      undefined,
+      persistence,
+      undefined,
+      () => 2_000_000,
+      terminalService,
+    );
+    const startedBefore = client.startedWith.length;
+    expect(lastPush().harnesses.find((item) => item.id === "codex")).toMatchObject({
+      launchModes: ["headless", "terminal"],
+      preferredLaunchMode: "headless",
+    });
+
+    await host.fireIntent(INTENT_QUEUE, {
+      action: "new",
+      harness: "codex",
+      mode: "terminal",
+      text: "inspect the current build",
+    });
+
+    expect(client.startedWith).toHaveLength(startedBefore);
+    expect(terminalService.launched).toEqual([{
+      harness: "codex",
+      launch: {
+        program: "codex",
+        arguments: ["inspect the current build"],
+        cwd: "/tmp/project",
+        env: {},
+      },
+    }]);
+    expect(lastPush().harnesses.find((item) => item.id === "codex")?.preferredLaunchMode)
+      .toBe("terminal");
+    expect((lastPush() as WidgetState & { terminalHost: TerminalServiceSnapshot }).terminalHost.attachment?.id)
+      .toBe("opaque-terminal-grant");
+
+    await daemon.stop();
+    running.length = 0;
+    expect(persistence.state.preferredLaunchModes).toEqual({ codex: "terminal" });
   });
 
   it("branches a mirror and rekeys the retained controller when its native session appears", async () => {

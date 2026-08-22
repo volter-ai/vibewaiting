@@ -6,6 +6,7 @@ import type { SessionAttention, SessionAttentionKind } from "./projection.js";
 export interface PersistedMessengerState {
   attention: SessionAttention[];
   drafts: Record<string, string>;
+  preferredLaunchModes: Record<string, "headless" | "terminal">;
 }
 
 export interface MessengerPersistence {
@@ -13,7 +14,7 @@ export interface MessengerPersistence {
   save(state: PersistedMessengerState): Promise<void>;
 }
 
-const EMPTY: PersistedMessengerState = { attention: [], drafts: {} };
+const EMPTY: PersistedMessengerState = { attention: [], drafts: {}, preferredLaunchModes: {} };
 const ATTENTION_KINDS = new Set<SessionAttentionKind>(["unseen", "finished", "failed"]);
 const MAX_RECORDS = 500;
 const MAX_DRAFT_CHARS = 50_000;
@@ -21,7 +22,7 @@ const MAX_PREVIEW_CHARS = 240;
 
 /** Treat this user-owned file as untrusted input: bound every collection and string before use. */
 export function readPersistedMessengerState(raw: unknown): PersistedMessengerState {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ...EMPTY, drafts: {} };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ...EMPTY, drafts: {}, preferredLaunchModes: {} };
   const record = raw as Record<string, unknown>;
   const attention: SessionAttention[] = [];
   if (Array.isArray(record["attention"])) {
@@ -48,7 +49,13 @@ export function readPersistedMessengerState(raw: unknown): PersistedMessengerSta
       if (key && typeof value === "string" && value !== "") drafts[key] = value.slice(0, MAX_DRAFT_CHARS);
     }
   }
-  return { attention, drafts };
+  const preferredLaunchModes: Record<string, "headless" | "terminal"> = {};
+  if (record["preferredLaunchModes"] && typeof record["preferredLaunchModes"] === "object" && !Array.isArray(record["preferredLaunchModes"])) {
+    for (const [key, value] of Object.entries(record["preferredLaunchModes"] as Record<string, unknown>).slice(0, MAX_RECORDS)) {
+      if (key && key.length <= 200 && (value === "headless" || value === "terminal")) preferredLaunchModes[key] = value;
+    }
+  }
+  return { attention, drafts, preferredLaunchModes };
 }
 
 /** Atomic, private local storage for messenger chrome only—never transcript contents or locators. */
@@ -63,7 +70,7 @@ export class FileMessengerPersistence implements MessengerPersistence {
     try {
       return readPersistedMessengerState(JSON.parse(await readFile(this.path, "utf8")));
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT" || error instanceof SyntaxError) return { ...EMPTY, drafts: {} };
+      if ((error as NodeJS.ErrnoException).code === "ENOENT" || error instanceof SyntaxError) return { ...EMPTY, drafts: {}, preferredLaunchModes: {} };
       throw error;
     }
   }

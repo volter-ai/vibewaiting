@@ -25,7 +25,7 @@ export const VIBEWAITING_PRESENTATIONS = Object.freeze({
   [VIBEWAITING_PRESENTATION.terminal]: {
     footprint: {
       mode: "resizable",
-      preferred: { width: 880, height: 640 },
+      preferred: { width: 880, height: 520 },
     },
     viewport: { mode: "responsive" },
     surface: "auto",
