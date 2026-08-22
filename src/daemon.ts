@@ -71,8 +71,8 @@ export const DEFAULT_INTENT_POLL_MS = 100;
  * running an older widget bundle; the default is deliberately event-driven.
  */
 export const DEFAULT_REPUSH_INTERVAL_MS = 0;
-/** How often the machine is re-scanned for coding sessions. Cheap: one RPC, capped result. */
-export const DEFAULT_DISCOVER_INTERVAL_MS = 5000;
+/** Slow recovery/inventory cadence. Claude Code and Codex update through the native index stream. */
+export const DEFAULT_DISCOVER_INTERVAL_MS = 60_000;
 /** Re-check a still-untitled new Claude/Codex session without rescanning topic history every tick. */
 const TOPIC_RETRY_MS = 30_000;
 /** Tool-stream churn is not unread. A no-status peer must be quiet this long before it asks for attention. */
@@ -141,6 +141,10 @@ export interface SessionDiscoveryClient {
     locators: SessionLocator[],
   ): Promise<{ subscription: string; initial: SessionActivityObservation[] }>;
   unsubscribeSessionActivity?(subscription: string): Promise<{ removed: boolean }>;
+  subscribeSessionIndex?(
+    query: DiscoveryQuery,
+  ): Promise<{ subscription: string; revision: number; initial: SessionDescriptor[] }>;
+  unsubscribeSessionIndex?(subscription: string): Promise<{ removed: boolean }>;
 }
 
 interface SessionActivityObservation {
@@ -164,6 +168,21 @@ interface SessionActivityEvent {
 interface SessionActivityEventSource {
   on(event: "sessionActivityEvent", listener: (event: SessionActivityEvent) => void): unknown;
   off(event: "sessionActivityEvent", listener: (event: SessionActivityEvent) => void): unknown;
+}
+
+interface SessionIndexEvent {
+  subscription: string;
+  revision?: number;
+  changes?: Array<
+    | { kind: "added" | "updated"; descriptor: SessionDescriptor }
+    | { kind: "removed"; key: { harness: HarnessId; session_id: string } }
+  >;
+  error?: { recoverable: true; message: string };
+}
+
+interface SessionIndexEventSource {
+  on(event: "sessionIndexEvent", listener: (event: SessionIndexEvent) => void): unknown;
+  off(event: "sessionIndexEvent", listener: (event: SessionIndexEvent) => void): unknown;
 }
 
 /**
@@ -859,6 +878,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   let activitySubscription: string | null = null;
   let activityLocatorFingerprint = "";
   let activitySubscriptionGeneration = 0;
+  let indexSubscription: string | null = null;
+  let indexRevision = 0;
+  let indexLimitFingerprint = "";
+  let indexSubscriptionGeneration = 0;
+  let indexRecoveryInFlight: Promise<void> | null = null;
   let sessionLimit = MAX_SESSION_ROWS;
   let hasMoreSessions = false;
   const initialTranscriptLimit = options.projection?.maxEntries ?? DEFAULT_MAX_ENTRIES;
@@ -874,7 +898,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // The first inventory establishes a baseline; only later transcript changes become unread.
   const observedUpdates = new Map<
     string,
-    Pick<SessionRow, "messages" | "preview" | "runtimeStatus"> & { announcedMessages: number | null }
+    Pick<SessionRow, "messages" | "preview" | "runtimeStatus"> & {
+      announcedMessages: number | null;
+      announcedPreview: string;
+    }
   >();
   const attention = new Map<string, SessionAttention>(persisted.attention.map((item) => [item.key, item]));
   const drafts = new Map<string, string>(Object.entries(persisted.drafts));
@@ -911,6 +938,20 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   let priorRuntimeActive = false;
   let priorRuntimeKey: string | null = null;
   let panelVisible = false;
+  let attentionTimer: ReturnType<typeof setTimeout> | null = null;
+  let attentionDueAt = Number.POSITIVE_INFINITY;
+  const scheduleAttentionSettlement = (delayMs: number): void => {
+    const dueAt = Date.now() + Math.max(0, delayMs);
+    if (attentionTimer && dueAt >= attentionDueAt) return;
+    if (attentionTimer) clearTimeout(attentionTimer);
+    attentionDueAt = dueAt;
+    attentionTimer = setTimeout(() => {
+      attentionTimer = null;
+      attentionDueAt = Number.POSITIVE_INFINITY;
+      void pushNow(false, "inventory");
+    }, Math.max(0, delayMs));
+    attentionTimer.unref?.();
+  };
 
   /**
    * Why the last attach did not happen. A logged-only failure is invisible to the person who tapped
@@ -944,13 +985,27 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     for (const row of sessions) {
       const prior = observedUpdates.get(row.key);
       let announcedMessages = prior?.announcedMessages ?? row.messages;
+      let announcedPreview = prior?.announcedPreview ?? row.preview;
       if (prior === undefined) {
-        observedUpdates.set(row.key, { messages: row.messages, preview: row.preview, runtimeStatus: row.runtimeStatus, announcedMessages });
+        observedUpdates.set(row.key, {
+          messages: row.messages,
+          preview: row.preview,
+          runtimeStatus: row.runtimeStatus,
+          announcedMessages,
+          announcedPreview,
+        });
         continue;
       }
       if (panelVisible && row.key === attached?.key) {
         announcedMessages = row.messages;
-        observedUpdates.set(row.key, { messages: row.messages, preview: row.preview, runtimeStatus: row.runtimeStatus, announcedMessages });
+        announcedPreview = row.preview;
+        observedUpdates.set(row.key, {
+          messages: row.messages,
+          preview: row.preview,
+          runtimeStatus: row.runtimeStatus,
+          announcedMessages,
+          announcedPreview,
+        });
         continue;
       }
       // A live peer can refresh its descriptor timestamp on every heartbeat. That is recency, not
@@ -960,20 +1015,35 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if (prior.runtimeStatus === "busy" && row.runtimeStatus === "idle") {
         markAttention(row.key, "finished", row.preview);
         announcedMessages = row.messages;
-      } else if (
-        row.runtimeStatus !== "busy" &&
-        ((row.messages !== null && announcedMessages !== null && row.messages > announcedMessages) ||
-          (row.preview !== "" && row.preview !== prior.preview)) &&
-        row.updatedAt !== null &&
-        observedAt - row.updatedAt >= DEFAULT_ATTENTION_SETTLE_MS
-      ) {
-        markAttention(row.key, "unseen", row.preview);
-        announcedMessages = row.messages;
-      } else if (row.messages !== null && prior.messages !== null && row.messages < prior.messages) {
-        // A rewritten/compacted session establishes a new baseline; it is not negative unread.
-        announcedMessages = row.messages;
+        announcedPreview = row.preview;
+      } else if (row.runtimeStatus !== "busy") {
+        if (row.messages !== null && prior.messages !== null && row.messages < prior.messages) {
+          // A rewritten/compacted session establishes a new baseline; it is not negative unread.
+          announcedMessages = row.messages;
+          announcedPreview = row.preview;
+        } else {
+          const hasUnannouncedUpdate =
+            (row.messages !== null && announcedMessages !== null && row.messages > announcedMessages) ||
+            (row.preview !== "" && row.preview !== announcedPreview);
+          if (hasUnannouncedUpdate && row.updatedAt !== null) {
+            const age = observedAt - row.updatedAt;
+            if (age >= DEFAULT_ATTENTION_SETTLE_MS) {
+              markAttention(row.key, "unseen", row.preview);
+              announcedMessages = row.messages;
+              announcedPreview = row.preview;
+            } else {
+              scheduleAttentionSettlement(DEFAULT_ATTENTION_SETTLE_MS - age);
+            }
+          }
+        }
       }
-      observedUpdates.set(row.key, { messages: row.messages, preview: row.preview, runtimeStatus: row.runtimeStatus, announcedMessages });
+      observedUpdates.set(row.key, {
+        messages: row.messages,
+        preview: row.preview,
+        runtimeStatus: row.runtimeStatus,
+        announcedMessages,
+        announcedPreview,
+      });
     }
 
     const runtimeActive =
@@ -1183,6 +1253,18 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         off: activityCandidate.off.bind(activityCandidate),
       }
     : null;
+  const indexCandidate = discovery as (SessionDiscoveryClient & Partial<SessionIndexEventSource>) | undefined;
+  const indexTransport = indexCandidate?.subscribeSessionIndex
+    && indexCandidate.unsubscribeSessionIndex
+    && indexCandidate.on
+    && indexCandidate.off
+    ? {
+        subscribe: indexCandidate.subscribeSessionIndex.bind(indexCandidate),
+        unsubscribe: indexCandidate.unsubscribeSessionIndex.bind(indexCandidate),
+        on: indexCandidate.on.bind(indexCandidate),
+        off: indexCandidate.off.bind(indexCandidate),
+      }
+    : null;
   const applyActivities = (activities: readonly SessionActivityObservation[]): boolean => {
     let changed = false;
     for (const activity of activities) {
@@ -1231,14 +1313,52 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       }
     }
   };
-  const refreshSessions = (): Promise<void> => {
+  const syncIndexSubscription = async (): Promise<void> => {
+    if (!indexTransport || stopped) return;
+    const fingerprint = String(sessionLimit);
+    if (fingerprint === indexLimitFingerprint) return;
+    indexLimitFingerprint = fingerprint;
+    const generation = ++indexSubscriptionGeneration;
+    try {
+      const opened = await indexTransport.subscribe({
+        harnesses: ["claude-code", "codex"],
+        limit: sessionLimit + 1,
+        include_topic_candidates: true,
+      });
+      if (stopped || generation !== indexSubscriptionGeneration) {
+        await indexTransport.unsubscribe(opened.subscription).catch(() => undefined);
+        return;
+      }
+      const previous = indexSubscription;
+      indexSubscription = opened.subscription;
+      indexRevision = opened.revision;
+      for (const harness of ["claude-code", "codex"] as const) {
+        sessionsByHarness.set(
+          harness,
+          opened.initial.filter((descriptor) => descriptor.locator.harness === harness).map(retainTopic),
+        );
+      }
+      rebuildDescriptors();
+      await syncActivitySubscription();
+      await pushNow(false, "inventory");
+      if (previous) await indexTransport.unsubscribe(previous).catch((error: unknown) => {
+        log(`old session index cleanup failed (continuing): ${message(error)}`);
+      });
+    } catch (error) {
+      if (!stopped && generation === indexSubscriptionGeneration) {
+        indexLimitFingerprint = "";
+        log(`session index subscription failed; retaining slow recovery scan: ${message(error)}`);
+      }
+    }
+  };
+  const refreshSessions = (harnesses: readonly HarnessId[] = DISCOVERY_HARNESSES): Promise<void> => {
     if (stopped || !discovery) return Promise.resolve();
-    // A slow native store must not let the five-second inventory tick pile up identical RPCs. Apart
+    // A slow native store must not let the recovery inventory tick pile up identical RPCs. Apart
     // from wasting work, those queued calls used to extend one timeout into minutes of repeated
     // "loading" failures.
     if (refreshInFlight) return refreshInFlight;
     const reportTimings = sessionsByHarness.size === 0;
-    refreshInFlight = Promise.all(DISCOVERY_HARNESSES.map(async (harness) => {
+    refreshInFlight = Promise.all(harnesses.map(async (harness) => {
       const startedAt = performance.now();
       try {
         const result = await discovery.discover({ harnesses: [harness], limit: sessionLimit + 1 });
@@ -1258,6 +1378,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     })).then(async () => {
       if (stopped) return;
       await syncActivitySubscription();
+      await syncIndexSubscription();
+      // The index snapshot and every targeted replacement already carry
+      // topic candidates. Retrying a second full Claude/Codex scan would
+      // quietly reintroduce the hot path this subscription removes.
+      if (indexSubscription) return;
       const now = performance.now();
       const pendingTopicKeys = descriptors
         .filter((descriptor) => descriptor.locator.harness === "claude-code" || descriptor.locator.harness === "codex")
@@ -1293,12 +1418,79 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     return refreshInFlight;
   };
 
+  const recoverSessionIndex = (): Promise<void> => {
+    if (indexRecoveryInFlight) return indexRecoveryInFlight;
+    indexLimitFingerprint = "";
+    indexRecoveryInFlight = syncIndexSubscription()
+      .finally(() => {
+        indexRecoveryInFlight = null;
+      });
+    return indexRecoveryInFlight;
+  };
+  const onSessionIndex = (event: SessionIndexEvent): void => {
+    if (stopped || event.subscription !== indexSubscription) return;
+    if (event.error) {
+      log(`session index reported a recoverable error: ${event.error.message}`);
+      return;
+    }
+    if (!Number.isSafeInteger(event.revision) || event.revision !== indexRevision + 1) {
+      log(`session index revision gap (${indexRevision} -> ${String(event.revision)}); resnapshotting`);
+      void recoverSessionIndex();
+      return;
+    }
+    indexRevision = event.revision;
+    for (const change of event.changes ?? []) {
+      if (change.kind === "removed") {
+        if (change.key.harness !== "claude-code" && change.key.harness !== "codex") continue;
+        const key = `${change.key.harness}\0${change.key.session_id}`;
+        const sessions = sessionsByHarness.get(change.key.harness);
+        const removed = sessions?.find((descriptor) =>
+          descriptor.locator.session_id === change.key.session_id);
+        if (sessions) {
+          sessionsByHarness.set(
+            change.key.harness,
+            sessions.filter((descriptor) =>
+              descriptor.locator.session_id !== change.key.session_id),
+          );
+        }
+        activityBySession.delete(key);
+        if (removed) {
+          const descriptorKey = sessionKey(removed.locator);
+          topicCandidatesBySession.delete(descriptorKey);
+          topicAttemptedAtBySession.delete(descriptorKey);
+        }
+        continue;
+      }
+      const descriptor = retainTopic(change.descriptor);
+      const harness = descriptor.locator.harness;
+      if (harness !== "claude-code" && harness !== "codex") continue;
+      const sessions = [...(sessionsByHarness.get(harness) ?? [])];
+      const existing = sessions.findIndex((candidate) =>
+        candidate.locator.session_id === descriptor.locator.session_id);
+      if (existing >= 0) sessions[existing] = descriptor;
+      else sessions.push(descriptor);
+      sessions.sort((left, right) =>
+        (right.updated_at_ms ?? Number.MIN_SAFE_INTEGER) - (left.updated_at_ms ?? Number.MIN_SAFE_INTEGER)
+        || left.locator.session_id.localeCompare(right.locator.session_id));
+      sessionsByHarness.set(harness, sessions.slice(0, sessionLimit + 1));
+    }
+    rebuildDescriptors();
+    void syncActivitySubscription();
+    void pushNow(false, "inventory");
+  };
+  indexTransport?.on("sessionIndexEvent", onSessionIndex);
+
   const discoverMs = options.discoverIntervalMs ?? DEFAULT_DISCOVER_INTERVAL_MS;
   // Begin polling only after bootstrap. Registering it before a slow runtime start let discovery
   // ticks compete with startup on the same harness transport.
   let stopDiscovery = (): void => undefined;
   const startDiscoveryPolling = (): void => {
-    if (discoverMs > 0 && discovery) stopDiscovery = host.every(discoverMs, () => refreshSessions());
+    if (discoverMs > 0 && discovery) stopDiscovery = host.every(discoverMs, () => {
+      const harnesses = indexSubscription
+        ? DISCOVERY_HARNESSES.filter((harness) => harness !== "claude-code" && harness !== "codex")
+        : DISCOVERY_HARNESSES;
+      if (harnesses.length > 0) return refreshSessions(harnesses);
+    });
   };
 
   const createController =
@@ -2017,16 +2209,26 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       stopped = true;
       if (timer) clearTimeout(timer);
       timer = null;
+      if (attentionTimer) clearTimeout(attentionTimer);
+      attentionTimer = null;
       await flushPersistence();
       stopRepush();
       stopDiscovery();
       activitySubscriptionGeneration += 1;
+      indexSubscriptionGeneration += 1;
       activityTransport?.off("sessionActivityEvent", onSessionActivity);
+      indexTransport?.off("sessionIndexEvent", onSessionIndex);
       if (activityTransport && activitySubscription) {
         await activityTransport.unsubscribe(activitySubscription).catch((error: unknown) => {
           log(`activity subscription cleanup failed (continuing): ${message(error)}`);
         });
         activitySubscription = null;
+      }
+      if (indexTransport && indexSubscription) {
+        await indexTransport.unsubscribe(indexSubscription).catch((error: unknown) => {
+          log(`session index cleanup failed (continuing): ${message(error)}`);
+        });
+        indexSubscription = null;
       }
       stopIntentPump();
       unsubscribe();
