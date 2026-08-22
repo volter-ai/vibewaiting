@@ -448,7 +448,6 @@ if (await exists(localSourceMarker)) {
     "sdk/terminal/src/ui.jsx",
     "sdk/terminal/styles.css",
     "sdk/terminal/ui.d.ts",
-    "sdk/terminal/ui.mjs",
     "sdk/ui/core.mjs",
     "sdk/ui/controller.mjs",
     "sdk/ui/index.d.ts",

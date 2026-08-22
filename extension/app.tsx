@@ -27,6 +27,9 @@ function LocalTerminalPanel({
         send({ action: "terminalAttach", sessionId, mode })
       }
       onStop={(sessionId) => send({ action: "terminalClose", sessionId })}
+      onOpen={(sessionId) =>
+        send({ action: "terminalOpenLocal", sessionId })
+      }
       onDismiss={() => send({ action: "terminalDismiss" })}
     />
   );
