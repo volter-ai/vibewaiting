@@ -1237,9 +1237,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       updatedByKey.delete(key);
       return [updated];
     });
-    // New conversations append while the panel is open instead of displacing the row under the
-    // pointer. Closing the panel restores ordinary newest-first ordering before the next open.
-    descriptors = [...stable, ...updatedByKey.values()].slice(0, sessionLimit);
+    // New conversations append while the panel is open instead of reordering the row under the
+    // pointer. At a full page they replace only the oldest visible rows; appending after all 30 and
+    // then truncating used to make every newly-created conversation invisible until panel close.
+    const additions = [...updatedByKey.values()];
+    descriptors = [
+      ...stable.slice(0, Math.max(0, sessionLimit - additions.length)),
+      ...additions,
+    ].slice(0, sessionLimit);
   };
   const activityCandidate = discovery as (SessionDiscoveryClient & Partial<SessionActivityEventSource>) | undefined;
   const activityTransport = activityCandidate?.subscribeSessionActivity
