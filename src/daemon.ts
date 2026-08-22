@@ -25,7 +25,7 @@ import type {
   SupercodeClientAction,
   SupercodeClientSnapshot,
 } from "@volter-ai-dev/supercode-client";
-import type { DiscoveryQuery, HarnessId, HarnessSettingChange, JsonValue, SessionArtifact, SessionDescriptor, SessionFormat } from "@volter-ai-dev/supercode-harness-sdk";
+import type { DiscoveryQuery, HarnessId, HarnessSettingChange, JsonValue, SessionArtifact, SessionDescriptor, SessionFormat, SessionLocator } from "@volter-ai-dev/supercode-harness-sdk";
 import { createLucarneInjector } from "@volter-ai-dev/widget-shell/lucarne";
 import { WidgetHost } from "lucarne/widget/host";
 import {
@@ -137,6 +137,33 @@ export interface AgentController {
  */
 export interface SessionDiscoveryClient {
   discover(query: DiscoveryQuery): Promise<{ sessions: SessionDescriptor[] }>;
+  subscribeSessionActivity?(
+    locators: SessionLocator[],
+  ): Promise<{ subscription: string; initial: SessionActivityObservation[] }>;
+  unsubscribeSessionActivity?(subscription: string): Promise<{ removed: boolean }>;
+}
+
+interface SessionActivityObservation {
+  harness: HarnessId;
+  session_id: string;
+  presence: "persisted" | "running" | "shutting_down";
+  turn: "unknown" | "idle" | "working" | "needs_input";
+  evidence: {
+    source: string;
+    native_state: string | null;
+    observed_at_ms: number;
+    harness_version: string | null;
+  };
+}
+
+interface SessionActivityEvent {
+  subscription: string;
+  activities: SessionActivityObservation[];
+}
+
+interface SessionActivityEventSource {
+  on(event: "sessionActivityEvent", listener: (event: SessionActivityEvent) => void): unknown;
+  off(event: "sessionActivityEvent", listener: (event: SessionActivityEvent) => void): unknown;
 }
 
 /**
@@ -828,6 +855,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const discovery: SessionDiscoveryClient | undefined = options.discoveryClient ?? options.client;
   /** The last global scan, held whole — the row keys the panel echoes back resolve through it. */
   let descriptors: readonly SessionDescriptor[] = [];
+  const activityBySession = new Map<string, SessionActivityObservation>();
+  let activitySubscription: string | null = null;
+  let activityLocatorFingerprint = "";
+  let activitySubscriptionGeneration = 0;
   let sessionLimit = MAX_SESSION_ROWS;
   let hasMoreSessions = false;
   const initialTranscriptLimit = options.projection?.maxEntries ?? DEFAULT_MAX_ENTRIES;
@@ -1101,6 +1132,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const topicCandidatesBySession = new Map<string, SessionDescriptor["preview_candidates"]>();
   const topicAttemptedAtBySession = new Map<string, number>();
   const retainTopic = (descriptor: SessionDescriptor): SessionDescriptor => {
+    const activity = (descriptor as SessionDescriptor & { activity?: SessionActivityObservation | null }).activity;
+    if (activity) activityBySession.set(`${activity.harness}\0${activity.session_id}`, activity);
     const key = sessionKey(descriptor.locator);
     if (descriptor.preview_candidates?.length) {
       topicCandidatesBySession.set(key, descriptor.preview_candidates);
@@ -1110,7 +1143,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     return retained?.length ? { ...descriptor, preview_candidates: retained } : descriptor;
   };
   const rebuildDescriptors = (preserveVisibleOrder = panelVisible): void => {
-    const all = [...sessionsByHarness.values()].flat();
+    const all = [...sessionsByHarness.values()].flat().map((descriptor) => {
+      const activity = activityBySession.get(
+        `${descriptor.locator.harness}\0${descriptor.locator.session_id}`,
+      );
+      return activity ? { ...descriptor, activity } : descriptor;
+    });
     all.sort((left, right) =>
       (right.updated_at_ms ?? Number.MIN_SAFE_INTEGER) - (left.updated_at_ms ?? Number.MIN_SAFE_INTEGER)
       || left.locator.harness.localeCompare(right.locator.harness)
@@ -1132,6 +1170,66 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     // New conversations append while the panel is open instead of displacing the row under the
     // pointer. Closing the panel restores ordinary newest-first ordering before the next open.
     descriptors = [...stable, ...updatedByKey.values()].slice(0, sessionLimit);
+  };
+  const activityCandidate = discovery as (SessionDiscoveryClient & Partial<SessionActivityEventSource>) | undefined;
+  const activityTransport = activityCandidate?.subscribeSessionActivity
+    && activityCandidate.unsubscribeSessionActivity
+    && activityCandidate.on
+    && activityCandidate.off
+    ? {
+        subscribe: activityCandidate.subscribeSessionActivity.bind(activityCandidate),
+        unsubscribe: activityCandidate.unsubscribeSessionActivity.bind(activityCandidate),
+        on: activityCandidate.on.bind(activityCandidate),
+        off: activityCandidate.off.bind(activityCandidate),
+      }
+    : null;
+  const applyActivities = (activities: readonly SessionActivityObservation[]): boolean => {
+    let changed = false;
+    for (const activity of activities) {
+      const key = `${activity.harness}\0${activity.session_id}`;
+      const previous = activityBySession.get(key);
+      const before = previous
+        ? `${previous.presence}:${previous.turn}:${previous.evidence.source}:${previous.evidence.native_state ?? ""}:${previous.evidence.harness_version ?? ""}`
+        : "";
+      const after = `${activity.presence}:${activity.turn}:${activity.evidence.source}:${activity.evidence.native_state ?? ""}:${activity.evidence.harness_version ?? ""}`;
+      activityBySession.set(key, activity);
+      if (before !== after) changed = true;
+    }
+    if (changed) rebuildDescriptors();
+    return changed;
+  };
+  const onSessionActivity = (event: SessionActivityEvent): void => {
+    if (stopped || event.subscription !== activitySubscription) return;
+    if (applyActivities(event.activities)) void pushNow(false, "inventory");
+  };
+  activityTransport?.on("sessionActivityEvent", onSessionActivity);
+
+  const syncActivitySubscription = async (): Promise<void> => {
+    if (!activityTransport || stopped) return;
+    const locators = descriptors.map((descriptor) => descriptor.locator);
+    const fingerprint = locators.map(sessionKey).sort().join("\n");
+    if (fingerprint === activityLocatorFingerprint) return;
+    activityLocatorFingerprint = fingerprint;
+    const generation = ++activitySubscriptionGeneration;
+    if (locators.length === 0) return;
+    try {
+      const opened = await activityTransport.subscribe(locators);
+      if (stopped || generation !== activitySubscriptionGeneration) {
+        await activityTransport.unsubscribe(opened.subscription).catch(() => undefined);
+        return;
+      }
+      const previous = activitySubscription;
+      activitySubscription = opened.subscription;
+      if (applyActivities(opened.initial)) await pushNow(false, "inventory");
+      if (previous) await activityTransport.unsubscribe(previous).catch((error: unknown) => {
+        log(`old activity subscription cleanup failed (continuing): ${message(error)}`);
+      });
+    } catch (error) {
+      if (!stopped && generation === activitySubscriptionGeneration) {
+        activityLocatorFingerprint = "";
+        log(`session activity subscription failed (continuing): ${message(error)}`);
+      }
+    }
   };
   const refreshSessions = (): Promise<void> => {
     if (stopped || !discovery) return Promise.resolve();
@@ -1159,6 +1257,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       }
     })).then(async () => {
       if (stopped) return;
+      await syncActivitySubscription();
       const now = performance.now();
       const pendingTopicKeys = descriptors
         .filter((descriptor) => descriptor.locator.harness === "claude-code" || descriptor.locator.harness === "codex")
@@ -1921,6 +2020,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       await flushPersistence();
       stopRepush();
       stopDiscovery();
+      activitySubscriptionGeneration += 1;
+      activityTransport?.off("sessionActivityEvent", onSessionActivity);
+      if (activityTransport && activitySubscription) {
+        await activityTransport.unsubscribe(activitySubscription).catch((error: unknown) => {
+          log(`activity subscription cleanup failed (continuing): ${message(error)}`);
+        });
+        activitySubscription = null;
+      }
       stopIntentPump();
       unsubscribe();
       await Promise.all([...attachTasks].map((task) => task.catch(() => undefined)));
