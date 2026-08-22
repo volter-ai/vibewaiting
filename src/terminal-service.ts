@@ -90,7 +90,7 @@ export class LocalTerminalService {
     return await this.snapshot();
   }
 
-  async continueSession(
+  async launchSession(
     harness: HarnessId,
     launch: StructuredLaunch,
   ): Promise<TerminalServiceSnapshot> {

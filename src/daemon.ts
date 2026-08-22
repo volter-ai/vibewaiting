@@ -25,6 +25,7 @@ import type {
   SupercodeClientAction,
   SupercodeClientSnapshot,
 } from "@volter-ai-dev/supercode-client";
+import { createNativeStartLaunch } from "@volter-ai-dev/supercode-harness-sdk";
 import type { DiscoveryQuery, HarnessId, HarnessSettingChange, JsonValue, SessionArtifact, SessionDescriptor, SessionFormat, SessionLocator, StructuredLaunch } from "@volter-ai-dev/supercode-harness-sdk";
 import type { ContinuationMode } from "@volter-ai-dev/supercode-ui";
 import { createLucarneInjector } from "@volter-ai-dev/widget-shell/lucarne";
@@ -347,7 +348,7 @@ export interface TerminalService {
     harness: "claude-code" | "codex",
     cwd: string,
   ): Promise<TerminalServiceSnapshot>;
-  continueSession(
+  launchSession(
     harness: HarnessId,
     launch: StructuredLaunch,
   ): Promise<TerminalServiceSnapshot>;
@@ -734,6 +735,7 @@ export function parseDraftIntent(payload: unknown): DraftIntent | null {
 
 export interface NewChatIntent {
   harness: HarnessId;
+  mode: ContinuationMode;
   text: string;
   context: PromptContextItem[];
   images: PromptImageItem[];
@@ -742,15 +744,17 @@ export interface NewChatIntent {
 /** A new chat is lazy: the runtime is replaced only when the first message is actually sent. */
 export function parseNewChatIntent(payload: unknown): NewChatIntent | null {
   if (!payload || typeof payload !== "object") return null;
-  if (Object.keys(payload).some((key) => !["action", "harness", "text", "context", "images"].includes(key))) return null;
-  const { action, harness, text, context: contextValue, images: imageValue } = payload as { action?: unknown; harness?: unknown; text?: unknown; context?: unknown; images?: unknown };
+  if (Object.keys(payload).some((key) => !["action", "harness", "mode", "text", "context", "images"].includes(key))) return null;
+  const { action, harness, mode: modeValue, text, context: contextValue, images: imageValue } = payload as { action?: unknown; harness?: unknown; mode?: unknown; text?: unknown; context?: unknown; images?: unknown };
   if (action !== "new" || typeof harness !== "string" || typeof text !== "string") return null;
+  const mode = modeValue === undefined ? "headless" : modeValue;
+  if (mode !== "headless" && mode !== "terminal") return null;
   const trimmedHarness = harness.trim();
   const trimmedText = text.trim();
   const context = parsePromptContext(contextValue);
   const images = parsePromptImages(imageValue);
-  if (trimmedHarness === "" || (trimmedText === "" && !images?.length) || context === null || images === null) return null;
-  return { harness: trimmedHarness as HarnessId, text: trimmedText, context, images };
+  if (trimmedHarness === "" || (trimmedText === "" && !images?.length) || context === null || images === null || (mode === "terminal" && trimmedText === "")) return null;
+  return { harness: trimmedHarness as HarnessId, mode, text: trimmedText, context, images };
 }
 
 /** Reading a chat is explicit acknowledgement; inventory counts are never treated as unread. */
@@ -871,9 +875,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const persisted = persistence
     ? await persistence.load().catch((error: unknown) => {
         log(`messenger state load failed (continuing): ${message(error)}`);
-        return { attention: [], drafts: {} };
+        return { attention: [], drafts: {}, preferredLaunchModes: {} };
       })
-    : { attention: [], drafts: {} };
+    : { attention: [], drafts: {}, preferredLaunchModes: {} };
 
   let stopped = false;
   let lastPushed: WidgetState | null = null;
@@ -922,13 +926,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   >();
   const attention = new Map<string, SessionAttention>(persisted.attention.map((item) => [item.key, item]));
   const drafts = new Map<string, string>(Object.entries(persisted.drafts));
+  const preferredLaunchModes = new Map<string, ContinuationMode>(Object.entries(persisted.preferredLaunchModes));
   let persistenceTimer: ReturnType<typeof setTimeout> | null = null;
   let persistenceInFlight: Promise<void> = Promise.resolve();
   const flushPersistence = (): Promise<void> => {
     if (!persistence) return Promise.resolve();
     if (persistenceTimer) clearTimeout(persistenceTimer);
     persistenceTimer = null;
-    const state = { attention: [...attention.values()], drafts: Object.fromEntries(drafts) };
+    const state = { attention: [...attention.values()], drafts: Object.fromEntries(drafts), preferredLaunchModes: Object.fromEntries(preferredLaunchModes) };
     persistenceInFlight = persistenceInFlight
       .catch(() => undefined)
       .then(() => persistence.save(state))
@@ -1150,6 +1155,22 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       recoverable: actionError === null && projected.recoverable,
       canExport: typeof activeController().exportSession === "function" && snapshot.operation === null && Boolean(snapshot.activeSessionKey || snapshot.activeSessionId),
       canReduce: projected.canReduce,
+      harnesses: projected.harnesses.map((item) => {
+        const launchModes: ContinuationMode[] = item.startable
+          ? [
+              "headless",
+              ...(options.terminalService && terminalHost?.available && (item.id === "claude-code" || item.id === "codex")
+                ? ["terminal" as const]
+                : []),
+            ]
+          : [];
+        const preferred = preferredLaunchModes.get(item.id);
+        return {
+          ...item,
+          launchModes,
+          preferredLaunchMode: preferred && launchModes.includes(preferred) ? preferred : launchModes[0] ?? null,
+        };
+      }),
       continuationModes: projected.canResume
         ? [
             "headless",
@@ -1910,14 +1931,33 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       actionError = null;
       attachSeq += 1;
       try {
-        await releaseForeignView();
-        await controller.dispatch({ type: "start", harness: newChat.harness });
-        await controller.dispatch({ type: "send", text: newChat.text, ...(newChat.context.length ? { context: newChat.context } : {}), ...(newChat.images.length ? { images: newChat.images } : {}) });
+        if (newChat.mode === "terminal") {
+          if (!options.terminalService || !terminalHost?.available) {
+            throw new Error("this host does not provide a local terminal");
+          }
+          if (newChat.context.length || newChat.images.length) {
+            throw new Error("terminal starts currently accept text only");
+          }
+          const launch = createNativeStartLaunch({
+            harness: newChat.harness as "claude-code" | "codex",
+            cwd: options.workspace,
+            prompt: newChat.text,
+            ...(options.policy ? { policy: options.policy } : {}),
+          });
+          terminalHost = await options.terminalService.launchSession(newChat.harness, launch);
+          log(`started a new ${newChat.harness} session in an owned tmux terminal`);
+        } else {
+          await releaseForeignView();
+          await controller.dispatch({ type: "start", harness: newChat.harness });
+          await controller.dispatch({ type: "send", text: newChat.text, ...(newChat.context.length ? { context: newChat.context } : {}), ...(newChat.images.length ? { images: newChat.images } : {}) });
+        }
+        preferredLaunchModes.set(newChat.harness, newChat.mode);
+        schedulePersistence();
       } catch (e) {
         actionError = message(e);
         log(`new chat failed: ${actionError}`);
       }
-      await pushNow();
+      await pushNow(newChat.mode === "terminal");
       return;
     }
     const send = parseSendIntent(intent.payload);
@@ -1992,7 +2032,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
             cwd: descriptor.cwd ?? snapshot.workspace,
             ...(options.policy ? { policy: options.policy } : {}),
           });
-          terminalHost = await options.terminalService.continueSession(
+          terminalHost = await options.terminalService.launchSession(
             descriptor.locator.harness,
             launch,
           );
