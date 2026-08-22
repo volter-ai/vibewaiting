@@ -30,6 +30,7 @@ export type TerminalIntent =
       mode: "observe" | "control";
     }
   | { action: "terminalClose"; sessionId: string }
+  | { action: "terminalOpenLocal"; sessionId: string }
   | { action: "terminalDismiss" };
 
 type WidgetIntent =
@@ -91,6 +92,7 @@ function terminalHostState(value: unknown): TerminalHostState | null {
   return {
     attachment,
     available: host.available === true,
+    canOpenLocal: host.canOpenLocal === true,
     error: typeof host.error === "string" ? host.error : null,
     sessions,
   };

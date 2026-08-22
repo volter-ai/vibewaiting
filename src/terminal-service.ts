@@ -8,6 +8,7 @@ import { shortCwd } from "./sessions.js";
 
 export interface TerminalServiceSnapshot {
   available: boolean;
+  canOpenLocal: boolean;
   sessions: TerminalSession[];
   attachment: (TerminalAttachmentGrant & { baseUrl: string }) | null;
   error: string | null;
@@ -56,10 +57,22 @@ export class LocalTerminalService {
         cwd: shortCwd(session.cwd, homedir()) || null,
       }));
       this.error = null;
-      return { attachment: this.attachment, available: true, error: null, sessions };
+      return {
+        attachment: this.attachment,
+        available: true,
+        canOpenLocal: process.platform === "darwin",
+        error: null,
+        sessions,
+      };
     } catch (error) {
       this.error = message(error);
-      return { attachment: null, available: false, error: this.error, sessions: [] };
+      return {
+        attachment: null,
+        available: false,
+        canOpenLocal: process.platform === "darwin",
+        error: this.error,
+        sessions: [],
+      };
     }
   }
 
@@ -85,6 +98,11 @@ export class LocalTerminalService {
   async close(sessionId: string): Promise<TerminalServiceSnapshot> {
     this.host.closeSession(sessionId);
     if (this.attachment) this.attachment = null;
+    return await this.snapshot();
+  }
+
+  async openLocal(sessionId: string): Promise<TerminalServiceSnapshot> {
+    await this.host.openLocalTerminal(sessionId);
     return await this.snapshot();
   }
 

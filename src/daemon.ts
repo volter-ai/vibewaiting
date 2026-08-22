@@ -301,6 +301,7 @@ export interface TerminalService {
     mode: "observe" | "control",
   ): Promise<TerminalServiceSnapshot>;
   close(sessionId: string): Promise<TerminalServiceSnapshot>;
+  openLocal(sessionId: string): Promise<TerminalServiceSnapshot>;
   dismiss(): Promise<TerminalServiceSnapshot>;
 }
 
@@ -313,6 +314,7 @@ type TerminalIntent =
       mode: "observe" | "control";
     }
   | { action: "terminalClose"; sessionId: string }
+  | { action: "terminalOpenLocal"; sessionId: string }
   | { action: "terminalDismiss" };
 
 function parseTerminalHostIntent(payload: unknown): TerminalIntent | null {
@@ -336,6 +338,13 @@ function parseTerminalHostIntent(payload: unknown): TerminalIntent | null {
     Object.keys(value).length === 2
   ) {
     return { action: "terminalClose", sessionId: value.sessionId };
+  }
+  if (
+    value.action === "terminalOpenLocal" &&
+    typeof value.sessionId === "string" &&
+    Object.keys(value).length === 2
+  ) {
+    return { action: "terminalOpenLocal", sessionId: value.sessionId };
   }
   if (
     value.action === "terminalAttach" &&
@@ -1477,11 +1486,16 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
             terminalHost = await options.terminalService.close(
               terminalIntent.sessionId,
             );
+          else if (terminalIntent.action === "terminalOpenLocal")
+            terminalHost = await options.terminalService.openLocal(
+              terminalIntent.sessionId,
+            );
           else terminalHost = await options.terminalService.dismiss();
         } catch (error) {
           terminalHost = {
             attachment: null,
             available: false,
+            canOpenLocal: terminalHost?.canOpenLocal ?? false,
             error: message(error),
             sessions: terminalHost?.sessions ?? [],
           };
