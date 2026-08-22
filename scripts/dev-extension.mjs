@@ -250,9 +250,24 @@ function extensionTarget(targets) {
 }
 
 async function waitForExtensionTarget() {
+  let wakeRequested = false;
   for (let attempt = 0; attempt < 30; attempt += 1) {
-    const target = extensionTarget(await json("/json/list"));
+    const targets = await json("/json/list");
+    const target = extensionTarget(targets);
     if (target?.webSocketDebuggerUrl) return target;
+    if (!wakeRequested) {
+      wakeRequested = true;
+      const page = targets.find(
+        (candidate) =>
+          candidate.type === "page" &&
+          /^https?:\/\//.test(candidate.url) &&
+          candidate.webSocketDebuggerUrl,
+      );
+      if (page?.webSocketDebuggerUrl)
+        await cdpCommand(page.webSocketDebuggerUrl, "Page.reload", {
+          ignoreCache: true,
+        }).catch(() => undefined);
+    }
     await delay(100);
   }
   throw new Error(
@@ -274,8 +289,34 @@ async function ensureDevSettings() {
     process.stdout.write(`development workspace: ${settings.workspace}\n`);
 }
 
-async function reloadExtensionAndTabs() {
+async function disconnectNativeHost({ required = true } = {}) {
   const extension = await waitForExtensionTarget();
+  const expression = `typeof globalThis.__vibewaitingDisconnectNativeForDevelopment==="function"?{type:"development-native-disconnected",disconnected:globalThis.__vibewaitingDisconnectNativeForDevelopment()}:null`;
+  let result;
+  try {
+    result = await cdpCommand(
+      extension.webSocketDebuggerUrl,
+      "Runtime.evaluate",
+      { expression, awaitPromise: true, returnByValue: true },
+    );
+  } catch (error) {
+    if (required) throw error;
+    return false;
+  }
+  const response = result?.result?.value;
+  if (response?.type !== "development-native-disconnected") {
+    if (required)
+      throw new Error("The loaded extension does not support clean native-host reloads");
+    return false;
+  }
+  if (response.disconnected)
+    process.stdout.write("native host disconnected for development reload\n");
+  return true;
+}
+
+async function reloadExtensionAndTabs() {
+  let extension = await waitForExtensionTarget();
+  const supportsCleanDisconnect = await disconnectNativeHost({ required: false });
   await cdpCommand(
     extension.webSocketDebuggerUrl,
     "Runtime.evaluate",
@@ -286,6 +327,24 @@ async function reloadExtensionAndTabs() {
     const current = await json("/json/list");
     if (extensionTarget(current)) break;
     await delay(100);
+  }
+  // The first run after upgrading an older development bundle cannot ask that old background to
+  // disconnect. Load the new bundle once, use its handshake, then reload a second time so the very
+  // first resulting connection also starts the freshly-built native daemon.
+  if (!supportsCleanDisconnect) {
+    await disconnectNativeHost();
+    extension = await waitForExtensionTarget();
+    await cdpCommand(
+      extension.webSocketDebuggerUrl,
+      "Runtime.evaluate",
+      { expression: "chrome.runtime.reload()", returnByValue: true },
+      true,
+    );
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const current = await json("/json/list");
+      if (extensionTarget(current)) break;
+      await delay(100);
+    }
   }
   const current = await json("/json/list");
   const pages = current.filter(
