@@ -16,8 +16,7 @@ body { background:transparent }
   width:100%; height:100%; border:0; border-radius:0;
 }
 
-.vw-dialog:has(.vw-terminal-launch) .scui-head-copy { margin-right:38px }
-.vw-terminal-launch { position:absolute; z-index:4; right:84px; top:10px; display:grid; width:30px; height:30px; place-items:center;
+.vw-terminal-launch { position:relative; display:grid; width:30px; height:30px; place-items:center;
   padding:0; border:0; border-radius:8px; color:var(--scui-muted); background:transparent; font:600 11px/1 var(--scui-font); cursor:pointer }
 .vw-terminal-launch:hover { color:var(--scui-fg); background:var(--scui-fill) }
 .vw-terminal-launch > span { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace }
