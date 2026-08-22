@@ -56,6 +56,24 @@ export interface ActiveSessionRef {
   sessionId: string | null;
 }
 
+interface NormalizedActivity {
+  presence: "persisted" | "running" | "shutting_down";
+  turn: "unknown" | "idle" | "working" | "needs_input";
+}
+
+function runtimeStatus(descriptor: SessionDescriptor): SessionRow["runtimeStatus"] {
+  const activity = (descriptor as SessionDescriptor & { activity?: NormalizedActivity | null }).activity;
+  if (activity) {
+    if (activity.presence === "persisted") return null;
+    if (activity.turn === "working") return "busy";
+    if (activity.turn === "idle" || activity.turn === "needs_input") return "idle";
+    return "running";
+  }
+  return descriptor.live_status === "running" || descriptor.live_status === "busy" || descriptor.live_status === "idle"
+    ? descriptor.live_status
+    : null;
+}
+
 /** What the Agent panel's header says it is following. */
 export interface AttachedSession {
   /** The row key, or `""` when the active session has not appeared in discovery yet (a just-started one). */
@@ -215,10 +233,7 @@ export function projectSession(
     messages: descriptor.message_count,
     active: matchesActive(descriptor, options.active),
     live: isLive(descriptor.updated_at_ms, options.now),
-    runtimeStatus:
-      descriptor.live_status === "running" || descriptor.live_status === "busy" || descriptor.live_status === "idle"
-        ? descriptor.live_status
-        : null,
+    runtimeStatus: runtimeStatus(descriptor),
   };
 }
 
