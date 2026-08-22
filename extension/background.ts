@@ -175,6 +175,28 @@ function flushIntents(): void {
     sendIntent(intent.id, intent.payload);
 }
 
+function disconnectNative(): boolean {
+  const priorPort = nativePort;
+  nativePort = null;
+  nativeReady = false;
+  lastPatch = undefined;
+  pendingIntents.length = 0;
+  chunks.clear();
+  priorPort?.disconnect();
+  return priorPort !== null;
+}
+
+// The development runner evaluates inside this service worker over its private CDP target. A web
+// page cannot reach this global, and production behavior never calls it.
+(globalThis as typeof globalThis & {
+  __vibewaitingDisconnectNativeForDevelopment?: () => boolean;
+}).__vibewaitingDisconnectNativeForDevelopment = () => {
+  const connected = nativePort !== null;
+  // Let Runtime.evaluate return before disconnecting the port that keeps this worker alive.
+  setTimeout(disconnectNative, 0);
+  return connected;
+};
+
 function handleNativeMessage(raw: unknown): void {
   const candidate = record(raw) as NativeHostEvent | null;
   if (!candidate || candidate.protocol !== VIBEWAITING_EXTENSION_PROTOCOL)
@@ -313,12 +335,7 @@ chrome.runtime.onConnect.addListener((port) => {
 chrome.runtime.onMessage.addListener((raw) => {
   const message = record(raw);
   if (message?.type !== "settings-changed") return;
-  const priorPort = nativePort;
-  nativePort = null;
-  priorPort?.disconnect();
-  nativeReady = false;
-  lastPatch = undefined;
-  pendingIntents.length = 0;
+  disconnectNative();
   void ensureNative();
 });
 
