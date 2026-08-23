@@ -1,26 +1,26 @@
 import { randomUUID } from "node:crypto";
-import { createServer, type IncomingMessage, type Server } from "node:http";
 import { homedir } from "node:os";
-import type { Duplex } from "node:stream";
 import type { HarnessId, StructuredLaunch } from "@volter-ai-dev/supercode-harness-sdk";
-import { TmuxTerminalHost, type TerminalAttachmentGrant, type TerminalSession } from "@volter-ai-dev/supercode-terminal";
-import { WebSocketServer } from "ws";
+import {
+  TerminalWebSocketBridge,
+  TmuxTerminalHost,
+  type EmbeddedTerminalAttachmentGrant,
+  type TerminalSession,
+} from "@volter-ai-dev/supercode-terminal";
 import { shortCwd } from "./sessions.js";
 
 export interface TerminalServiceSnapshot {
   available: boolean;
   canOpenLocal: boolean;
   sessions: TerminalSession[];
-  attachment: (TerminalAttachmentGrant & { baseUrl: string }) | null;
+  attachment: EmbeddedTerminalAttachmentGrant | null;
   error: string | null;
 }
 
 export class LocalTerminalService {
   private readonly allowedOrigin: string;
   private readonly host: TmuxTerminalHost;
-  private readonly server: Server;
-  private readonly sockets = new WebSocketServer({ noServer: true });
-  private baseUrl = "";
+  private readonly bridge: TerminalWebSocketBridge;
   private attachment: TerminalServiceSnapshot["attachment"] = null;
   private error: string | null = null;
 
@@ -32,23 +32,14 @@ export class LocalTerminalService {
       ? allowedOrigin.slice(0, -1)
       : allowedOrigin;
     this.host = new TmuxTerminalHost({ ownerId: "vibewaiting-native" });
-    this.server = createServer((_request, response) => {
-      response.writeHead(404).end();
+    this.bridge = new TerminalWebSocketBridge({
+      host: this.host,
+      allowedOrigins: this.allowedOrigin,
     });
-    this.server.on("upgrade", (request, socket, head) => this.upgrade(request, socket, head));
   }
 
   async start(): Promise<void> {
-    await new Promise<void>((resolve, reject) => {
-      this.server.once("error", reject);
-      this.server.listen(0, "127.0.0.1", () => {
-        this.server.off("error", reject);
-        resolve();
-      });
-    });
-    const address = this.server.address();
-    if (!address || typeof address === "string") throw new Error("terminal server did not bind a local port");
-    this.baseUrl = `http://127.0.0.1:${address.port}`;
+    await this.bridge.start();
   }
 
   async snapshot(): Promise<TerminalServiceSnapshot> {
@@ -85,8 +76,7 @@ export class LocalTerminalService {
       cwd,
       name: `vibewaiting-${label}-${randomUUID().slice(0, 8)}`,
     });
-    const grant = this.host.issueAttachment(session.id, { mode: "control" });
-    this.attachment = { ...grant, baseUrl: this.baseUrl };
+    this.attachment = this.bridge.issueAttachment(session.id, { mode: "control" });
     return await this.snapshot();
   }
 
@@ -104,14 +94,12 @@ export class LocalTerminalService {
       env: launch.env,
       name: `vibewaiting-${label}-${randomUUID().slice(0, 8)}`,
     });
-    const grant = this.host.issueAttachment(session.id, { mode: "control" });
-    this.attachment = { ...grant, baseUrl: this.baseUrl };
+    this.attachment = this.bridge.issueAttachment(session.id, { mode: "control" });
     return await this.snapshot();
   }
 
   async attach(sessionId: string, mode: "observe" | "control"): Promise<TerminalServiceSnapshot> {
-    const grant = this.host.issueAttachment(sessionId, { mode });
-    this.attachment = { ...grant, baseUrl: this.baseUrl };
+    this.attachment = this.bridge.issueAttachment(sessionId, { mode });
     return await this.snapshot();
   }
 
@@ -134,31 +122,7 @@ export class LocalTerminalService {
   async stop(): Promise<void> {
     this.attachment = null;
     this.host.dispose();
-    for (const socket of this.sockets.clients) socket.terminate();
-    this.sockets.close();
-    await new Promise<void>((resolve) => this.server.close(() => resolve()));
-  }
-
-  private upgrade(request: IncomingMessage, socket: Duplex, head: Buffer): void {
-    const origin = request.headers.origin ?? "";
-    const url = new URL(request.url ?? "/", this.baseUrl);
-    const attachmentId = url.searchParams.get("terminalId");
-    if (
-      url.pathname !== "/ws" ||
-      !attachmentId ||
-      origin !== this.allowedOrigin
-    ) {
-      socket.destroy();
-      return;
-    }
-    this.sockets.handleUpgrade(request, socket, head, (webSocket) => {
-      void this.host.attachSocket(attachmentId, webSocket).catch((error: unknown) => {
-        if (webSocket.readyState === webSocket.OPEN) {
-          webSocket.send(JSON.stringify({ message: message(error), type: "error" }));
-          webSocket.close(1008, "terminal attachment rejected");
-        }
-      });
-    });
+    await this.bridge.stop();
   }
 }
 

@@ -20,14 +20,14 @@ import { SessionWindowCache, SupercodeController } from "@volter-ai-dev/supercod
 import type {
   FrontendHarness,
   HarnessClientAdapter,
-  PromptContextItem,
-  PromptImageItem,
   SupercodeClientAction,
   SupercodeClientSnapshot,
 } from "@volter-ai-dev/supercode-client";
 import { createNativeStartLaunch } from "@volter-ai-dev/supercode-harness-sdk";
-import type { DiscoveryQuery, HarnessId, HarnessSettingChange, JsonValue, SessionArtifact, SessionDescriptor, SessionFormat, SessionLocator, StructuredLaunch } from "@volter-ai-dev/supercode-harness-sdk";
+import type { DiscoveryQuery, HarnessId, SessionArtifact, SessionDescriptor, SessionFormat, SessionLocator, StructuredLaunch } from "@volter-ai-dev/supercode-harness-sdk";
 import type { ContinuationMode } from "@volter-ai-dev/supercode-ui";
+import { parseSupercodeUiIntent } from "@volter-ai-dev/supercode-ui/core";
+import { dispatchControllerIntent } from "@volter-ai-dev/supercode-ui/controller";
 import { createLucarneInjector } from "@volter-ai-dev/widget-shell/lucarne";
 import { WidgetHost } from "lucarne/widget/host";
 import {
@@ -197,76 +197,6 @@ const DISCOVERY_HARNESSES: readonly HarnessId[] = [
   "claude-code",
   "codex",
 ];
-
-/**
- * Skip the owning controller's redundant first workspace scan.
- *
- * The daemon performs one authoritative machine-wide discovery pass immediately after controller inventory.
- * `SupercodeController.initialize()` otherwise queues its own workspace discovery beside harness
- * inventory on the same sequential NDJSON transport. Its timeout then includes time spent waiting
- * behind inventory, even though `autoObserve: false` means startup consumes none of those sessions.
- */
-function withSeededOwnerDiscovery(client: HarnessClientAdapter): HarnessClientAdapter {
-  let seedDiscovery = true;
-  return new Proxy(client, {
-    get(target, property): unknown {
-      if (property === "discover") {
-        return async (query: Parameters<HarnessClientAdapter["discover"]>[0]): Promise<{ sessions: SessionDescriptor[] }> => {
-          if (seedDiscovery) {
-            seedDiscovery = false;
-            return { sessions: [] };
-          }
-          return await target.discover(query);
-        };
-      }
-      const value: unknown = Reflect.get(target, property, target);
-      return typeof value === "function" ? value.bind(target) : value;
-    },
-  }) as HarnessClientAdapter;
-}
-
-/**
- * Give a one-session mirror controller the inventory facts the daemon already established.
- *
- * `SupercodeController.initialize()` normally probes harnesses and discovers the entire target
- * workspace before `observe` can resolve its opaque session key. The inbox row already carries the
- * authoritative locator, and the owning controller already carries the harness inventory, so doing
- * both scans again makes opening proportional to unrelated transcript files. This adapter seeds
- * only the controller's first inventory pass; every other transport method and any later refresh
- * still reaches the real client unchanged.
- */
-export function withSeededMirrorInventory(
-  client: HarnessClientAdapter,
-  descriptor: SessionDescriptor,
-  harnesses: readonly FrontendHarness[],
-): HarnessClientAdapter {
-  let seedDiscovery = true;
-  let seedHarnesses = harnesses.some((harness) => harness.id === descriptor.locator.harness);
-  return new Proxy(client, {
-    get(target, property): unknown {
-      if (property === "discover") {
-        return async (query: Parameters<HarnessClientAdapter["discover"]>[0]): Promise<{ sessions: SessionDescriptor[] }> => {
-          if (seedDiscovery) {
-            seedDiscovery = false;
-            return { sessions: [descriptor] };
-          }
-          return await target.discover(query);
-        };
-      }
-      if (property === "listHarnesses") {
-        return async (query: Parameters<HarnessClientAdapter["listHarnesses"]>[0]) => {
-          if (seedHarnesses) {
-            seedHarnesses = false;
-            return { harnesses: [...harnesses] };
-          }
-          return await target.listHarnesses(query);
-        };
-      }
-      const value: unknown = Reflect.get(target, property, target);
-      return typeof value === "function" ? value.bind(target) : value;
-    },
-  }) as HarnessClientAdapter;
-}
 
 export interface DaemonOptions {
   /** The lucarne session whose pages get the widget. */
@@ -492,131 +422,6 @@ export function chooseHarness(snapshot: SupercodeClientSnapshot, preferred?: Har
   return startable[0]?.id ?? null;
 }
 
-export interface SendIntent {
-  text: string;
-  context: PromptContextItem[];
-  images: PromptImageItem[];
-}
-
-function parsePromptContext(value: unknown): PromptContextItem[] | null {
-  if (value === undefined) return [];
-  if (!Array.isArray(value) || value.length > 32) return null;
-  const parsed: PromptContextItem[] = [];
-  for (const candidate of value) {
-    if (!candidate || typeof candidate !== "object") return null;
-    if (Object.keys(candidate).some((key) => !["id", "kind", "label", "detail"].includes(key))) return null;
-    const { id, kind, label, detail } = candidate as Record<string, unknown>;
-    if (typeof label !== "string" || label.trim() === "" || label.length > 200) return null;
-    if (typeof detail !== "string" || detail === "" || detail.length > 20_000) return null;
-    if (id !== undefined && (typeof id !== "string" || id === "" || id.length > 2_000)) return null;
-    if (kind !== undefined && (typeof kind !== "string" || kind === "" || kind.length > 100)) return null;
-    parsed.push({
-      ...(typeof id === "string" ? { id } : {}),
-      ...(typeof kind === "string" ? { kind } : {}),
-      label: label.trim(),
-      detail,
-    });
-  }
-  return parsed;
-}
-
-function parsePromptImages(value: unknown): PromptImageItem[] | null {
-  if (value === undefined) return [];
-  if (!Array.isArray(value) || value.length > 4) return null;
-  const parsed: PromptImageItem[] = [];
-  let totalBytes = 0;
-  for (const candidate of value) {
-    if (!candidate || typeof candidate !== "object") return null;
-    if (Object.keys(candidate).some((key) => !["id", "label", "url"].includes(key))) return null;
-    const { id, label, url } = candidate as Record<string, unknown>;
-    if (typeof label !== "string" || label.trim() === "" || label.length > 200) return null;
-    if (typeof url !== "string" || !(url.startsWith("data:image/") || url.startsWith("https://") || url.startsWith("http://"))) return null;
-    if (url.length > 12 * 1024 * 1024) return null;
-    totalBytes += url.length;
-    if (totalBytes > 32 * 1024 * 1024) return null;
-    if (id !== undefined && (typeof id !== "string" || id === "" || id.length > 2_000)) return null;
-    parsed.push({ ...(typeof id === "string" ? { id } : {}), label: label.trim(), url });
-  }
-  return parsed;
-}
-
-/** The composer's intent shape. Anything else is ignored (and logged) rather than guessed at. */
-export function parseSendIntent(payload: unknown): SendIntent | null {
-  if (!payload || typeof payload !== "object") return null;
-  if (Object.keys(payload).some((key) => !["action", "text", "context", "images"].includes(key))) return null;
-  const { action, text, context: contextValue, images: imageValue } = payload as { action?: unknown; text?: unknown; context?: unknown; images?: unknown };
-  if (action !== "send" || typeof text !== "string") return null;
-  const trimmed = text.trim();
-  const context = parsePromptContext(contextValue);
-  const images = parsePromptImages(imageValue);
-  return (trimmed === "" && !images?.length) || context === null || images === null ? null : { text: trimmed, context, images };
-}
-
-/** The Stop button's entire payload. No target is accepted from the page. */
-export function parseInterruptIntent(payload: unknown): boolean {
-  if (!payload || typeof payload !== "object") return false;
-  return (payload as { action?: unknown }).action === "interrupt";
-}
-
-/** Return from a foreign mirror to the runtime this daemon started. No browser-supplied target. */
-export function parseReleaseIntent(payload: unknown): boolean {
-  if (!payload || typeof payload !== "object") return false;
-  return (payload as { action?: unknown }).action === "release";
-}
-
-/** Continue the mirror currently selected by the daemon. The page never supplies a session key. */
-export function parseResumeIntent(payload: unknown): ContinuationMode | null {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
-  const value = payload as { action?: unknown; mode?: unknown };
-  if (value.action !== "resume") return null;
-  if (Object.keys(value).length === 1) return "headless";
-  if (
-    Object.keys(value).length === 2 &&
-    (value.mode === "headless" || value.mode === "terminal")
-  ) return value.mode;
-  return null;
-}
-
-/** Join the selected mirror's controller-proven live endpoint; the page cannot supply an endpoint. */
-export function parseJoinIntent(payload: unknown): boolean {
-  if (!payload || typeof payload !== "object") return false;
-  return (payload as { action?: unknown }).action === "join" && Object.keys(payload).length === 1;
-}
-
-/** Leave shared control and return to following the same session. */
-export function parseDetachIntent(payload: unknown): boolean {
-  if (!payload || typeof payload !== "object") return false;
-  return (payload as { action?: unknown }).action === "detach" && Object.keys(payload).length === 1;
-}
-
-export function parseTerminalIntent(payload: unknown): boolean {
-  if (!payload || typeof payload !== "object") return false;
-  return (payload as { action?: unknown }).action === "terminal" && Object.keys(payload).length === 1;
-}
-
-export interface ExportIntent { targetHarness: HarnessId }
-
-export function parseExportIntent(payload: unknown): ExportIntent | null {
-  if (!payload || typeof payload !== "object" || Object.keys(payload).some((key) => key !== "action" && key !== "targetHarness")) return null;
-  const { action, targetHarness } = payload as { action?: unknown; targetHarness?: unknown };
-  if (action !== "export" || typeof targetHarness !== "string" || targetHarness.trim() === "") return null;
-  return { targetHarness: targetHarness.trim() as HarnessId };
-}
-
-export interface BranchIntent {
-  targetHarness: HarnessId | null;
-}
-
-export interface ReduceIntent {
-  targetHarness: HarnessId | null;
-}
-
-export interface ConfigureHarnessIntent {
-  harness: HarnessId;
-  changes: HarnessSettingChange[];
-  expectedRevision: string;
-}
-
 const SESSION_FORMATS = new Set<string>([
   "claude-code",
   "codex",
@@ -627,76 +432,12 @@ const SESSION_FORMATS = new Set<string>([
   "grok",
 ]);
 
-/**
- * Continue the selected transcript as a separate branch. A harness choice is user input, but the
- * daemon still validates it against its own live inventory before dispatch; no session locator or
- * runtime endpoint is accepted from the page.
- */
-export function parseBranchIntent(payload: unknown): BranchIntent | null {
-  if (!payload || typeof payload !== "object") return null;
-  if (Object.keys(payload).some((key) => key !== "action" && key !== "targetHarness")) return null;
-  const { action, targetHarness } = payload as { action?: unknown; targetHarness?: unknown };
-  if (action !== "branch") return null;
-  if (targetHarness === undefined) return { targetHarness: null };
-  if (typeof targetHarness !== "string" || targetHarness.trim() === "") return null;
-  return { targetHarness: targetHarness.trim() as HarnessId };
-}
-
-/** Start a verified reversible continuation. The page may choose only a
- * declared target harness; source identity and recovery paths stay inside the
- * trusted controller/service boundary. */
-export function parseReduceIntent(payload: unknown): ReduceIntent | null {
-  if (!payload || typeof payload !== "object") return null;
-  if (Object.keys(payload).some((key) => key !== "action" && key !== "targetHarness")) return null;
-  const { action, targetHarness } = payload as { action?: unknown; targetHarness?: unknown };
-  if (action !== "reduce") return null;
-  if (targetHarness === undefined) return { targetHarness: null };
-  if (typeof targetHarness !== "string" || targetHarness.trim() === "") return null;
-  return { targetHarness: targetHarness.trim() as HarnessId };
-}
-
-/**
- * Parse only the bounded, revisioned setting choice projected by Supercode's UI. The trusted
- * controller still checks this against the active harness and its freshly inspected controls.
- */
-export function parseConfigureHarnessIntent(payload: unknown): ConfigureHarnessIntent | null {
-  if (!payload || typeof payload !== "object") return null;
-  if (Object.keys(payload).some((key) => !["action", "harness", "changes", "expectedRevision"].includes(key))) return null;
-  const { action, harness, changes, expectedRevision } = payload as Record<string, unknown>;
-  if (action !== "configureHarness" || typeof harness !== "string" || harness.length < 1 || harness.length > 100) return null;
-  if (typeof expectedRevision !== "string" || expectedRevision.length < 1 || expectedRevision.length > 500) return null;
-  if (!Array.isArray(changes) || changes.length < 1 || changes.length > 20) return null;
-  const parsed: HarnessSettingChange[] = [];
-  for (const change of changes) {
-    if (!change || typeof change !== "object" || Object.keys(change).some((key) => key !== "key" && key !== "value")) return null;
-    const { key, value } = change as Record<string, unknown>;
-    if (typeof key !== "string" || key.length < 1 || key.length > 200) return null;
-    if (value !== null && (typeof value !== "string" || value.length > 500)) return null;
-    parsed.push({ key, value: value as string | null });
-  }
-  return { harness: harness as HarnessId, changes: parsed, expectedRevision };
-}
-
-/** A newly mounted iframe asks for one forced snapshot; no page-chosen target or state is trusted. */
-export function parseMountedIntent(payload: unknown): boolean {
-  if (!payload || typeof payload !== "object") return false;
-  return (payload as { action?: unknown }).action === "mounted" && Object.keys(payload).length === 1;
-}
-
 function parsePanelVisibilityIntent(payload: unknown): boolean | null {
   if (!payload || typeof payload !== "object" || Object.keys(payload).length !== 1) return null;
   const action = (payload as { action?: unknown }).action;
   if (action === "panelVisible") return true;
   if (action === "panelHidden") return false;
   return null;
-}
-
-export function parseLoadSessionsIntent(payload: unknown): boolean {
-  return Boolean(payload && typeof payload === "object" && (payload as { action?: unknown }).action === "loadSessions" && Object.keys(payload).length === 1);
-}
-
-export function parseLoadEarlierIntent(payload: unknown): boolean {
-  return Boolean(payload && typeof payload === "object" && (payload as { action?: unknown }).action === "loadEarlier" && Object.keys(payload).length === 1);
 }
 
 export interface ResolveImageIntent {
@@ -712,89 +453,6 @@ export function parseResolveImageIntent(payload: unknown): ResolveImageIntent | 
   if (action !== "resolveImage" || typeof requestId !== "string" || typeof reference !== "string") return null;
   if (requestId.length < 1 || requestId.length > 200 || reference.length < 1 || reference.length > 4_000) return null;
   return { requestId, reference };
-}
-
-export interface DraftIntent { text: string }
-
-/** Drafts are scoped to the daemon-selected conversation; the page supplies neither key nor path. */
-export function parseDraftIntent(payload: unknown): DraftIntent | null {
-  if (!payload || typeof payload !== "object" || Object.keys(payload).some((key) => key !== "action" && key !== "text")) return null;
-  const { action, text } = payload as { action?: unknown; text?: unknown };
-  if (action !== "draft" || typeof text !== "string" || text.length > 50_000) return null;
-  return { text };
-}
-
-export interface NewChatIntent {
-  harness: HarnessId;
-  mode: ContinuationMode;
-  text: string;
-  context: PromptContextItem[];
-  images: PromptImageItem[];
-}
-
-/** A new chat is lazy: the runtime is replaced only when the first message is actually sent. */
-export function parseNewChatIntent(payload: unknown): NewChatIntent | null {
-  if (!payload || typeof payload !== "object") return null;
-  if (Object.keys(payload).some((key) => !["action", "harness", "mode", "text", "context", "images"].includes(key))) return null;
-  const { action, harness, mode: modeValue, text, context: contextValue, images: imageValue } = payload as { action?: unknown; harness?: unknown; mode?: unknown; text?: unknown; context?: unknown; images?: unknown };
-  if (action !== "new" || typeof harness !== "string" || typeof text !== "string") return null;
-  const mode = modeValue === undefined ? "headless" : modeValue;
-  if (mode !== "headless" && mode !== "terminal") return null;
-  const trimmedHarness = harness.trim();
-  const trimmedText = text.trim();
-  const context = parsePromptContext(contextValue);
-  const images = parsePromptImages(imageValue);
-  if (trimmedHarness === "" || (trimmedText === "" && !images?.length) || context === null || images === null || (mode === "terminal" && trimmedText === "")) return null;
-  return { harness: trimmedHarness as HarnessId, mode, text: trimmedText, context, images };
-}
-
-/** Reading a chat is explicit acknowledgement; inventory counts are never treated as unread. */
-export function parseAcknowledgeIntent(payload: unknown): string | null {
-  if (!payload || typeof payload !== "object") return null;
-  const { action, key } = payload as { action?: unknown; key?: unknown };
-  if (action !== "ack" || typeof key !== "string") return null;
-  return key.trim() || null;
-}
-
-export function parseRefreshIntent(payload: unknown): boolean {
-  return Boolean(payload && typeof payload === "object" && (payload as { action?: unknown }).action === "refresh");
-}
-
-export interface RespondIntent {
-  requestId: JsonValue;
-  optionId: string | null;
-}
-
-function isJsonValue(value: unknown): value is JsonValue {
-  if (value === null || typeof value === "string" || typeof value === "boolean") {
-    return true;
-  }
-  if (typeof value === "number") return Number.isFinite(value);
-  if (Array.isArray(value)) return value.every(isJsonValue);
-  if (!value || typeof value !== "object") return false;
-  return Object.values(value as Record<string, unknown>).every(isJsonValue);
-}
-
-/** A structured native request response. The page can select only a controller-minted request id. */
-export function parseRespondIntent(payload: unknown): RespondIntent | null {
-  if (!payload || typeof payload !== "object") return null;
-  const { action, requestId, optionId } = payload as {
-    action?: unknown;
-    requestId?: unknown;
-    optionId?: unknown;
-  };
-  if (action !== "respond" || !isJsonValue(requestId)) return null;
-  if (optionId !== null && typeof optionId !== "string") return null;
-  return { requestId, optionId };
-}
-
-/** The Sessions panel's intent shape: a row key minted by `sessionKey`, echoed back on click. */
-export function parseAttachIntent(payload: unknown): string | null {
-  if (!payload || typeof payload !== "object") return null;
-  const { action, key } = payload as { action?: unknown; key?: unknown };
-  if (action !== "attach" || typeof key !== "string") return null;
-  const trimmed = key.trim();
-  return trimmed === "" ? null : trimmed;
 }
 
 /** The active session in the only terms a descriptor also carries — `null` when nothing is selected. */
@@ -842,9 +500,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const controller: AgentController =
     options.controller ??
     new SupercodeController({
-      client: withSeededOwnerDiscovery(requireClient(options)),
+      client: requireClient(options),
       workspace: options.workspace,
       ownsClient: true,
+      initialInventory: { sessions: [] },
+      inventorySubscriptions: false,
       // Startup immediately creates its own runtime; observing the newest
       // persisted session first only performs a redundant full transcript load.
       autoObserve: false,
@@ -1569,10 +1229,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       // Seed the locator and already-known harness inventory so initialization does not rediscover
       // an entire workspace merely to mint the controller's local session key.
       new SupercodeController({
-        client: withSeededMirrorInventory(requireClient(options), opts.descriptor, opts.harnesses),
+        client: requireClient(options),
         workspace: opts.workspace,
         ownsClient: false,
         autoObserve: false,
+        initialInventory: {
+          harnesses: opts.harnesses,
+          sessions: [opts.descriptor],
+        },
         // The daemon already owns the one machine-wide index and activity stream. A disposable
         // one-session mirror only needs its bounded transcript follower; opening another native
         // index here queues the requested chat behind an unrelated full inventory scan.
@@ -1749,12 +1413,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     const action = intent.payload && typeof intent.payload === "object"
       ? (intent.payload as { action?: unknown }).action
       : null;
+    const uiIntent = parseSupercodeUiIntent(intent.payload);
     if (typeof action === "string" && action !== "draft" && action !== "ack") {
       await host.push({ bridgeAck: String(intent.id) }).catch((error: unknown) => {
         log(`bridge acknowledgement failed (continuing): ${message(error)}`);
       });
     }
-    if (parseMountedIntent(intent.payload)) {
+    if (uiIntent?.action === "mounted") {
       panelVisible = false;
       rebuildDescriptors(false);
       await pushNow(true);
@@ -1767,12 +1432,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if (panelVisible) await pushNow(true);
       return;
     }
-    if (parseLoadSessionsIntent(intent.payload)) {
+    if (uiIntent?.action === "loadSessions") {
       sessionLimit += MAX_SESSION_ROWS;
       await refreshSessions();
       return;
     }
-    if (parseLoadEarlierIntent(intent.payload)) {
+    if (uiIntent?.action === "loadEarlier") {
       actionError = null;
       const key = activeForeignKey ?? "@owned";
       const nextLimit = (transcriptLimits.get(key) ?? initialTranscriptLimit) + TRANSCRIPT_PAGE_SIZE;
@@ -1890,28 +1555,26 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       });
       return;
     }
-    const draft = parseDraftIntent(intent.payload);
-    if (draft !== null) {
+    if (uiIntent?.action === "draft") {
       const snapshot = activeController().getSnapshot();
       const ref = activeRef(snapshot);
       const descriptor = ref?.sessionId ? descriptors.find((candidate) => matchesActive(candidate, ref)) : undefined;
       const key = activeForeignKey ?? (descriptor ? sessionKey(descriptor.locator) : null);
       if (key) {
-        if (draft.text === "") drafts.delete(key);
-        else drafts.set(key, draft.text);
+        if (uiIntent.text === "") drafts.delete(key);
+        else drafts.set(key, uiIntent.text);
         schedulePersistence();
       }
       return;
     }
-    const acknowledged = parseAcknowledgeIntent(intent.payload);
-    if (acknowledged !== null) {
-      if (attention.delete(acknowledged)) {
+    if (uiIntent?.action === "ack") {
+      if (attention.delete(uiIntent.key)) {
         schedulePersistence();
         await pushNow();
       }
       return;
     }
-    if (parseRefreshIntent(intent.payload)) {
+    if (uiIntent?.action === "refresh") {
       actionError = null;
       try {
         await activeController().dispatch({ type: "refresh", autoObserve: false });
@@ -1923,17 +1586,16 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       await pushNow();
       return;
     }
-    const harnessConfiguration = parseConfigureHarnessIntent(intent.payload);
-    if (harnessConfiguration !== null) {
+    if (uiIntent?.action === "configureHarness") {
       actionError = null;
       try {
         await activeController().dispatch({
           type: "configureHarness",
-          harness: harnessConfiguration.harness,
-          changes: harnessConfiguration.changes,
-          expectedRevision: harnessConfiguration.expectedRevision,
+          harness: uiIntent.harness,
+          changes: uiIntent.changes,
+          expectedRevision: uiIntent.expectedRevision,
         });
-        log(`updated ${harnessConfiguration.harness} interoperability settings`);
+        log(`updated ${uiIntent.harness} interoperability settings`);
       } catch (e) {
         actionError = message(e);
         log(`harness settings update failed: ${actionError}`);
@@ -1941,8 +1603,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       await pushNow();
       return;
     }
-    const newChat = parseNewChatIntent(intent.payload);
-    if (newChat !== null) {
+    if (uiIntent?.action === "new") {
+      const newChat = {
+        ...uiIntent,
+        mode: uiIntent.mode ?? "headless",
+        context: uiIntent.context ?? [],
+        images: uiIntent.images ?? [],
+      };
       actionError = null;
       attachSeq += 1;
       try {
@@ -1975,13 +1642,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       await pushNow(newChat.mode === "terminal");
       return;
     }
-    const send = parseSendIntent(intent.payload);
-    if (send !== null) {
+    if (uiIntent?.action === "send") {
       actionError = null;
       try {
         // The ACTIVE controller: a mirror will refuse (`send` is not among its available actions),
         // and that refusal is the honest answer — the panel never fabricates a send path.
-        await activeController().dispatch({ type: "send", text: send.text, ...(send.context.length ? { context: send.context } : {}), ...(send.images.length ? { images: send.images } : {}) });
+        await dispatchControllerIntent(activeController(), uiIntent);
       } catch (e) {
         actionError = message(e);
         log(`send failed: ${actionError}`);
@@ -1989,10 +1655,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       await pushNow();
       return;
     }
-    if (parseInterruptIntent(intent.payload)) {
+    if (uiIntent?.action === "interrupt") {
       actionError = null;
       try {
-        await activeController().dispatch({ type: "interrupt" });
+        await dispatchControllerIntent(activeController(), uiIntent);
       } catch (e) {
         actionError = message(e);
         log(`interrupt failed: ${actionError}`);
@@ -2000,15 +1666,15 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       await pushNow();
       return;
     }
-    if (parseReleaseIntent(intent.payload)) {
+    if (uiIntent?.action === "release") {
       await releaseForeignView();
       attachError = null;
       actionError = null;
       await pushNow();
       return;
     }
-    const resumeMode = parseResumeIntent(intent.payload);
-    if (resumeMode !== null) {
+    if (uiIntent?.action === "resume") {
+      const resumeMode = uiIntent.mode ?? "headless";
       actionError = null;
       const foreign = activeForeign();
       const snapshot = foreign?.controller.getSnapshot();
@@ -2071,7 +1737,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       await pushNow();
       return;
     }
-    if (parseJoinIntent(intent.payload)) {
+    if (uiIntent?.action === "join") {
       actionError = null;
       const foreign = activeForeign();
       const snapshot = foreign?.controller.getSnapshot();
@@ -2083,7 +1749,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         if (!snapshot.availableActions.attach) {
           throw new Error(`${snapshot.activeHarness ?? "this harness"} does not expose a joinable live endpoint`);
         }
-        await foreign.controller.dispatch({ type: "attach", sessionKey: key });
+        await dispatchControllerIntent(foreign.controller, uiIntent);
         log(`joined ${snapshot.activeHarness ?? "coding agent"} live session under shared control`);
       } catch (e) {
         actionError = message(e);
@@ -2092,12 +1758,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       await pushNow();
       return;
     }
-    if (parseDetachIntent(intent.payload)) {
+    if (uiIntent?.action === "detach") {
       actionError = null;
       const snapshot = activeController().getSnapshot();
       try {
         if (!snapshot.availableActions.detach) throw new Error("this conversation is not a shared live attachment");
-        await activeController().dispatch({ type: "detach" });
+        await dispatchControllerIntent(activeController(), uiIntent);
         log(`detached from ${snapshot.activeHarness ?? "coding agent"}; continuing as a read-only follower`);
       } catch (e) {
         actionError = message(e);
@@ -2106,12 +1772,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       await pushNow();
       return;
     }
-    if (parseTerminalIntent(intent.payload)) {
+    if (uiIntent?.action === "terminal") {
       actionError = null;
       const snapshot = activeController().getSnapshot();
       try {
         if (!snapshot.availableActions.openTerminal) throw new Error("this runtime cannot create a terminal handoff");
-        await activeController().dispatch({ type: "openTerminal" });
+        await dispatchControllerIntent(activeController(), uiIntent);
         log(`prepared terminal handoff for ${snapshot.activeHarness ?? "coding agent"}`);
       } catch (e) {
         actionError = message(e);
@@ -2120,11 +1786,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       await pushNow();
       return;
     }
-    const exportIntent = parseExportIntent(intent.payload);
-    if (exportIntent !== null) {
+    if (uiIntent?.action === "export") {
       actionError = null;
       exportReceipt = null;
-      const target = exportIntent.targetHarness;
+      const target = uiIntent.targetHarness;
       const selected = activeController();
       try {
         if (!SESSION_FORMATS.has(target)) throw new Error(`${target} is not a supported native export format`);
@@ -2152,8 +1817,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       await pushNow();
       return;
     }
-    const branch = parseBranchIntent(intent.payload);
-    if (branch !== null) {
+    if (uiIntent?.action === "branch") {
       actionError = null;
       const foreign = activeForeign();
       const snapshot = foreign?.controller.getSnapshot();
@@ -2165,18 +1829,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         if (!snapshot.availableActions.branch) {
           throw new Error(`${snapshot.activeHarness ?? "this harness"} cannot branch this conversation`);
         }
-        const target = branch.targetHarness;
+        const target = uiIntent.targetHarness ?? null;
         if (target !== null && !SESSION_FORMATS.has(target)) {
           throw new Error(`${target} is not a supported session format for continuation`);
         }
         if (target !== null && !snapshot.harnesses.some((harness) => harness.id === target && harness.availableActions.start)) {
           throw new Error(`${target} is not currently available to start a continuation`);
         }
-        await foreign.controller.dispatch({
-          type: "branch",
-          sessionKey: key,
-          ...(target === null ? {} : { targetHarness: target as SessionFormat }),
-        });
+        await dispatchControllerIntent(foreign.controller, uiIntent);
         log(`branched ${snapshot.activeHarness ?? "coding agent"} conversation${target ? ` into ${target}` : ""}`);
       } catch (e) {
         actionError = message(e);
@@ -2185,8 +1845,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       await pushNow();
       return;
     }
-    const reduction = parseReduceIntent(intent.payload);
-    if (reduction !== null) {
+    if (uiIntent?.action === "reduce") {
       actionError = null;
       const foreign = activeForeign();
       const snapshot = foreign?.controller.getSnapshot();
@@ -2198,7 +1857,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         if (!snapshot.availableActions.reduce) {
           throw new Error("this Supercode service cannot create a verified reversible continuation");
         }
-        const target = reduction.targetHarness;
+        const target = uiIntent.targetHarness ?? null;
         if (target !== null && !SESSION_FORMATS.has(target)) {
           throw new Error(`${target} is not a supported session format for continuation`);
         }
@@ -2206,11 +1865,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           throw new Error(`${target} is not currently available to start a continuation`);
         }
         const startedAt = performance.now();
-        await foreign.controller.dispatch({
-          type: "reduce",
-          sessionKey: key,
-          ...(target === null ? {} : { targetHarness: target as SessionFormat }),
-        });
+        await dispatchControllerIntent(foreign.controller, uiIntent);
         const receipt = foreign.controller.getSnapshot().reductionReceipt;
         if (!receipt?.verified || !receipt.reversible) {
           throw new Error("Supercode started no verified reversible reduction");
@@ -2227,11 +1882,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       await pushNow();
       return;
     }
-    const response = parseRespondIntent(intent.payload);
-    if (response !== null) {
+    if (uiIntent?.action === "respond") {
       actionError = null;
       try {
-        await activeController().dispatch({ type: "respond", ...response });
+        await dispatchControllerIntent(activeController(), uiIntent);
       } catch (e) {
         actionError = message(e);
         log(`respond failed: ${actionError}`);
@@ -2239,10 +1893,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       await pushNow();
       return;
     }
-    const key = parseAttachIntent(intent.payload);
-    if (key !== null) {
+    if (uiIntent?.action === "attach") {
       actionError = null;
-      const task = attachSession(key);
+      const task = attachSession(uiIntent.key);
       // The context-aware Lucarne drain can receive a newer click while this native load is still
       // running. Keep its pump free; the attach task itself owns failure projection and cleanup.
       if (host.drainIntentsWithContext !== undefined) void task.catch(() => undefined);
