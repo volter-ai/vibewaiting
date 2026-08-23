@@ -21,7 +21,8 @@ import type { ComponentType, JSX } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import type { MessengerTransport } from "./transport.js";
 import {
-  terminalPresentationSize,
+  terminalListPresentationSize,
+  VIBEWAITING_PRESENTATION,
   type VibewaitingPresentation,
 } from "../src/presentations.js";
 
@@ -392,6 +393,8 @@ export function mountMessenger(
 
   function MessengerDialog({ state }: { state: unknown }): JSX.Element {
     const [terminalsOpen, setTerminalsOpen] = useState(false);
+    const [terminalPresentation, setTerminalPresentation] =
+      useState<VibewaitingPresentation | null>(null);
     const [presentationPending, setPresentationPending] = useState(false);
     const [presentationError, setPresentationError] = useState<string | null>(
       null,
@@ -415,8 +418,10 @@ export function mountMessenger(
             : normalized.attachError,
         }
       : normalized;
-    async function requestTerminalPresentation(): Promise<boolean> {
-      if (terminalsOpen) return true;
+    async function requestTerminalPresentation(
+      name: VibewaitingPresentation,
+    ): Promise<boolean> {
+      if (terminalsOpen && terminalPresentation === name) return true;
       if (presentationTransition.current) return false;
       if (!options.requestPresentation) {
         setPresentationError(
@@ -428,7 +433,8 @@ export function mountMessenger(
       setPresentationPending(true);
       setPresentationError(null);
       try {
-        await options.requestPresentation("terminal");
+        await options.requestPresentation(name);
+        setTerminalPresentation(name);
         setTerminalsOpen(true);
         return true;
       } catch (error) {
@@ -457,6 +463,7 @@ export function mountMessenger(
       setPresentationError(null);
       try {
         await options.requestPresentation("messenger");
+        setTerminalPresentation(null);
         setTerminalsOpen(false);
         queueMicrotask(() =>
           terminalLauncher.current?.focus({ preventScroll: true }),
@@ -476,17 +483,32 @@ export function mountMessenger(
     }
 
     useEffect(() => {
-      if (terminals?.attachment?.id) void requestTerminalPresentation();
-    }, [terminals?.attachment?.id]);
+      if (!terminals || presentationPending) return;
+      const desired = terminals.attachment
+        ? VIBEWAITING_PRESENTATION.terminal
+        : VIBEWAITING_PRESENTATION.terminalList;
+      if ((!terminalsOpen && terminals.attachment) ||
+          (terminalsOpen && terminalPresentation !== desired)) {
+        void requestTerminalPresentation(desired);
+      }
+    }, [
+      terminals?.attachment?.id,
+      terminalsOpen,
+      terminalPresentation,
+      presentationPending,
+    ]);
     useEffect(() => {
-      if (!terminalsOpen || !terminals || !options.reportContentSize) return;
+      if (
+        !terminalsOpen ||
+        !terminals ||
+        terminals.attachment ||
+        terminalPresentation !== VIBEWAITING_PRESENTATION.terminalList ||
+        !options.reportContentSize
+      ) return;
       let active = true;
       void options
         .reportContentSize(
-          terminalPresentationSize({
-            attached: terminals.attachment !== null,
-            sessionCount: terminals.sessions.length,
-          }),
+          terminalListPresentationSize(terminals.sessions.length),
         )
         .catch((error: unknown) => {
           if (!active) return;
@@ -503,6 +525,7 @@ export function mountMessenger(
       terminalsOpen,
       terminals?.attachment?.id,
       terminals?.sessions.length,
+      terminalPresentation,
       options.reportContentSize,
     ]);
     return (
@@ -537,7 +560,9 @@ export function mountMessenger(
                         aria-busy={presentationPending}
                         disabled={presentationPending}
                         onClick={() => {
-                          void requestTerminalPresentation().then((opened) => {
+                          void requestTerminalPresentation(
+                            VIBEWAITING_PRESENTATION.terminalList,
+                          ).then((opened) => {
                             if (opened)
                               return sendBridgeIntent({
                                 action: "terminalRefresh",

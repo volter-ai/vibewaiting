@@ -5,29 +5,29 @@ import type {
 
 export const VIBEWAITING_PRESENTATION = Object.freeze({
   messenger: "messenger",
+  terminalList: "terminal-list",
   terminal: "terminal",
 } as const);
 
 export type VibewaitingPresentation =
   (typeof VIBEWAITING_PRESENTATION)[keyof typeof VIBEWAITING_PRESENTATION];
 
-const TERMINAL_LIST_CHROME_HEIGHT = 112;
+const TERMINAL_LIST_CHROME_HEIGHT = 92;
 const TERMINAL_ROW_HEIGHT = 46;
-const TERMINAL_LIST_MIN_HEIGHT = 260;
-const TERMINAL_LIST_MAX_HEIGHT = 420;
+const TERMINAL_LIST_MIN_HEIGHT = 220;
+const TERMINAL_LIST_MAX_HEIGHT = 400;
+const TERMINAL_LOGICAL_SIZE = Object.freeze({ width: 640, height: 400 });
 
 /**
- * Terminal inventory is content-sized; a live PTY receives a stable, familiar terminal viewport.
- * Widget Shell applies host constraints and preserves a manual user resize above these requests.
+ * Terminal inventory is content-sized. Its live PTY uses the separate stable virtual viewport
+ * below, so adding a session never changes the scale of an attached terminal.
  */
-export function terminalPresentationSize(options: {
-  attached: boolean;
-  sessionCount: number;
-}): PresentationSize {
-  if (options.attached) return { width: 800, height: 420 };
-  const visibleRows = Math.max(0, Math.min(8, Math.floor(options.sessionCount)));
+export function terminalListPresentationSize(
+  sessionCount: number,
+): PresentationSize {
+  const visibleRows = Math.max(0, Math.min(8, Math.floor(sessionCount)));
   return {
-    width: 720,
+    width: 600,
     height: Math.max(
       TERMINAL_LIST_MIN_HEIGHT,
       Math.min(
@@ -52,14 +52,30 @@ export const VIBEWAITING_PRESENTATIONS = Object.freeze({
     viewport: { mode: "responsive" },
     surface: "auto",
   },
-  [VIBEWAITING_PRESENTATION.terminal]: {
+  [VIBEWAITING_PRESENTATION.terminalList]: {
     footprint: {
       mode: "content-fit",
-      preferred: { width: 720, height: 360 },
-      min: { width: 560, height: 240 },
-      max: { width: 880, height: 460 },
+      preferred: { width: 600, height: 320 },
+      min: { width: 480, height: TERMINAL_LIST_MIN_HEIGHT },
+      max: { width: 680, height: TERMINAL_LIST_MAX_HEIGHT },
     },
     viewport: { mode: "responsive" },
+    surface: "auto",
+  },
+  [VIBEWAITING_PRESENTATION.terminal]: {
+    footprint: {
+      mode: "resizable",
+      preferred: TERMINAL_LOGICAL_SIZE,
+    },
+    // Keep the familiar terminal grid stable. The shell's ordinary resize handle changes the
+    // physical footprint, so the complete terminal scales up or down instead of silently changing
+    // its simulated rows and columns.
+    viewport: {
+      mode: "virtual",
+      ...TERMINAL_LOGICAL_SIZE,
+      allowUpscale: true,
+      minimumScale: 0.75,
+    },
     surface: "auto",
   },
 } satisfies Readonly<Record<VibewaitingPresentation, OverlayPresentation>>);
