@@ -400,6 +400,7 @@ export function mountMessenger(
       null,
     );
     const presentationTransition = useRef(false);
+    const lastTerminalAttachmentId = useRef<string | null>(null);
     const terminalLauncher = useRef<HTMLButtonElement>(null);
     const normalized = normalizeUiState(state);
     const terminals = options.TerminalPanel ? terminalHostState(state) : null;
@@ -484,10 +485,15 @@ export function mountMessenger(
 
     useEffect(() => {
       if (!terminals || presentationPending) return;
+      const attachmentId = terminals.attachment?.id ?? null;
+      const attachmentBecameAvailable =
+        attachmentId !== null &&
+        attachmentId !== lastTerminalAttachmentId.current;
+      lastTerminalAttachmentId.current = attachmentId;
       const desired = terminals.attachment
         ? VIBEWAITING_PRESENTATION.terminal
         : VIBEWAITING_PRESENTATION.terminalList;
-      if ((!terminalsOpen && terminals.attachment) ||
+      if ((!terminalsOpen && attachmentBecameAvailable) ||
           (terminalsOpen && terminalPresentation !== desired)) {
         void requestTerminalPresentation(desired);
       }
