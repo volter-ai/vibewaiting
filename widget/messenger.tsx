@@ -15,7 +15,10 @@ import type {
   TranscriptImage,
   UiAdapter,
 } from "@volter-ai-dev/supercode-ui";
-import type { TerminalUiState } from "@volter-ai-dev/supercode-terminal/ui";
+import {
+  normalizeTerminalUiState,
+  type TerminalUiState,
+} from "@volter-ai-dev/supercode-terminal/ui";
 import { render as renderPreact } from "preact";
 import type { ComponentType, JSX } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
@@ -62,47 +65,7 @@ export interface MessengerOptions {
 
 function terminalHostState(value: unknown): TerminalHostState | null {
   if (!isRecord(value) || !isRecord(value.terminalHost)) return null;
-  const host = value.terminalHost;
-  const attachment =
-    isRecord(host.attachment) &&
-    typeof host.attachment.id === "string" &&
-    typeof host.attachment.baseUrl === "string" &&
-    (host.attachment.mode === "observe" || host.attachment.mode === "control")
-      ? {
-          baseUrl: host.attachment.baseUrl,
-          id: host.attachment.id,
-          mode: host.attachment.mode as "observe" | "control",
-        }
-      : null;
-  const sessions = Array.isArray(host.sessions)
-    ? host.sessions.flatMap((item): TerminalUiState["sessions"][number][] => {
-        if (
-          !isRecord(item) ||
-          typeof item.id !== "string" ||
-          typeof item.label !== "string"
-        )
-          return [];
-        return [
-          {
-            activeCommand:
-              typeof item.activeCommand === "string"
-                ? item.activeCommand
-                : null,
-            cwd: typeof item.cwd === "string" ? item.cwd : null,
-            id: item.id,
-            label: item.label,
-            owned: item.owned === true,
-          },
-        ];
-      })
-    : [];
-  return {
-    attachment,
-    available: host.available === true,
-    canOpenLocal: host.canOpenLocal === true,
-    error: typeof host.error === "string" ? host.error : null,
-    sessions,
-  };
+  return normalizeTerminalUiState(value.terminalHost);
 }
 
 const INTENT_QUEUE = "agent";
