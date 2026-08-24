@@ -7,6 +7,7 @@ body { background:transparent }
 
 .vw-dialog { --scui-bg:#fff; --scui-bg-raised:#f7f7f6; --scui-fill:#f1f1ef; --scui-fill-strong:#e7e7e3; --scui-fg:#191918;
   --scui-muted:#5f5f5a; --scui-border:#deded9; --scui-border-strong:#c7c7c0; --scui-danger:#b4232e;
+  --sctui-terminal-background:rgba(17,19,21,.78);
   --scui-font:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
   position:relative; width:100%; height:100%; outline:0 }
 .vw-messenger-layer { width:100%; height:100% }
