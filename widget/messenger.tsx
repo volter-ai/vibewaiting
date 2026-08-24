@@ -9,6 +9,8 @@ import {
 } from "@volter-ai-dev/supercode-ui/preact/logo";
 import { normalizeUiState } from "@volter-ai-dev/supercode-ui/core";
 import type {
+  MessengerComposerCommand,
+  MessengerNavigation,
   SupercodeUiIntent,
   SupercodeUiState,
   TranscriptAttachment,
@@ -23,11 +25,17 @@ import { render as renderPreact } from "preact";
 import type { ComponentType, JSX } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import type { MessengerTransport } from "./transport.js";
+import type { MessengerHostEvent } from "./transport.js";
+import type {
+  BrowserContextAttachment,
+  BrowserTextAttachment,
+} from "../src/browser-context.js";
 import {
   terminalListPresentationSize,
   VIBEWAITING_PRESENTATION,
   type VibewaitingPresentation,
 } from "../src/presentations.js";
+import { browserShortcutLabel } from "../src/browser-shortcuts.js";
 
 export type TerminalIntent =
   | { action: "terminalRefresh" }
@@ -106,7 +114,7 @@ function readImage(file: File): Promise<TranscriptAttachment> {
   });
 }
 
-function pickAttachments(): Promise<TranscriptAttachment[] | null> {
+function pickLocalFiles(): Promise<TranscriptAttachment[] | null> {
   const input = document.createElement("input");
   input.type = "file";
   input.multiple = true;
@@ -197,6 +205,56 @@ function pickAttachments(): Promise<TranscriptAttachment[] | null> {
   });
 }
 
+function browserCandidateKind(
+  value: BrowserContextAttachment,
+): BrowserTextAttachment["kind"] | null {
+  return "detail" in value ? value.kind : null;
+}
+
+function showShortcutHelp(): void {
+  if (document.querySelector(".vw-shortcut-help")) return;
+  const dialog = document.createElement("dialog");
+  dialog.className = "vw-shortcut-help";
+  dialog.setAttribute("aria-label", "Keyboard shortcuts");
+  const title = document.createElement("strong");
+  title.textContent = "Keyboard shortcuts";
+  const detail = document.createElement("small");
+  detail.textContent = "Call Vibewaiting while staying on the current page.";
+  const list = document.createElement("dl");
+  for (const [label, shortcut] of [
+    ["Focus message box", "focus"],
+    ["Attach selection or current page", "attach"],
+    ["Previous conversation", "previous"],
+    ["Next conversation", "next"],
+  ] as const) {
+    const row = document.createElement("div");
+    const name = document.createElement("dt");
+    const value = document.createElement("dd");
+    const key = document.createElement("kbd");
+    name.textContent = label;
+    key.textContent = browserShortcutLabel(shortcut);
+    value.append(key);
+    row.append(name, value);
+    list.append(row);
+  }
+  const close = document.createElement("button");
+  close.type = "button";
+  close.textContent = "Close";
+  const finish = (): void => {
+    dialog.close();
+    dialog.remove();
+  };
+  close.addEventListener("click", finish, { once: true });
+  dialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    finish();
+  });
+  dialog.append(title, detail, list, close);
+  (document.querySelector(".vw-dialog") ?? document.body).append(dialog);
+  dialog.showModal();
+  close.focus();
+}
+
 export function mountMessenger(
   widget: MessengerTransport,
   options: MessengerOptions = {},
@@ -221,6 +279,8 @@ export function mountMessenger(
       timer: ReturnType<typeof setTimeout>;
     }
   >();
+  let messengerNavigation: MessengerNavigation | null = null;
+  let composerCommand: MessengerComposerCommand | null = null;
 
   function resolveBridgeCompletion(id: string): void {
     const resolve = bridgeCompletions.get(id);
@@ -328,6 +388,66 @@ export function mountMessenger(
         );
       });
     });
+  }
+
+  async function pickAttachments(): Promise<TranscriptAttachment[] | null> {
+    if (!widget.requestBrowserContext) return pickLocalFiles();
+    const candidates = await widget.requestBrowserContext("candidates");
+    const preferred = candidates?.find(
+      (item) => browserCandidateKind(item) === "browser-selection",
+    ) ?? candidates?.find(
+      (item) => browserCandidateKind(item) === "browser-page",
+    );
+    return preferred ? [preferred] : null;
+  }
+
+  function composerNavigation(
+    state: SupercodeUiState,
+    id: string,
+  ): MessengerNavigation {
+    if (state.attached?.key && (state.mode === "control" || state.canSend))
+      return { id, view: "chat", sessionKey: state.attached.key };
+    return {
+      id,
+      view: "new",
+      ...(state.harness ? { harness: state.harness } : {}),
+    };
+  }
+
+  function applyHostEvent(event: MessengerHostEvent): void {
+    const state = normalizeUiState(lastPanelState);
+    if (
+      event.command === "previous-conversation" ||
+      event.command === "next-conversation"
+    ) {
+      if (!state.sessions.length) return;
+      const current = state.attached?.key
+        ? state.sessions.findIndex((row) => row.key === state.attached?.key)
+        : -1;
+      const step = event.command === "next-conversation" ? 1 : -1;
+      const index =
+        current < 0
+          ? step > 0
+            ? 0
+            : state.sessions.length - 1
+          : (current + step + state.sessions.length) % state.sessions.length;
+      const row = state.sessions[index];
+      if (!row) return;
+      composerCommand = null;
+      messengerNavigation = {
+        id: event.id,
+        view: "chat",
+        sessionKey: row.key,
+      };
+      renderCurrentPanel();
+      return;
+    }
+    messengerNavigation = composerNavigation(state, event.id);
+    composerCommand =
+      event.command === "attach-browser-context" && event.attachment
+        ? { id: event.id, action: "attach", attachments: event.attachment }
+        : { id: event.id, action: "focus" };
+    renderCurrentPanel();
   }
 
   function reconnectBridge(): void {
@@ -516,11 +636,36 @@ export function mountMessenger(
           <SupercodeMessenger
             state={displayState}
             adapter={adapter}
+            navigation={messengerNavigation}
+            composerCommand={composerCommand}
+            labels={{ attachContext: "Attach selected text or current page" }}
             components={{ TaskPlan: () => null }}
-            {...(terminals
-              ? {
-                  slots: {
-                    headerActions: () => (
+            slots={{
+              headerActions: () => (
+                <>
+                  {widget.requestBrowserContext ? (
+                    <button
+                      type="button"
+                      class="vw-shortcut-launch"
+                      aria-label="Keyboard shortcuts"
+                      title="Keyboard shortcuts"
+                      onClick={showShortcutHelp}
+                    >
+                      <svg
+                        aria-hidden="true"
+                        viewBox="0 0 24 24"
+                        width="16"
+                        height="16"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.8"
+                      >
+                        <rect x="3" y="6" width="18" height="12" rx="2" />
+                        <path d="M7 10h.01M11 10h.01M15 10h.01M18 10h.01M7 14h2M11 14h6" />
+                      </svg>
+                    </button>
+                  ) : null}
+                  {terminals ? (
                       <button
                         ref={terminalLauncher}
                         type="button"
@@ -542,10 +687,10 @@ export function mountMessenger(
                         <span aria-hidden="true">&gt;_</span>
                         <small>{terminals.sessions.length}</small>
                       </button>
-                    ),
-                  },
-                }
-              : {})}
+                  ) : null}
+                </>
+              ),
+            }}
           />
         </div>
         {terminalsOpen && terminals && TerminalPanel ? (
@@ -603,6 +748,7 @@ export function mountMessenger(
 
   const accumulatedState: Record<string, unknown> = {};
   let launcherHarness = "";
+  const stopHostEvents = widget.onHostEvent?.(applyHostEvent) ?? (() => {});
 
   function syncLauncher(state: SupercodeUiState): void {
     const harness =
@@ -720,6 +866,7 @@ export function mountMessenger(
         imageResolutions.delete(requestId);
       }
       renderPreact(null, appRoot);
+      stopHostEvents();
       widget.destroy();
     },
     { once: true },
@@ -732,6 +879,7 @@ export function mountMessenger(
 
   return (): void => {
     clearBridgeWatch();
+    stopHostEvents();
     renderPreact(null, appRoot);
     widget.destroy();
   };

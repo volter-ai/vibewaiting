@@ -13,6 +13,24 @@
   },
   "background": { "service_worker": "background.js", "type": "module" },
   "action": { "default_title": "Vibewaiting settings" },
+  "commands": {
+    "focus-composer": {
+      "suggested_key": { "default": "Alt+Shift+V" },
+      "description": "Open Vibewaiting and focus the message box"
+    },
+    "attach-browser-context": {
+      "suggested_key": { "default": "Alt+Shift+A" },
+      "description": "Attach selected text or the current page"
+    },
+    "previous-conversation": {
+      "suggested_key": { "default": "Alt+Shift+Left" },
+      "description": "Open the previous agent conversation"
+    },
+    "next-conversation": {
+      "suggested_key": { "default": "Alt+Shift+Right" },
+      "description": "Open the next agent conversation"
+    }
+  },
   "options_page": "options.html",
   "content_scripts": [
     {

@@ -9,6 +9,11 @@ import {
   VIBEWAITING_PRESENTATIONS,
 } from "../src/presentations.js";
 import { VIBEWAITING_RADIUS } from "../src/theme.js";
+import {
+  captureBrowserContext,
+  captureShortcutAttachment,
+} from "./browser-context.js";
+import { browserShortcutLabel } from "../src/browser-shortcuts.js";
 
 const overlay = createOverlay({
   id: "vibewaiting",
@@ -29,16 +34,74 @@ const port = chrome.runtime.connect({ name: "vibewaiting:content" });
 port.onMessage.addListener((raw) => {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return;
   const message = raw as Record<string, unknown>;
-  if (message.type !== "launcher") return;
-  const harness = typeof message.harness === "string" ? message.harness : "";
-  const icon = harnessLogoDataUrl(harness);
-  overlay.setLauncher({
-    label:
-      typeof message.label === "string" ? message.label : "Open agent chats",
-    icon,
-    hidden: message.hidden === true || icon === null,
-  });
-  overlay.setBadge(typeof message.badge === "number" ? message.badge : null);
+  if (message.type === "launcher") {
+    const harness = typeof message.harness === "string" ? message.harness : "";
+    const icon = harnessLogoDataUrl(harness);
+    overlay.setLauncher({
+      label:
+        `${typeof message.label === "string" ? message.label : "Open agent chats"} · ${browserShortcutLabel("focus")}`,
+      icon,
+      hidden: message.hidden === true || icon === null,
+    });
+    overlay.setBadge(typeof message.badge === "number" ? message.badge : null);
+    return;
+  }
+  if (
+    message.type === "browser-context-request" &&
+    typeof message.id === "string" &&
+    message.action === "candidates"
+  ) {
+    try {
+      port.postMessage({
+        type: "browser-context-response",
+        id: message.id,
+        ok: true,
+        attachments: captureBrowserContext(),
+      });
+    } catch (error) {
+      port.postMessage({
+        type: "browser-context-response",
+        id: message.id,
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Could not capture browser context.",
+      });
+    }
+    return;
+  }
+  if (
+    message.type !== "browser-shortcut" ||
+    typeof message.id !== "string" ||
+    message.command !== "focus-composer" &&
+      message.command !== "attach-browser-context" &&
+      message.command !== "previous-conversation" &&
+      message.command !== "next-conversation"
+  )
+    return;
+  const id = message.id;
+  const command = message.command;
+  const finish = (attachment?: unknown): void => {
+    overlay.open();
+    requestAnimationFrame(() =>
+      port.postMessage({
+        type: "browser-shortcut-result",
+        id,
+        command,
+        ...(attachment ? { attachment } : {}),
+      }),
+    );
+  };
+  if (command !== "attach-browser-context") {
+    finish();
+    return;
+  }
+  try {
+    finish(captureShortcutAttachment());
+  } catch {
+    finish();
+  }
 });
 
 window.addEventListener(

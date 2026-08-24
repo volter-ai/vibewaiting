@@ -71,6 +71,13 @@ aside {
   color: #a9adba;
   background: #161922;
 }
+.shortcuts { margin-top:30px; padding-top:24px; border-top:1px solid #383d4b }
+.shortcuts h2 { margin:0 0 3px; font-size:18px }
+.shortcuts p { margin:0 0 12px; font-size:13px }
+.shortcuts dl { display:grid; gap:0; margin:0 0 12px }
+.shortcuts dl div { display:flex; align-items:center; justify-content:space-between; gap:18px; padding:9px 0; border-bottom:1px solid #2c303b }
+.shortcuts dt,.shortcuts dd { margin:0 }
+kbd { padding:3px 6px; border:1px solid #4a4f5d; border-radius:6px; background:#191c24; font:650 12px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace }
 code {
   color: #f4f5f7;
 }

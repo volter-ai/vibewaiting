@@ -35,10 +35,28 @@ Use `--browser brave`, `chromium`, or `firefox` to register the host for another
 assigns a different unpacked-extension ID, copy the ID shown on the settings page and reinstall with
 `--extension-id <id>`.
 
-The extension has only `storage` and `nativeMessaging` privileges. Content scripts receive a bounded
-launcher projection—not transcripts, filesystem paths, credentials, or policy. Full messenger state
-is sent only to the extension-owned, origin-isolated iframe; native message frames and reassembly are
-bounded, and unknown harnesses remain hidden instead of receiving a fabricated fallback identity.
+The extension uses `storage` and `nativeMessaging`, plus host access for its on-page overlay and
+browser-context capture on ordinary web pages. Content scripts receive a bounded launcher projection—not
+transcripts, filesystem paths, credentials, or policy. Full messenger state is sent only to the
+extension-owned, origin-isolated iframe; native message frames and reassembly are bounded, and
+unknown harnesses remain hidden instead of receiving a fabricated fallback identity. Page context
+never travels to the native host until the user attaches it to a message. URLs lose credentials and
+query parameters, and every text payload is size-bounded and validated on both sides of the tab
+boundary.
+
+The composer's attach button is deliberately one-step: it attaches selected text when a selection
+exists, otherwise it attaches sanitized visible page text. Files can be dragged directly onto the
+composer. Four browser-remappable commands make the overlay callable
+without hunting for its launcher:
+
+- `⌥⇧V` (`Alt+Shift+V`) opens Vibewaiting and focuses the message box.
+- `⌥⇧A` (`Alt+Shift+A`) immediately attaches the current selection or current page.
+- `⌥⇧←` (`Alt+Shift+Left`) opens the previous conversation.
+- `⌥⇧→` (`Alt+Shift+Right`) opens the next conversation.
+
+The previous/next commands rotate through the current stable list rather than following live
+activity reordering, so a busy fleet cannot move the target underneath the shortcut. Browser users
+can change all four bindings from the browser's extension-shortcuts page.
 
 The extension can also mirror local tmux sessions as a familiar terminal surface. Existing sessions
 are read-only and attach without changing their tmux window size. Sessions created from Vibewaiting

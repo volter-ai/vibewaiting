@@ -18,6 +18,17 @@
         <button type="submit">Save and connect</button>
       </form>
       <output aria-live="polite"></output>
+      <section class="shortcuts" aria-labelledby="shortcuts-title">
+        <h2 id="shortcuts-title">Keyboard shortcuts</h2>
+        <p>Call Vibewaiting without leaving the page you are working in.</p>
+        <dl>
+          <div><dt>Focus message box</dt><dd><kbd data-shortcut="focus"></kbd></dd></div>
+          <div><dt>Attach selection or current page</dt><dd><kbd data-shortcut="attach"></kbd></dd></div>
+          <div><dt>Previous conversation</dt><dd><kbd data-shortcut="previous"></kbd></dd></div>
+          <div><dt>Next conversation</dt><dd><kbd data-shortcut="next"></kbd></dd></div>
+        </dl>
+        <button id="configure-shortcuts" type="button">Change shortcuts in browser</button>
+      </section>
       <aside>Before first use, run <code>vibewaiting native install --extension-id <span id="extension-id"></span></code>.</aside>
     </main>
     <script type="module" src="options.js"></script>

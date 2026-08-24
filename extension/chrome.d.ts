@@ -4,6 +4,10 @@ interface ExtensionEvent<T> {
 
 interface ExtensionPort {
   name: string;
+  sender?: {
+    tab?: { id?: number; windowId?: number };
+    frameId?: number;
+  };
   postMessage(message: unknown): void;
   disconnect(): void;
   onMessage: ExtensionEvent<(message: unknown) => void>;
@@ -35,5 +39,13 @@ declare const chrome: {
     setBadgeBackgroundColor(details: { color: string }): Promise<void>;
     setTitle(details: { title: string }): Promise<void>;
     onClicked: ExtensionEvent<() => void>;
+  };
+  commands: {
+    onCommand: ExtensionEvent<
+      (command: string, tab?: { id?: number; windowId?: number }) => void
+    >;
+  };
+  tabs: {
+    create(options: { url: string }): Promise<{ id?: number }>;
   };
 };
