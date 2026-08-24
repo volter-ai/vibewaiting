@@ -97,6 +97,7 @@ class RecordingTerminalService implements TerminalService {
   readonly launched: Array<{
     conversationKey: string | null;
     harness: string;
+    initialInput?: string;
     launch: Parameters<TerminalService["launchSession"]>[1];
   }> = [];
   readonly moved: Array<{
@@ -124,8 +125,9 @@ class RecordingTerminalService implements TerminalService {
     harness: Parameters<TerminalService["launchSession"]>[0],
     launch: Parameters<TerminalService["launchSession"]>[1],
     conversationKey: Parameters<TerminalService["launchSession"]>[2] = null,
+    initialInput?: Parameters<TerminalService["launchSession"]>[3],
   ): Promise<TerminalServiceSnapshot> {
-    this.launched.push({ conversationKey, harness, launch });
+    this.launched.push({ conversationKey, harness, launch, ...(initialInput === undefined ? {} : { initialInput }) });
     this.state = {
       ...this.state,
       attachment: {
@@ -151,6 +153,14 @@ class RecordingTerminalService implements TerminalService {
   ): Promise<TerminalServiceSnapshot> {
     this.moved.push({ conversationKey, harness, nativeSessionId, proof });
     return await this.launchSession(harness, launch, conversationKey);
+  }
+  async prepareMoveSession(
+    _harness: Parameters<TerminalService["prepareMoveSession"]>[0],
+    _nativeSessionId: Parameters<TerminalService["prepareMoveSession"]>[1],
+    _cwd: Parameters<TerminalService["prepareMoveSession"]>[2],
+    proof: Parameters<TerminalService["prepareMoveSession"]>[3],
+  ): Promise<Awaited<ReturnType<TerminalService["prepareMoveSession"]>>> {
+    return proof ?? { observedAtMs: 2_000_001, source: "native_terminal_status", turn: "idle" };
   }
   async attach(): Promise<TerminalServiceSnapshot> { return this.state; }
   async close(): Promise<TerminalServiceSnapshot> { return this.state; }
@@ -534,7 +544,7 @@ describe("messenger session state machine", () => {
     expect((lastPush() as WidgetState & { terminalMoveStatus?: string }).terminalMoveStatus).toBeNull();
   });
 
-  it("moves every idle native session while retaining one cancellable queue for busy turns", async () => {
+  it("moves idle or native-proven sessions while retaining one cancellable queue for busy turns", async () => {
     const activity = (
       descriptor: typeof ATLAS,
       turn: "idle" | "working",
@@ -551,12 +561,19 @@ describe("messenger session state machine", () => {
       },
     });
     const busyClaude = { ...ATLAS, activity: activity(ATLAS, "working") };
-    const idleCodex = { ...BRIDGE, activity: activity(BRIDGE, "idle") };
-    const client = new FakeHarnessClient({ sessions: [busyClaude, idleCodex] });
+    const persistedCodex = {
+      ...BRIDGE,
+      activity: {
+        ...activity(BRIDGE, "idle"),
+        presence: "persisted" as const,
+        turn: "unknown" as const,
+      },
+    };
+    const client = new FakeHarnessClient({ sessions: [busyClaude, persistedCodex] });
     const terminalService = new RecordingTerminalService();
     terminalService.nativeVisible = true;
     const { host, lastPush } = await sessionRig(
-      [busyClaude, idleCodex],
+      [busyClaude, persistedCodex],
       client,
       undefined,
       undefined,
@@ -572,7 +589,7 @@ describe("messenger session state machine", () => {
       conversationKey: sessionKey(BRIDGE.locator),
       harness: "codex",
       nativeSessionId: "bridge-1",
-      proof: { observedAtMs: 2_000_001, source: "codex_rollout", turn: "idle" },
+      proof: { observedAtMs: 2_000_001, source: "native_terminal_status", turn: "idle" },
     });
     expect(lastPush()).toMatchObject({
       terminalMoveQueuedCount: 1,
@@ -689,9 +706,15 @@ describe("messenger session state machine", () => {
     expect(terminalService.launched).toEqual([{
       conversationKey: null,
       harness: "codex",
+      initialInput: "inspect the current build\n",
       launch: {
         program: "codex",
-        arguments: ["inspect the current build"],
+        arguments: [
+          "-c",
+          "check_for_update_on_startup=false",
+          "-c",
+          "projects.\"/tmp/project\".trust_level=\"trusted\"",
+        ],
         cwd: "/tmp/project",
         env: {},
       },

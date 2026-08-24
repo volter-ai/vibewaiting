@@ -23,7 +23,7 @@ import type {
   SupercodeClientAction,
   SupercodeClientSnapshot,
 } from "@volter-ai-dev/supercode-client";
-import { createNativeStartLaunch } from "@volter-ai-dev/supercode-harness-sdk";
+import { createNativeInteractiveStart } from "@volter-ai-dev/supercode-harness-sdk";
 import type { DiscoveryQuery, HarnessId, SessionArtifact, SessionDescriptor, SessionFormat, SessionLocator, StructuredLaunch } from "@volter-ai-dev/supercode-harness-sdk";
 import type { ContinuationMode } from "@volter-ai-dev/supercode-ui";
 import { parseSupercodeUiIntent } from "@volter-ai-dev/supercode-ui/core";
@@ -274,8 +274,15 @@ export interface TerminalService {
     harness: HarnessId,
     launch: StructuredLaunch,
     conversationKey?: string | null,
+    initialInput?: string,
   ): Promise<TerminalServiceSnapshot>;
-  canMoveSession(harness: HarnessId, sessionId: string): boolean;
+  canMoveSession(harness: HarnessId, sessionId: string, cwd: string): boolean;
+  prepareMoveSession(
+    harness: HarnessId,
+    nativeSessionId: string,
+    cwd: string,
+    proof: { observedAtMs: number; source: string; turn: "idle" } | null,
+  ): Promise<{ observedAtMs: number; source: string; turn: "idle" } | null>;
   moveSession(
     harness: HarnessId,
     nativeSessionId: string,
@@ -587,6 +594,15 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   let terminalHost = options.terminalService ? await options.terminalService.snapshot() : null;
   const terminalMoves = new Map<string, "waiting" | "moving">();
   let terminalMoveInFlight: Promise<void> | null = null;
+  let terminalMoveRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  const scheduleTerminalMoveRetry = (): void => {
+    if (terminalMoveRetryTimer || stopped || terminalMoves.size === 0) return;
+    terminalMoveRetryTimer = setTimeout(() => {
+      terminalMoveRetryTimer = null;
+      void processTerminalMove();
+    }, 1_000);
+    terminalMoveRetryTimer.unref?.();
+  };
   let nativeRefreshInFlight: Promise<void> | null = null;
   const refreshNativeSessions = (): Promise<void> => {
     if (!options.terminalService) return Promise.resolve();
@@ -603,11 +619,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   };
   const movableNativeDescriptors = (): SessionDescriptor[] => options.terminalService
     ? descriptors.filter((descriptor) =>
-        descriptor.activity?.presence === "running" &&
         (descriptor.locator.harness === "claude-code" || descriptor.locator.harness === "codex") &&
         options.terminalService!.canMoveSession(
           descriptor.locator.harness,
           descriptor.locator.session_id,
+          descriptor.cwd ?? options.workspace,
         )
       )
     : [];
@@ -834,11 +850,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     const canResume = projected.canResume && activeDescriptor !== undefined && activeRuntimeStatus === null;
     const canMoveToTerminal = Boolean(
       options.terminalService &&
-      activeDescriptor?.activity?.presence === "running" &&
+      activeDescriptor &&
       (activeDescriptor.locator.harness === "claude-code" || activeDescriptor.locator.harness === "codex") &&
       options.terminalService.canMoveSession(
         activeDescriptor.locator.harness,
         activeDescriptor.locator.session_id,
+        activeDescriptor.cwd ?? options.workspace,
       )
     );
     const loadedMessages = snapshot.activeSession?.messages.length
@@ -1266,56 +1283,83 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     for (const [key, status] of terminalMoves) {
       if (status !== "waiting") continue;
       const descriptor = descriptors.find((candidate) => sessionKey(candidate.locator) === key);
-      if (!descriptor || descriptor.activity?.presence !== "running") {
+      if (!descriptor || (
+        descriptor.locator.harness !== "claude-code" && descriptor.locator.harness !== "codex"
+      ) || !options.terminalService.canMoveSession(
+        descriptor.locator.harness,
+        descriptor.locator.session_id,
+        descriptor.cwd ?? options.workspace,
+      )) {
         terminalMoves.delete(key);
         queueChanged = true;
         continue;
       }
-      if (descriptor.activity.turn === "idle") {
+      if (descriptor.activity?.presence !== "running" || descriptor.activity.turn === "idle") {
         queuedKey = key;
         break;
       }
     }
     if (!queuedKey) {
       if (queueChanged) await pushNow(true);
+      scheduleTerminalMoveRetry();
       return;
     }
     terminalMoveInFlight = (async () => {
-      terminalMoves.set(queuedKey, "moving");
-      await pushNow(true);
       try {
         // Native terminal discovery can take a few seconds. Finish it before taking the
         // authoritative Supercode activity sample so the idle proof cannot expire in transit.
         await options.terminalService!.refreshNativeSessions();
-        await refreshSessions();
-        const current = descriptors.find((candidate) => sessionKey(candidate.locator) === queuedKey);
+        let current = descriptors.find((candidate) => sessionKey(candidate.locator) === queuedKey);
+        if (current?.activity?.presence === "running") {
+          await refreshSessions();
+          current = descriptors.find((candidate) => sessionKey(candidate.locator) === queuedKey);
+        }
         const activity = current?.activity;
-        if (!current || activity?.presence !== "running" || activity.turn !== "idle") {
+        if (!current || (activity?.presence === "running" && activity.turn !== "idle")) {
           terminalMoves.set(queuedKey, "waiting");
           await pushNow(false, "inventory");
+          scheduleTerminalMoveRetry();
           return;
         }
         if (current.locator.harness !== "claude-code" && current.locator.harness !== "codex") {
           throw new Error(`${current.locator.harness} native terminal handoff is not supported`);
         }
-        if (!options.terminalService!.canMoveSession(current.locator.harness, current.locator.session_id)) {
+        const cwd = current.cwd ?? options.workspace;
+        if (!options.terminalService!.canMoveSession(current.locator.harness, current.locator.session_id, cwd)) {
           throw new Error("the native terminal owning this session is no longer visible");
         }
         const { launch } = await requireClient(options).resumeInstructions({
           locator: current.locator,
-          cwd: current.cwd ?? options.workspace,
+          cwd,
           ...(options.policy ? { policy: options.policy } : {}),
         });
+        const knownProof = activity?.presence === "running" && activity.turn === "idle"
+          ? {
+              observedAtMs: activity.evidence.observed_at_ms,
+              source: activity.evidence.source,
+              turn: "idle" as const,
+            }
+          : null;
+        const proof = await options.terminalService!.prepareMoveSession(
+          current.locator.harness,
+          current.locator.session_id,
+          cwd,
+          knownProof,
+        );
+        if (!proof) {
+          terminalMoves.set(queuedKey, "waiting");
+          scheduleTerminalMoveRetry();
+          return;
+        }
+        if (terminalMoves.get(queuedKey) !== "waiting") return;
+        terminalMoves.set(queuedKey, "moving");
+        await pushNow(true);
         terminalHost = await options.terminalService!.moveSession(
           current.locator.harness,
           current.locator.session_id,
           launch,
           queuedKey,
-          {
-            observedAtMs: activity.evidence.observed_at_ms,
-            source: activity.evidence.source,
-            turn: "idle",
-          },
+          proof,
         );
         terminalMoves.delete(queuedKey);
         actionError = null;
@@ -1815,13 +1859,18 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           if (newChat.context.length || newChat.images.length) {
             throw new Error("terminal starts currently accept text only");
           }
-          const launch = createNativeStartLaunch({
+          const start = createNativeInteractiveStart({
             harness: newChat.harness as "claude-code" | "codex",
             cwd: options.workspace,
             prompt: newChat.text,
             ...(options.policy ? { policy: options.policy } : {}),
           });
-          terminalHost = await options.terminalService.launchSession(newChat.harness, launch);
+          terminalHost = await options.terminalService.launchSession(
+            newChat.harness,
+            start.launch,
+            null,
+            start.initialInput,
+          );
           log(`started a new ${newChat.harness} session in an owned tmux terminal`);
         } else {
           await releaseForeignView();
@@ -2213,6 +2262,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       timer = null;
       if (attentionTimer) clearTimeout(attentionTimer);
       attentionTimer = null;
+      if (terminalMoveRetryTimer) clearTimeout(terminalMoveRetryTimer);
+      terminalMoveRetryTimer = null;
       await flushPersistence();
       stopRepush();
       stopDiscovery();
