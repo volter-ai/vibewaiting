@@ -32,7 +32,7 @@ import type {
 } from "@volter-ai-dev/supercode-harness-sdk";
 import type { WidgetBridge } from "../src/daemon.js";
 
-const ALL_CAPABILITIES: RuntimeCapabilities = {
+const ALL_CAPABILITIES = {
   start_session: true,
   resume_session: true,
   attach_existing_process: false,
@@ -41,7 +41,7 @@ const ALL_CAPABILITIES: RuntimeCapabilities = {
   interrupt: true,
   respond_to_requests: true,
   steer: false,
-};
+} as RuntimeCapabilities;
 
 export function localHarness(id: HarnessId, over: Partial<LocalHarness> = {}): LocalHarness {
   return {
