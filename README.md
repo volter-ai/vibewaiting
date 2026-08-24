@@ -81,7 +81,10 @@ the messenger phone-sized and reshape the same surface for a terminal before ter
 Run `npm run dev:extension` once. It owns a persistent, isolated Brave/Chromium development profile,
 installs the matching native host, syncs the remembered local Supercode worktree, watches both
 projects' relevant sources, and after every successful build reloads the extension and refreshes
-its ordinary web tabs. The profile and settings
+its ordinary web tabs. When multiple Vibewaiting checkouts are running, the development loop
+selects the browser process whose loaded-extension directory matches this checkout. Every reload
+is then verified against a content fingerprint from the completed build; a stale or wrong checkout
+is reported as a failed update rather than a successful reload. The profile and settings
 survive restarts, so neither developers nor reviewers need to revisit the extensions page. Override
 the browser, CDP port, profile, or initial page with `VIBEWAITING_DEV_BROWSER`,
 `VIBEWAITING_DEV_CDP_PORT`, `VIBEWAITING_DEV_PROFILE`, or `VIBEWAITING_DEV_URL`. A new profile is
