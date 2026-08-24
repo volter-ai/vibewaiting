@@ -1,17 +1,24 @@
 import {
+  browserElementAttachment,
+  browserImageAttachment,
   browserSelectionAttachment,
   browserWebReferenceAttachment,
   type BrowserCaptureSource,
   type BrowserContextAttachment,
 } from "../src/browser-context.js";
 
-interface ContextLink {
-  url: string;
-  label: string;
-  evidence: string;
-}
+type PageTarget =
+  | { kind: "link"; url: string; label: string; evidence: string }
+  | { kind: "image"; url: string; label: string; evidence: string }
+  | {
+      kind: "element";
+      label: string;
+      descriptor: string;
+      evidence: string;
+    };
 
-let contextLink: ContextLink | null = null;
+let pointerTarget: PageTarget | null = null;
+let focusedTarget: PageTarget | null = null;
 
 const OMITTED_TAGS = new Set([
   "script",
@@ -97,62 +104,164 @@ function boundedVisibleText(root: Element, limit: number): string {
     : text;
 }
 
-function linkAt(target: EventTarget | null): ContextLink | null {
+function isWidgetElement(element: Element): boolean {
+  return Boolean(element.closest('[data-widget-shell-id="vibewaiting"]'));
+}
+
+function targetAt(target: EventTarget | null): PageTarget | null {
   const element = target instanceof Element ? target : null;
+  if (!element || isWidgetElement(element)) return null;
+  const image = element.closest("img");
+  if (image instanceof HTMLImageElement) {
+    const label =
+      image.alt.trim() ||
+      image.getAttribute("aria-label")?.trim() ||
+      image.title.trim() ||
+      "Page image";
+    const evidenceRoot =
+      image.closest("figure, article, li, tr, p") ??
+      image.parentElement ??
+      image;
+    return {
+      kind: "image",
+      url: image.currentSrc || image.src,
+      label,
+      evidence: boundedVisibleText(evidenceRoot, 4_000),
+    };
+  }
   const anchor = element?.closest("a[href]");
-  if (!(anchor instanceof HTMLAnchorElement)) return null;
+  if (anchor instanceof HTMLAnchorElement) {
+    const label =
+      anchor.innerText.trim() ||
+      anchor.getAttribute("aria-label")?.trim() ||
+      anchor.title.trim() ||
+      "";
+    const evidenceRoot =
+      anchor.closest("article, li, tr, p") ?? anchor.parentElement ?? anchor;
+    return {
+      kind: "link",
+      url: anchor.href,
+      label,
+      evidence: boundedVisibleText(evidenceRoot, 4_000),
+    };
+  }
+  const meaningful = element.closest(
+    "pre, code, blockquote, figure, button, [role='button'], h1, h2, h3, h4, h5, h6",
+  );
+  if (!meaningful) return null;
+  const role = meaningful.getAttribute("role") || meaningful.tagName.toLowerCase();
   const label =
-    anchor.innerText.trim() || anchor.getAttribute("aria-label")?.trim() || "";
-  const evidenceRoot =
-    anchor.closest("article, li, tr, p") ?? anchor.parentElement ?? anchor;
+    meaningful.getAttribute("aria-label")?.trim() ||
+    boundedVisibleText(meaningful, 300) ||
+    meaningful.getAttribute("title")?.trim() ||
+    `Visible ${role}`;
+  const rect = meaningful.getBoundingClientRect();
   return {
-    url: anchor.href,
+    kind: "element",
     label,
-    evidence: boundedVisibleText(evidenceRoot, 4_000),
+    descriptor: [
+      `Role: ${role}`,
+      `Viewport bounds: ${Math.round(rect.x)},${Math.round(rect.y)} ${Math.round(rect.width)}×${Math.round(rect.height)}`,
+    ].join("\n"),
+    evidence: boundedVisibleText(meaningful, 16_000),
   };
 }
 
 document.addEventListener(
-  "contextmenu",
+  "pointerover",
   (event) => {
-    contextLink = linkAt(event.target);
+    const element = event.target instanceof Element ? event.target : null;
+    if (element && isWidgetElement(element)) return;
+    pointerTarget = targetAt(event.target);
   },
   { capture: true },
 );
 
-function pageCandidates(): BrowserContextAttachment[] {
+document.addEventListener(
+  "focusin",
+  (event) => {
+    const element = event.target instanceof Element ? event.target : null;
+    if (element && isWidgetElement(element)) return;
+    focusedTarget = targetAt(event.target);
+  },
+  { capture: true },
+);
+
+function attachmentsFor(target: PageTarget): BrowserContextAttachment[] {
+  if (target.kind === "link")
+    return [
+      browserWebReferenceAttachment(
+        source("link", target.url),
+        target.url,
+        target.evidence,
+        target.label,
+      ),
+    ];
+  if (target.kind === "image") {
+    const image = browserImageAttachment(
+      source("image", target.url),
+      target.label,
+      target.url,
+    );
+    if (image) return [image];
+    return [
+      browserElementAttachment(
+        source("image-reference", target.url),
+        target.label,
+        `Image source: ${target.url}`,
+        target.evidence,
+      ),
+    ];
+  }
+  return [
+    browserElementAttachment(
+      source("element", `${target.descriptor}\n${target.label}`),
+      target.label,
+      target.descriptor,
+      target.evidence,
+    ),
+  ];
+}
+
+function smartAttachments(): BrowserContextAttachment[] {
   const selection = selectedText();
   const selected = browserSelectionAttachment(
     source("selection", selection),
     selection,
   );
+  if (selected) return [selected];
+  const activeTarget = targetAt(document.activeElement);
+  const target = activeTarget ?? focusedTarget ?? pointerTarget;
+  if (target) return attachmentsFor(target);
   const visibleText = document.body
     ? boundedVisibleText(document.body, 16_000)
     : "";
-  return [
-    ...(selected ? [selected] : []),
-    browserWebReferenceAttachment(
-      source("page", location.href),
-      location.href,
-      visibleText,
-      document.title,
-    ),
-  ];
+  return [browserWebReferenceAttachment(
+    source("page", location.href),
+    location.href,
+    visibleText,
+    document.title,
+  )];
 }
 
 export function captureBrowserContext(): BrowserContextAttachment[] {
-  return pageCandidates();
+  return smartAttachments();
 }
 
-export function captureShortcutAttachment(): BrowserContextAttachment {
-  return pageCandidates()[0]!;
+export function captureShortcutAttachments(): BrowserContextAttachment[] {
+  return smartAttachments();
 }
 
 export function captureLinkAttachment(
   targetUrl: string,
 ): BrowserContextAttachment {
-  const remembered = contextLink?.url === targetUrl ? contextLink : null;
+  const candidates = [targetAt(document.activeElement), focusedTarget, pointerTarget];
+  const remembered = candidates.find(
+    (candidate): candidate is Extract<PageTarget, { kind: "link" }> =>
+      candidate?.kind === "link" && candidate.url === targetUrl,
+  );
   const link = remembered ?? {
+    kind: "link" as const,
     url: targetUrl,
     label: "",
     evidence: `Link found on ${document.title || location.hostname}.`,

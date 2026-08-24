@@ -12,7 +12,7 @@ export type MessengerHostEvent =
         | "attach-browser-context"
         | "previous-conversation"
         | "next-conversation";
-      attachment?: BrowserContextAttachment;
+      attachments?: BrowserContextAttachment[];
     };
 
 export interface MessengerTransport {

@@ -6,17 +6,31 @@ import {
 
 export const MAX_BROWSER_CONTEXT_DETAIL = 20_000;
 export const MAX_BROWSER_CONTEXT_ITEMS = 4;
+export const MAX_BROWSER_IMAGE_URL = 7_000_000;
 
 export type BrowserContextAction = "candidates";
 
 export interface BrowserTextAttachment {
   id: string;
-  kind: "browser-selection" | "browser-page" | "web-reference";
+  kind:
+    | "browser-selection"
+    | "browser-page"
+    | "browser-element"
+    | "web-reference";
   label: string;
   detail: string;
 }
 
-export type BrowserContextAttachment = BrowserTextAttachment;
+export interface BrowserImageAttachment {
+  id: string;
+  kind: "browser-image";
+  label: string;
+  url: string;
+}
+
+export type BrowserContextAttachment =
+  | BrowserTextAttachment
+  | BrowserImageAttachment;
 
 export interface BrowserCaptureSource {
   id: string;
@@ -77,6 +91,43 @@ export function browserWebReferenceAttachment(
     "--- END WEB REFERENCE ---",
   ].join("\n");
   return attachment(source, "web-reference", label, body);
+}
+
+export function browserElementAttachment(
+  source: BrowserCaptureSource,
+  label: string,
+  descriptor: string,
+  evidence: string,
+): BrowserTextAttachment {
+  return attachment(
+    source,
+    "browser-element",
+    compact(label, 200) || "Page element",
+    [
+      "--- BEGIN PAGE ELEMENT ---",
+      `Element: ${compact(descriptor, 1_000) || "Visible page element"}`,
+      "",
+      compact(evidence, 16_000) || "[No visible semantic evidence]",
+      "--- END PAGE ELEMENT ---",
+    ].join("\n"),
+  );
+}
+
+export function browserImageAttachment(
+  source: BrowserCaptureSource,
+  label: string,
+  value: string,
+): BrowserImageAttachment | null {
+  let url = value;
+  if (/^https?:/i.test(value)) url = sanitizeBrowserUrl(value);
+  else if (!/^data:image\/(?:png|jpeg|gif|webp);base64,/i.test(value)) return null;
+  if (!url || url.length > MAX_BROWSER_IMAGE_URL) return null;
+  return {
+    id: compact(source.id, 2_000),
+    kind: "browser-image",
+    label: compact(label, 200) || "Page image",
+    url,
+  };
 }
 
 function sourceHeader(source: BrowserCaptureSource): string {
@@ -161,15 +212,29 @@ export function parseBrowserContextAttachments(
       candidate.detail.length > MAX_BROWSER_CONTEXT_DETAIL ||
       candidate.kind !== "browser-selection" &&
       candidate.kind !== "browser-page" &&
+      candidate.kind !== "browser-element" &&
       candidate.kind !== "web-reference"
-    )
-      return null;
-    parsed.push({
-      id: candidate.id,
-      kind: candidate.kind,
-      label: candidate.label,
-      detail: candidate.detail,
-    });
+    ) {
+      if (
+        candidate.kind !== "browser-image" ||
+        typeof candidate.url !== "string"
+      )
+        return null;
+      const image = browserImageAttachment(
+        { id: candidate.id, title: "", url: "", capturedAt: "" },
+        candidate.label,
+        candidate.url,
+      );
+      if (!image) return null;
+      parsed.push(image);
+    } else {
+      parsed.push({
+        id: candidate.id,
+        kind: candidate.kind,
+        label: candidate.label,
+        detail: candidate.detail,
+      });
+    }
   }
   return parsed;
 }

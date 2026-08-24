@@ -20,7 +20,7 @@
     },
     "attach-browser-context": {
       "suggested_key": { "default": "Alt+Shift+A" },
-      "description": "Attach selected text or the current page"
+      "description": "Attach the selection, pointed target, or current page"
     },
     "previous-conversation": {
       "suggested_key": { "default": "Alt+Shift+Left" },

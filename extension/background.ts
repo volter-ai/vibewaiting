@@ -391,15 +391,15 @@ function handleContentMessage(port: ExtensionPort, tabId: number, raw: unknown):
   )
     return;
   const attachments =
-    message.attachment === undefined
+    message.attachments === undefined
       ? []
-      : parseBrowserContextAttachments([message.attachment]);
+      : parseBrowserContextAttachments(message.attachments);
   if (attachments === null) return;
   forwardHostEvent(tabId, {
     type: "shortcut",
     id: message.id,
     command: message.command,
-    ...(attachments[0] ? { attachment: attachments[0] } : {}),
+    ...(attachments.length ? { attachments } : {}),
   });
 }
 

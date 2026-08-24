@@ -12,7 +12,7 @@ import { VIBEWAITING_RADIUS } from "../src/theme.js";
 import {
   captureBrowserContext,
   captureLinkAttachment,
-  captureShortcutAttachment,
+  captureShortcutAttachments,
 } from "./browser-context.js";
 import { browserShortcutLabel } from "../src/browser-shortcuts.js";
 
@@ -86,7 +86,7 @@ port.onMessage.addListener((raw) => {
           type: "browser-shortcut-result",
           id: message.id,
           command: "attach-browser-context",
-          attachment,
+          attachments: [attachment],
         }),
       );
     } catch {
@@ -105,14 +105,14 @@ port.onMessage.addListener((raw) => {
     return;
   const id = message.id;
   const command = message.command;
-  const finish = (attachment?: unknown): void => {
+  const finish = (attachments?: unknown): void => {
     overlay.open();
     requestAnimationFrame(() =>
       port.postMessage({
         type: "browser-shortcut-result",
         id,
         command,
-        ...(attachment ? { attachment } : {}),
+        ...(attachments ? { attachments } : {}),
       }),
     );
   };
@@ -121,7 +121,7 @@ port.onMessage.addListener((raw) => {
     return;
   }
   try {
-    finish(captureShortcutAttachment());
+    finish(captureShortcutAttachments());
   } catch {
     finish();
   }
