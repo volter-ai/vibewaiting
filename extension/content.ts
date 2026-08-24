@@ -26,7 +26,7 @@ const overlay = createOverlay({
   behavior: {
     persistence: createExtensionGeometryPersistence(chrome.storage.local),
   },
-  theme: { radius: VIBEWAITING_RADIUS },
+  theme: { radius: VIBEWAITING_RADIUS, surface: "transparent" },
 });
 
 overlay.mount();

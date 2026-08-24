@@ -25,4 +25,24 @@ describe("terminal presentation", () => {
       viewport: "virtual",
     });
   });
+
+  it("lets a fitted terminal reflow to the physical viewport", () => {
+    const presentation =
+      VIBEWAITING_PRESENTATIONS[VIBEWAITING_PRESENTATION.terminalFit];
+    const snapshot = resolvePresentationSnapshot({
+      authority: "guest",
+      name: VIBEWAITING_PRESENTATION.terminalFit,
+      physical: { width: 512, height: 320 },
+      presentation,
+      requested: { width: 760, height: 430 },
+      surface: "floating",
+    });
+
+    expect(snapshot).toMatchObject({
+      logical: { width: 512, height: 320 },
+      rendered: { width: 512, height: 320 },
+      scale: 1,
+      viewport: "responsive",
+    });
+  });
 });

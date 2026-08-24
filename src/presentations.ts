@@ -6,6 +6,7 @@ export const VIBEWAITING_PRESENTATION = Object.freeze({
   messenger: "messenger",
   terminalList: "terminal-list",
   terminal: "terminal",
+  terminalFit: "terminal-fit",
 } as const);
 
 export type VibewaitingPresentation =
@@ -52,6 +53,16 @@ export const VIBEWAITING_PRESENTATIONS = Object.freeze({
       allowUpscale: true,
       minimumScale: 0.65,
     },
+    surface: "auto",
+  },
+  [VIBEWAITING_PRESENTATION.terminalFit]: {
+    footprint: {
+      mode: "resizable",
+      preferred: TERMINAL_LOGICAL_SIZE,
+    },
+    // Fit mode lets the guest viewport follow the physical window. Supercode's terminal viewer
+    // observes that boundary and negotiates a new PTY grid for control attachments.
+    viewport: { mode: "responsive" },
     surface: "auto",
   },
 } satisfies Readonly<Record<VibewaitingPresentation, OverlayPresentation>>);

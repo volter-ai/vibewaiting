@@ -472,7 +472,7 @@ async function defaultAttachHost(opts: {
     launcherHidden: true,
     presentations: VIBEWAITING_PRESENTATIONS,
     initialPresentation: VIBEWAITING_PRESENTATION.messenger,
-    theme: { radius: VIBEWAITING_RADIUS },
+    theme: { radius: VIBEWAITING_RADIUS, surface: "transparent" },
   });
   return await WidgetHost.attach(opts.sessionId, {
     ns: opts.ns,
