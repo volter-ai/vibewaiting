@@ -535,7 +535,7 @@ describe("messenger session state machine", () => {
     const startedBefore = client.startedWith.length;
     expect(lastPush().harnesses.find((item) => item.id === "codex")).toMatchObject({
       launchModes: ["headless", "terminal"],
-      preferredLaunchMode: "headless",
+      preferredLaunchMode: "terminal",
     });
 
     await host.fireIntent(INTENT_QUEUE, {

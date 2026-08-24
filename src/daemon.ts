@@ -848,7 +848,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         return {
           ...item,
           launchModes,
-          preferredLaunchMode: preferred && launchModes.includes(preferred) ? preferred : launchModes[0] ?? null,
+          preferredLaunchMode: preferred && launchModes.includes(preferred)
+            ? preferred
+            : launchModes.includes("terminal")
+              ? "terminal"
+              : launchModes[0] ?? null,
         };
       }),
       continuationModes: canResume
