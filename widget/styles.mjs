@@ -24,6 +24,25 @@ body { background:transparent }
   padding:0 2px; border:2px solid var(--scui-bg-raised); border-radius:8px; background:var(--scui-muted); color:var(--scui-bg);
   font:700 8px/1 var(--scui-font) }
 
+.vw-shortcut-launch { display:grid; width:30px; height:30px; place-items:center; padding:0; border:0; border-radius:8px;
+  color:var(--scui-muted); background:transparent; cursor:pointer }
+.vw-shortcut-launch:hover,.vw-shortcut-launch:focus-visible { color:var(--scui-fg); background:var(--scui-fill); outline:0 }
+.vw-shortcut-launch svg { display:block; width:16px; height:16px }
+.vw-shortcut-help { width:min(300px,calc(100vw - 28px)); margin:auto; padding:16px; border:1px solid var(--scui-border-strong);
+  border-radius:12px; color:var(--scui-fg); background:var(--scui-bg); box-shadow:0 18px 50px rgba(16,24,40,.22);
+  font-family:var(--scui-font) }
+.vw-shortcut-help::backdrop { background:rgba(15,23,42,.26); backdrop-filter:blur(2px) }
+.vw-shortcut-help > strong { display:block; font-size:14px }
+.vw-shortcut-help > small { display:block; margin:3px 0 12px; color:var(--scui-muted); font-size:11px }
+.vw-shortcut-help dl { display:grid; margin:0 0 12px }
+.vw-shortcut-help dl div { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:8px 0; border-bottom:1px solid var(--scui-border) }
+.vw-shortcut-help dt,.vw-shortcut-help dd { margin:0; font-size:11px }
+.vw-shortcut-help kbd { padding:3px 6px; border:1px solid var(--scui-border-strong); border-radius:5px; background:var(--scui-fill);
+  font:650 10px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace }
+.vw-shortcut-help > button { width:100%; padding:8px; border:1px solid transparent; border-radius:8px; color:var(--scui-muted);
+  background:transparent; font:600 11px/1 var(--scui-font); cursor:pointer }
+.vw-shortcut-help > button:hover,.vw-shortcut-help > button:focus-visible { color:var(--scui-fg); background:var(--scui-fill); outline:0 }
+
 .vw-bridge-disconnected { position:absolute; inset:0; z-index:20; display:grid; place-content:center; justify-items:center; gap:8px;
   box-sizing:border-box; padding:28px; text-align:center; color:var(--scui-fg); background:color-mix(in srgb,var(--scui-bg-raised) 94%,transparent); backdrop-filter:blur(8px) }
 .vw-bridge-disconnected strong { font-size:15px }

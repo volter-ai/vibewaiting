@@ -1,5 +1,10 @@
 export {};
 
+import {
+  browserShortcutLabel,
+  type BrowserShortcut,
+} from "../src/browser-shortcuts.js";
+
 const SETTINGS_KEY = "vibewaiting:settings";
 const form = document.querySelector<HTMLFormElement>("form");
 const workspace = document.querySelector<HTMLInputElement>("#workspace");
@@ -7,6 +12,19 @@ const harness = document.querySelector<HTMLSelectElement>("#harness");
 const policy = document.querySelector<HTMLSelectElement>("#policy");
 const statusOutput = document.querySelector<HTMLOutputElement>("output");
 const extensionId = document.querySelector<HTMLElement>("#extension-id");
+for (const node of document.querySelectorAll<HTMLElement>("[data-shortcut]")) {
+  const shortcut = node.dataset.shortcut as BrowserShortcut | undefined;
+  if (shortcut) node.textContent = browserShortcutLabel(shortcut);
+}
+document
+  .querySelector<HTMLButtonElement>("#configure-shortcuts")
+  ?.addEventListener("click", () => {
+    void chrome.tabs.create({
+      url: /Firefox/i.test(navigator.userAgent)
+        ? "about:addons"
+        : "chrome://extensions/shortcuts",
+    });
+  });
 if (extensionId) extensionId.textContent = chrome.runtime.id;
 const port = chrome.runtime.connect({ name: "vibewaiting:options" });
 

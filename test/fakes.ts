@@ -40,6 +40,7 @@ const ALL_CAPABILITIES: RuntimeCapabilities = {
   stream_events: true,
   interrupt: true,
   respond_to_requests: true,
+  steer: false,
 };
 
 export function localHarness(id: HarnessId, over: Partial<LocalHarness> = {}): LocalHarness {

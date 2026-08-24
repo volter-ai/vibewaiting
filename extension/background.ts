@@ -4,12 +4,24 @@ import {
   type NativeHostEvent,
   VIBEWAITING_EXTENSION_PROTOCOL,
 } from "../src/extension-protocol.js";
+import {
+  parseBrowserContextAttachments,
+} from "../src/browser-context.js";
 import { VIBEWAITING_NEUTRAL } from "../src/theme.js";
 
 const SETTINGS_KEY = "vibewaiting:settings";
 const contentPorts = new Set<ExtensionPort>();
-const guestPorts = new Map<ExtensionPort, { id: string; visible: boolean }>();
+const contentPortsByTab = new Map<number, ExtensionPort>();
+const guestPorts = new Map<
+  ExtensionPort,
+  { id: string; visible: boolean; tabId: number | null }
+>();
 const optionsPorts = new Set<ExtensionPort>();
+const pendingBrowserRequests = new Map<
+  string,
+  { guest: ExtensionPort; tabId: number }
+>();
+const pendingHostEvents = new Map<number, unknown[]>();
 const pendingIntents: Array<{ id: string; payload: unknown }> = [];
 const chunks = new Map<string, { total: number; parts: string[] }>();
 let nativePort: ExtensionPort | null = null;
@@ -22,6 +34,13 @@ function record(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+function senderTab(port: ExtensionPort): { tabId: number | null } {
+  const tab = port.sender?.tab;
+  return {
+    tabId: Number.isInteger(tab?.id) ? tab!.id! : null,
+  };
 }
 
 function launcherFromPatch(patch: unknown): {
@@ -79,7 +98,23 @@ function post(port: ExtensionPort, message: unknown): void {
   } catch {
     contentPorts.delete(port);
     guestPorts.delete(port);
+    for (const [tabId, candidate] of contentPortsByTab)
+      if (candidate === port) contentPortsByTab.delete(tabId);
   }
+}
+
+function forwardHostEvent(tabId: number, event: unknown): void {
+  let delivered = false;
+  for (const [port, guest] of guestPorts) {
+    if (guest.tabId !== tabId) continue;
+    post(port, { type: "host-event", event });
+    delivered = true;
+  }
+  if (delivered) return;
+  const pending = pendingHostEvents.get(tabId) ?? [];
+  pending.push(event);
+  if (pending.length > 8) pending.shift();
+  pendingHostEvents.set(tabId, pending);
 }
 
 function broadcastStatus(): void {
@@ -286,6 +321,117 @@ function visibleGuestCount(): number {
   return count;
 }
 
+function browserResponse(
+  port: ExtensionPort,
+  id: string,
+  value:
+    | { ok: true; attachments: unknown }
+    | { ok: false; error: string },
+): void {
+  post(port, { type: "browser-context-response", id, ...value });
+}
+
+function handleContentMessage(port: ExtensionPort, tabId: number, raw: unknown): void {
+  const message = record(raw);
+  if (!message || typeof message.id !== "string") return;
+  if (message.type === "browser-context-response") {
+    const pending = pendingBrowserRequests.get(message.id);
+    if (!pending || pending.tabId !== tabId) return;
+    pendingBrowserRequests.delete(message.id);
+    if (message.ok !== true) {
+      browserResponse(pending.guest, message.id, {
+        ok: false,
+        error:
+          typeof message.error === "string" && message.error
+            ? message.error
+            : "Could not capture browser context.",
+      });
+      return;
+    }
+    if (message.attachments === null) {
+      browserResponse(pending.guest, message.id, {
+        ok: true,
+        attachments: null,
+      });
+      return;
+    }
+    const attachments = parseBrowserContextAttachments(message.attachments);
+    browserResponse(
+      pending.guest,
+      message.id,
+      attachments
+        ? { ok: true, attachments }
+        : { ok: false, error: "The page returned invalid browser context." },
+    );
+    return;
+  }
+  if (message.type !== "browser-shortcut-result") return;
+  if (
+    message.command !== "focus-composer" &&
+    message.command !== "attach-browser-context" &&
+    message.command !== "previous-conversation" &&
+    message.command !== "next-conversation"
+  )
+    return;
+  const attachments =
+    message.attachment === undefined
+      ? []
+      : parseBrowserContextAttachments([message.attachment]);
+  if (attachments === null) return;
+  forwardHostEvent(tabId, {
+    type: "shortcut",
+    id: message.id,
+    command: message.command,
+    ...(attachments[0] ? { attachment: attachments[0] } : {}),
+  });
+}
+
+function handleBrowserRequest(
+  port: ExtensionPort,
+  guest: { tabId: number | null },
+  message: Record<string, unknown>,
+): boolean {
+  if (
+    message.type !== "browser-context-request" ||
+    typeof message.id !== "string" ||
+    message.id.length > 200 ||
+    message.action !== "candidates"
+  )
+    return false;
+  if (guest.tabId === null) {
+    browserResponse(port, message.id, {
+      ok: false,
+      error: "This Vibewaiting surface is not attached to a browser tab.",
+    });
+    return true;
+  }
+  const content = contentPortsByTab.get(guest.tabId);
+  if (!content) {
+    browserResponse(port, message.id, {
+      ok: false,
+      error: "The current page is not available for context capture.",
+    });
+    return true;
+  }
+  if (pendingBrowserRequests.size >= 32) {
+    const oldestId = pendingBrowserRequests.keys().next().value as string;
+    const oldest = pendingBrowserRequests.get(oldestId);
+    pendingBrowserRequests.delete(oldestId);
+    if (oldest)
+      browserResponse(oldest.guest, oldestId, {
+        ok: false,
+        error: "Too many browser captures are already pending.",
+      });
+  }
+  pendingBrowserRequests.set(message.id, { guest: port, tabId: guest.tabId });
+  post(content, {
+    type: "browser-context-request",
+    id: message.id,
+    action: "candidates",
+  });
+  return true;
+}
+
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name === "vibewaiting:options") {
     optionsPorts.add(port);
@@ -295,21 +441,46 @@ chrome.runtime.onConnect.addListener((port) => {
     return;
   }
   if (port.name === "vibewaiting:content") {
+    const { tabId } = senderTab(port);
     contentPorts.add(port);
+    if (tabId !== null) contentPortsByTab.set(tabId, port);
     if (lastPatch !== undefined)
       post(port, { type: "launcher", ...launcherFromPatch(lastPatch) });
     post(port, { type: "status", ...lastStatus });
-    port.onDisconnect.addListener(() => contentPorts.delete(port));
+    if (tabId !== null)
+      port.onMessage.addListener((message) =>
+        handleContentMessage(port, tabId, message),
+      );
+    port.onDisconnect.addListener(() => {
+      contentPorts.delete(port);
+      if (tabId !== null && contentPortsByTab.get(tabId) === port)
+        contentPortsByTab.delete(tabId);
+      for (const [id, pending] of pendingBrowserRequests) {
+        if (pending.tabId !== tabId) continue;
+        pendingBrowserRequests.delete(id);
+        browserResponse(pending.guest, id, {
+          ok: false,
+          error: "The page changed before context capture finished.",
+        });
+      }
+    });
     void ensureNative();
     return;
   }
   if (port.name !== "vibewaiting:guest") return;
-  const guest = { id: crypto.randomUUID(), visible: false };
+  const sender = senderTab(port);
+  const guest = { id: crypto.randomUUID(), visible: false, ...sender };
   guestPorts.set(port, guest);
   if (lastPatch !== undefined) post(port, { type: "patch", patch: lastPatch });
   post(port, { type: "status", ...lastStatus });
+  if (guest.tabId !== null) {
+    for (const event of pendingHostEvents.get(guest.tabId) ?? [])
+      post(port, { type: "host-event", event });
+    pendingHostEvents.delete(guest.tabId);
+  }
   port.onMessage.addListener((raw) => {
     const message = record(raw);
+    if (message && handleBrowserRequest(port, guest, message)) return;
     if (message?.type !== "intent" || typeof message.id !== "string") return;
     const payload = record(message.payload);
     const action = payload?.action;
@@ -326,6 +497,9 @@ chrome.runtime.onConnect.addListener((port) => {
   port.onDisconnect.addListener(() => {
     const wasVisible = guest.visible;
     guestPorts.delete(port);
+    for (const [id, pending] of pendingBrowserRequests) {
+      if (pending.guest === port) pendingBrowserRequests.delete(id);
+    }
     if (wasVisible && visibleGuestCount() === 0)
       sendIntent(`${guest.id}:disconnect`, { action: "panelHidden" });
   });
@@ -344,4 +518,22 @@ chrome.action.onClicked.addListener(
 );
 chrome.runtime.onInstalled.addListener((details) => {
   if (details.reason === "install") void chrome.runtime.openOptionsPage();
+});
+
+chrome.commands.onCommand.addListener((command, tab) => {
+  if (
+    command !== "focus-composer" &&
+    command !== "attach-browser-context" &&
+    command !== "previous-conversation" &&
+    command !== "next-conversation"
+  )
+    return;
+  if (!Number.isInteger(tab?.id)) return;
+  const content = contentPortsByTab.get(tab!.id!);
+  if (!content) return;
+  post(content, {
+    type: "browser-shortcut",
+    id: `shortcut:${Date.now().toString(36)}:${crypto.randomUUID()}`,
+    command,
+  });
 });
