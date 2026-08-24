@@ -95,11 +95,13 @@ async function sessionRig(
 
 class RecordingTerminalService implements TerminalService {
   readonly launched: Array<{
+    conversationKey: string | null;
     harness: string;
     launch: Parameters<TerminalService["launchSession"]>[1];
   }> = [];
   state: TerminalServiceSnapshot = {
     available: true,
+    bindings: [],
     canOpenLocal: true,
     sessions: [],
     attachment: null,
@@ -111,17 +113,22 @@ class RecordingTerminalService implements TerminalService {
   async launchSession(
     harness: Parameters<TerminalService["launchSession"]>[0],
     launch: Parameters<TerminalService["launchSession"]>[1],
+    conversationKey: Parameters<TerminalService["launchSession"]>[2] = null,
   ): Promise<TerminalServiceSnapshot> {
-    this.launched.push({ harness, launch });
+    this.launched.push({ conversationKey, harness, launch });
     this.state = {
       ...this.state,
       attachment: {
+        conversationKey,
         id: "opaque-terminal-grant",
         mode: "control",
         expiresAt: Date.now() + 30_000,
         baseUrl: "http://127.0.0.1:49999",
         sessionId: "opaque-session-id",
       },
+      bindings: conversationKey
+        ? [{ conversationKey, sessionId: "opaque-session-id" }]
+        : [],
     };
     return this.state;
   }
@@ -500,6 +507,7 @@ describe("messenger session state machine", () => {
       cwd: ATLAS.cwd,
     }]);
     expect(terminalService.launched).toEqual([{
+      conversationKey: sessionKey(ATLAS.locator),
       harness: "claude-code",
       launch: {
         program: "claude",
@@ -539,6 +547,7 @@ describe("messenger session state machine", () => {
 
     expect(client.startedWith).toHaveLength(startedBefore);
     expect(terminalService.launched).toEqual([{
+      conversationKey: null,
       harness: "codex",
       launch: {
         program: "codex",

@@ -1,6 +1,5 @@
 import { connectOverlayApp } from "@volter-ai-dev/widget-shell/frame";
-import { TerminalWorkspace } from "@volter-ai-dev/supercode-terminal/ui";
-import { harnessLogoDataUrl } from "@volter-ai-dev/supercode-ui/preact/logo";
+import { TerminalViewer } from "@volter-ai-dev/supercode-terminal/ui";
 import type { JSX } from "preact";
 import {
   parseBrowserContextAttachments,
@@ -14,50 +13,26 @@ import type {
   MessengerTransport,
 } from "../widget/transport.js";
 
-function requiredHarnessLogo(harness: "claude-code" | "codex"): string {
-  const logo = harnessLogoDataUrl(harness);
-  if (!logo) throw new Error(`Supercode UI is missing the ${harness} logo.`);
-  return logo;
-}
-
 function LocalTerminalPanel({
   state,
-  viewportMode,
   send,
-  onClose,
-  onViewportModeChange,
 }: TerminalPanelProps): JSX.Element {
+  if (!state.attachment) throw new Error("Terminal mode requires an attachment.");
+  const attachment = state.attachment;
   return (
-    <TerminalWorkspace
-      state={state}
-      createActions={[
-        {
-          id: "claude-code",
-          label: "New Claude Code",
-          icon: <img alt="" src={requiredHarnessLogo("claude-code")} />,
-        },
-        {
-          id: "codex",
-          label: "New Codex",
-          icon: <img alt="" src={requiredHarnessLogo("codex")} />,
-        },
-      ]}
-      onClose={onClose}
-      viewportMode={viewportMode}
-      onViewportModeChange={onViewportModeChange}
-      onRefresh={() => send({ action: "terminalRefresh" })}
-      onCreate={(harness) => {
-        if (harness !== "claude-code" && harness !== "codex") return;
-        return send({ action: "terminalCreate", harness });
-      }}
-      onAttach={(sessionId, mode) =>
-        send({ action: "terminalAttach", sessionId, mode })
-      }
-      onStop={(sessionId) => send({ action: "terminalClose", sessionId })}
-      onOpen={(sessionId) =>
-        send({ action: "terminalOpenLocal", sessionId })
-      }
-    />
+    <section class="vw-terminal-surface" aria-label="Terminal view">
+      <TerminalViewer
+        active
+        attachment={attachment}
+        onRetry={() =>
+          send({
+            action: "terminalAttach",
+            mode: attachment.mode,
+            sessionId: attachment.sessionId,
+          })
+        }
+      />
+    </section>
   );
 }
 

@@ -272,6 +272,7 @@ export interface TerminalService {
   launchSession(
     harness: HarnessId,
     launch: StructuredLaunch,
+    conversationKey?: string | null,
   ): Promise<TerminalServiceSnapshot>;
   attach(
     sessionId: string,
@@ -792,6 +793,26 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       activeDescriptor.message_count > loadedMessages
     );
     const draftKey = activeForeignKey ?? (activeDescriptor ? sessionKey(activeDescriptor.locator) : null);
+    const terminalView = terminalHost
+      ? {
+          ...terminalHost,
+          attachment:
+            terminalHost.attachment &&
+            (terminalHost.attachment.conversationKey === null ||
+              terminalHost.attachment.conversationKey === draftKey)
+              ? terminalHost.attachment
+              : null,
+          bindings: draftKey
+            ? terminalHost.bindings.filter(
+                (binding) => binding.conversationKey === draftKey,
+              )
+            : [],
+          // A conversation toggle never needs the machine-wide tmux catalog.
+          // Keep that native inventory behind the bridge instead of exposing
+          // unrelated terminal labels and working directories to the iframe.
+          sessions: [],
+        }
+      : null;
     const state: WidgetState & { terminalHost?: TerminalServiceSnapshot } = {
       ...projected,
       pill: startup === "ready" ? projected.pill : { tone: "off", label: startupLabel },
@@ -849,7 +870,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       history: { sessionLimit, hasMoreSessions, transcriptLimit, hasEarlier },
       savedDraft: draftKey ? drafts.get(draftKey) ?? "" : "",
       attention: observeAttention(snapshot, sessions, attached, observedAt),
-      ...(terminalHost ? { terminalHost } : {}),
+      ...(terminalView ? { terminalHost: terminalView } : {}),
     };
     lastPushed = state;
     const inventoryPatch: Partial<WidgetState> = {
@@ -870,7 +891,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       exportReceipt: state.exportReceipt,
       reductionReceipt: state.reductionReceipt,
       savedDraft: state.savedDraft,
-      ...(terminalHost ? { terminalHost } : {}),
+      ...(terminalView ? { terminalHost: terminalView } : {}),
     };
     const stateFingerprint = JSON.stringify(state);
     const inventoryFingerprint = JSON.stringify(inventoryPatch);
@@ -1524,6 +1545,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           terminalHost = {
             attachment: null,
             available: false,
+            bindings: terminalHost?.bindings ?? [],
             canOpenLocal: terminalHost?.canOpenLocal ?? false,
             error: message(error),
             sessions: terminalHost?.sessions ?? [],
@@ -1718,6 +1740,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           terminalHost = await options.terminalService.launchSession(
             descriptor.locator.harness,
             launch,
+            activeForeignKey ?? sessionKey(descriptor.locator),
           );
           log(
             `resumed ${snapshot.activeHarness ?? "coding agent"} session in an owned tmux terminal in ` +

@@ -58,12 +58,13 @@ The previous/next commands rotate through the current stable list rather than fo
 activity reordering, so a busy fleet cannot move the target underneath the shortcut. Browser users
 can change all four bindings from the browser's extension-shortcuts page.
 
-The extension can also mirror local tmux sessions as a familiar terminal surface. Existing sessions
-are read-only and attach without changing their tmux window size. Sessions created from Vibewaiting
-run only the structured Claude Code or Codex command and may be controlled or stopped from the
-widget. Persisted Claude Code and Codex chats offer both paths explicitly: “Continue here” starts
-Supercode's headless managed runtime, while “Continue with terminal” asks Supercode for the native
-resume launch and runs it in an owned tmux session. The browser receives a short-lived, one-use
+The extension presents Chat and Terminal as two header-selected views of the current conversation.
+When that conversation already has a proven tmux association, the Terminal side attaches directly;
+otherwise selecting it resumes the same native session inside a new owned tmux session.
+The association lives in opaque tmux metadata, so it survives browser and native-host restarts
+without putting a harness session id or tmux handle in the visible session name. Switching back to
+Chat only releases the viewer—it does not detach or stop the durable tmux session. The browser
+receives a short-lived, one-use
 attachment grant rather than a tmux session or socket handle; the loopback stream accepts only the
 exact extension origin, and closing the viewer
 releases its PTY without killing the durable tmux session. Widget Shell's named presentations keep
