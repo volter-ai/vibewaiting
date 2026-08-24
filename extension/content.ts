@@ -11,6 +11,7 @@ import {
 import { VIBEWAITING_RADIUS } from "../src/theme.js";
 import {
   captureBrowserContext,
+  captureLinkAttachment,
   captureShortcutAttachment,
 } from "./browser-context.js";
 import { browserShortcutLabel } from "../src/browser-shortcuts.js";
@@ -68,6 +69,28 @@ port.onMessage.addListener((raw) => {
             ? error.message
             : "Could not capture browser context.",
       });
+    }
+    return;
+  }
+  if (
+    message.type === "browser-context-menu" &&
+    message.action === "link" &&
+    typeof message.id === "string" &&
+    typeof message.targetUrl === "string"
+  ) {
+    try {
+      overlay.open();
+      const attachment = captureLinkAttachment(message.targetUrl);
+      requestAnimationFrame(() =>
+        port.postMessage({
+          type: "browser-shortcut-result",
+          id: message.id,
+          command: "attach-browser-context",
+          attachment,
+        }),
+      );
+    } catch {
+      overlay.open();
     }
     return;
   }

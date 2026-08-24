@@ -1,9 +1,17 @@
 import {
-  browserPageAttachment,
   browserSelectionAttachment,
+  browserWebReferenceAttachment,
   type BrowserCaptureSource,
   type BrowserContextAttachment,
 } from "../src/browser-context.js";
+
+interface ContextLink {
+  url: string;
+  label: string;
+  evidence: string;
+}
+
+let contextLink: ContextLink | null = null;
 
 const OMITTED_TAGS = new Set([
   "script",
@@ -89,6 +97,29 @@ function boundedVisibleText(root: Element, limit: number): string {
     : text;
 }
 
+function linkAt(target: EventTarget | null): ContextLink | null {
+  const element = target instanceof Element ? target : null;
+  const anchor = element?.closest("a[href]");
+  if (!(anchor instanceof HTMLAnchorElement)) return null;
+  const label =
+    anchor.innerText.trim() || anchor.getAttribute("aria-label")?.trim() || "";
+  const evidenceRoot =
+    anchor.closest("article, li, tr, p") ?? anchor.parentElement ?? anchor;
+  return {
+    url: anchor.href,
+    label,
+    evidence: boundedVisibleText(evidenceRoot, 4_000),
+  };
+}
+
+document.addEventListener(
+  "contextmenu",
+  (event) => {
+    contextLink = linkAt(event.target);
+  },
+  { capture: true },
+);
+
 function pageCandidates(): BrowserContextAttachment[] {
   const selection = selectedText();
   const selected = browserSelectionAttachment(
@@ -100,7 +131,12 @@ function pageCandidates(): BrowserContextAttachment[] {
     : "";
   return [
     ...(selected ? [selected] : []),
-    browserPageAttachment(source("page", location.href), visibleText),
+    browserWebReferenceAttachment(
+      source("page", location.href),
+      location.href,
+      visibleText,
+      document.title,
+    ),
   ];
 }
 
@@ -110,4 +146,21 @@ export function captureBrowserContext(): BrowserContextAttachment[] {
 
 export function captureShortcutAttachment(): BrowserContextAttachment {
   return pageCandidates()[0]!;
+}
+
+export function captureLinkAttachment(
+  targetUrl: string,
+): BrowserContextAttachment {
+  const remembered = contextLink?.url === targetUrl ? contextLink : null;
+  const link = remembered ?? {
+    url: targetUrl,
+    label: "",
+    evidence: `Link found on ${document.title || location.hostname}.`,
+  };
+  return browserWebReferenceAttachment(
+    source("link", link.url),
+    link.url,
+    link.evidence,
+    link.label,
+  );
 }

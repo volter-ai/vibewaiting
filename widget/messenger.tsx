@@ -425,6 +425,8 @@ export function mountMessenger(
     const preferred = candidates?.find(
       (item) => browserCandidateKind(item) === "browser-selection",
     ) ?? candidates?.find(
+      (item) => browserCandidateKind(item) === "web-reference",
+    ) ?? candidates?.find(
       (item) => browserCandidateKind(item) === "browser-page",
     );
     return preferred ? [preferred] : null;

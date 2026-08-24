@@ -45,6 +45,28 @@ declare const chrome: {
       (command: string, tab?: { id?: number; windowId?: number }) => void
     >;
   };
+  contextMenus: {
+    create(
+      options: {
+        id: string;
+        title: string;
+        contexts: Array<"link">;
+      },
+      callback?: () => void,
+    ): string | number;
+    update(
+      id: string,
+      options: { title: string; contexts: Array<"link"> },
+      callback?: () => void,
+    ): void;
+    removeAll(callback?: () => void): void;
+    onClicked: ExtensionEvent<
+      (
+        info: { menuItemId: string | number; linkUrl?: string },
+        tab?: { id?: number; windowId?: number },
+      ) => void
+    >;
+  };
   tabs: {
     create(options: { url: string }): Promise<{ id?: number }>;
   };

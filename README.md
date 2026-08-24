@@ -35,18 +35,22 @@ Use `--browser brave`, `chromium`, or `firefox` to register the host for another
 assigns a different unpacked-extension ID, copy the ID shown on the settings page and reinstall with
 `--extension-id <id>`.
 
-The extension uses `storage` and `nativeMessaging`, plus host access for its on-page overlay and
-browser-context capture on ordinary web pages. Content scripts receive a bounded launcher projection—not
+The extension uses `storage`, `nativeMessaging`, and its own browser context-menu entry, plus host
+access for its on-page overlay and browser-context capture on ordinary web pages. Content scripts receive a bounded launcher projection—not
 transcripts, filesystem paths, credentials, or policy. Full messenger state is sent only to the
 extension-owned, origin-isolated iframe; native message frames and reassembly are bounded, and
 unknown harnesses remain hidden instead of receiving a fabricated fallback identity. Page context
-never travels to the native host until the user attaches it to a message. URLs lose credentials and
-query parameters, and every text payload is size-bounded and validated on both sides of the tab
-boundary.
+never travels to the native host until the user attaches it to a message. URLs lose credentials,
+credential-like parameters, and tracking parameters while semantic identity such as Hacker News
+item IDs and GitHub line anchors survives. Every text payload is size-bounded and validated on both
+sides of the tab boundary.
 
 The composer's attach button is deliberately one-step: it attaches selected text when a selection
-exists, otherwise it attaches sanitized visible page text. Files can be dragged directly onto the
-composer. Four browser-remappable commands make the overlay callable
+exists, otherwise it attaches a typed web reference with sanitized visible-page evidence. GitHub
+repository, issue, pull request, discussion, commit, file/line, and Actions-run URLs retain their
+domain identity; Hacker News item URLs retain their item ID. Right-click any link and choose
+**Attach link to Vibewaiting** to attach the target without opening it. Files can be dragged directly
+onto the composer. Four browser-remappable commands make the overlay callable
 without hunting for its launcher:
 
 - `⌥⇧V` (`Alt+Shift+V`) opens Vibewaiting and focuses the message box.
