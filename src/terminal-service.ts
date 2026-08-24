@@ -250,6 +250,15 @@ export class LocalTerminalService {
     return await this.snapshot();
   }
 
+  async bindContext(sessionId: string, conversationKey: string): Promise<TerminalServiceSnapshot> {
+    await this.host.bindContext(sessionId, conversationKey);
+    this.conversationBySession.set(sessionId, conversationKey);
+    if (this.attachment?.sessionId === sessionId) {
+      this.attachment = { ...this.attachment, conversationKey };
+    }
+    return await this.snapshot();
+  }
+
   async close(sessionId: string): Promise<TerminalServiceSnapshot> {
     this.pendingInitialInputs.get(sessionId)?.abort.abort();
     this.pendingInitialInputs.delete(sessionId);

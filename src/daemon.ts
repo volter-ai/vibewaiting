@@ -276,6 +276,7 @@ export interface TerminalService {
     conversationKey?: string | null,
     initialInput?: string,
   ): Promise<TerminalServiceSnapshot>;
+  bindContext(sessionId: string, conversationKey: string): Promise<TerminalServiceSnapshot>;
   canMoveSession(harness: HarnessId, sessionId: string, cwd: string): boolean;
   prepareMoveSession(
     harness: HarnessId,
@@ -592,6 +593,15 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   let actionError: string | null = null;
   let exportReceipt: ExportReceipt | null = null;
   let terminalHost = options.terminalService ? await options.terminalService.snapshot() : null;
+  const pendingTerminalStarts = new Map<string, {
+    cwd: string;
+    harness: "claude-code" | "codex";
+    knownSessionKeys: Set<string>;
+    prompt: string;
+    startedAtMs: number;
+  }>();
+  let terminalBindingInFlight: Promise<void> | null = null;
+  let bindPendingTerminalStarts: () => Promise<void> = async () => undefined;
   const terminalMoves = new Map<string, "waiting" | "moving">();
   let terminalMoveInFlight: Promise<void> | null = null;
   let terminalMoveRetryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1213,6 +1223,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         const sessions = result.sessions.map(retainTopic);
         sessionsByHarness.set(harness, sessions);
         rebuildDescriptors();
+        void bindPendingTerminalStarts();
         if (reportTimings) {
           log(`discovered ${sessions.length} ${harness} sessions in ${Math.round(performance.now() - startedAt)}ms`);
         }
@@ -1435,6 +1446,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       sessionsByHarness.set(harness, sessions.slice(0, sessionLimit + 1));
     }
     rebuildDescriptors();
+    void bindPendingTerminalStarts();
     void syncActivitySubscription();
     void pushNow(false, "inventory");
   };
@@ -1642,6 +1654,49 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       () => attachTasks.delete(task),
     );
     return task;
+  };
+
+  bindPendingTerminalStarts = (): Promise<void> => {
+    const terminalService = options.terminalService;
+    if (stopped || terminalBindingInFlight || !terminalService || pendingTerminalStarts.size === 0)
+      return terminalBindingInFlight ?? Promise.resolve();
+    terminalBindingInFlight = (async () => {
+      for (const [terminalSessionId, pending] of pendingTerminalStarts) {
+        if (stopped) return;
+        if (now() - pending.startedAtMs > 10 * 60_000) {
+          pendingTerminalStarts.delete(terminalSessionId);
+          continue;
+        }
+        const prompt = pending.prompt.trim();
+        const matches = descriptors.filter((descriptor) => {
+          const key = sessionKey(descriptor.locator);
+          if (pending.knownSessionKeys.has(key) || descriptor.locator.harness !== pending.harness)
+            return false;
+          if (descriptor.cwd !== pending.cwd) return false;
+          return [
+            ...(descriptor.preview_candidates ?? []),
+            ...(descriptor.latest_message_candidates ?? []),
+          ].some((candidate) => candidate.role === "user" && candidate.content.trim() === prompt);
+        });
+        // Multiple exact candidates are uncommon but possible when identical prompts start
+        // concurrently. Fail closed instead of associating a terminal with the wrong transcript.
+        const [match] = matches;
+        if (matches.length !== 1 || !match) continue;
+        const conversationKey = sessionKey(match.locator);
+        terminalHost = await terminalService.bindContext(
+          terminalSessionId,
+          conversationKey,
+        );
+        pendingTerminalStarts.delete(terminalSessionId);
+        log(`bound new ${pending.harness} terminal to its persisted conversation`);
+        if (!activeForeignKey) await attachSession(conversationKey);
+      }
+    })().catch((error: unknown) => {
+      log(`new terminal binding failed (continuing): ${message(error)}`);
+    }).finally(() => {
+      terminalBindingInFlight = null;
+    });
+    return terminalBindingInFlight;
   };
 
   const stopIntentPump = bindIntentQueue(host, INTENT_QUEUE, async (intent) => {
@@ -1859,18 +1914,31 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           if (newChat.context.length || newChat.images.length) {
             throw new Error("terminal starts currently accept text only");
           }
+          await releaseForeignView();
           const start = createNativeInteractiveStart({
             harness: newChat.harness as "claude-code" | "codex",
             cwd: options.workspace,
             prompt: newChat.text,
             ...(options.policy ? { policy: options.policy } : {}),
           });
+          const knownSessionKeys = new Set(descriptors.map((descriptor) =>
+            sessionKey(descriptor.locator)));
           terminalHost = await options.terminalService.launchSession(
             newChat.harness,
             start.launch,
             null,
             start.initialInput,
           );
+          const terminalSessionId = terminalHost.attachment?.sessionId;
+          if (!terminalSessionId)
+            throw new Error("the terminal host did not return an attachment for the new session");
+          pendingTerminalStarts.set(terminalSessionId, {
+            cwd: options.workspace,
+            harness: newChat.harness as "claude-code" | "codex",
+            knownSessionKeys,
+            prompt: newChat.text,
+            startedAtMs: now(),
+          });
           log(`started a new ${newChat.harness} session in an owned tmux terminal`);
         } else {
           await releaseForeignView();
@@ -1884,6 +1952,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         log(`new chat failed: ${actionError}`);
       }
       await pushNow(newChat.mode === "terminal");
+      if (newChat.mode === "terminal") void refreshSessions([newChat.harness]);
       return;
     }
     if (uiIntent?.action === "send") {
@@ -2284,6 +2353,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         indexSubscription = null;
       }
       stopIntentPump();
+      pendingTerminalStarts.clear();
+      await terminalBindingInFlight?.catch(() => undefined);
       unsubscribe();
       await Promise.all([...attachTasks].map((task) => task.catch(() => undefined)));
       activeForeignKey = null;
