@@ -22,8 +22,10 @@ function requiredHarnessLogo(harness: "claude-code" | "codex"): string {
 
 function LocalTerminalPanel({
   state,
+  viewportMode,
   send,
   onClose,
+  onViewportModeChange,
 }: TerminalPanelProps): JSX.Element {
   return (
     <TerminalWorkspace
@@ -41,6 +43,8 @@ function LocalTerminalPanel({
         },
       ]}
       onClose={onClose}
+      viewportMode={viewportMode}
+      onViewportModeChange={onViewportModeChange}
       onRefresh={() => send({ action: "terminalRefresh" })}
       onCreate={(harness) => {
         if (harness !== "claude-code" && harness !== "codex") return;

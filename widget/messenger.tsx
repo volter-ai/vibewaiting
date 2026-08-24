@@ -60,8 +60,10 @@ export type TerminalHostState = TerminalUiState;
 
 export interface TerminalPanelProps {
   state: TerminalHostState;
+  viewportMode: "scale" | "fit";
   send(intent: TerminalIntent): void | Promise<void>;
   onClose(): void;
+  onViewportModeChange(mode: "scale" | "fit"): void | Promise<void>;
 }
 
 export interface MessengerOptions {
@@ -571,10 +573,8 @@ export function mountMessenger(
         attachmentId !== null &&
         attachmentId !== lastTerminalAttachmentId.current;
       lastTerminalAttachmentId.current = attachmentId;
-      const desired = VIBEWAITING_PRESENTATION.terminal;
-      if ((!terminalsOpen && attachmentBecameAvailable) ||
-          (terminalsOpen && terminalPresentation !== desired)) {
-        void requestTerminalPresentation(desired);
+      if (!terminalsOpen && attachmentBecameAvailable) {
+        void requestTerminalPresentation(VIBEWAITING_PRESENTATION.terminal);
       }
     }, [
       terminals?.attachment?.id,
@@ -661,10 +661,16 @@ export function mountMessenger(
         {terminalsOpen && terminals && TerminalPanel ? (
           <TerminalPanel
             state={terminals}
+            viewportMode={terminalPresentation === VIBEWAITING_PRESENTATION.terminalFit ? "fit" : "scale"}
             send={sendBridgeIntent}
             onClose={() => {
               void closeTerminalPresentation();
             }}
+            onViewportModeChange={(mode) => requestTerminalPresentation(
+              mode === "fit"
+                ? VIBEWAITING_PRESENTATION.terminalFit
+                : VIBEWAITING_PRESENTATION.terminal,
+            ).then(() => undefined)}
           />
         ) : null}
         {presentationError ? (
