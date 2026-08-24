@@ -587,6 +587,20 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   let terminalHost = options.terminalService ? await options.terminalService.snapshot() : null;
   const terminalMoves = new Map<string, "waiting" | "moving">();
   let terminalMoveInFlight: Promise<void> | null = null;
+  let nativeRefreshInFlight: Promise<void> | null = null;
+  const refreshNativeSessions = (): Promise<void> => {
+    if (!options.terminalService) return Promise.resolve();
+    if (!nativeRefreshInFlight) {
+      nativeRefreshInFlight = options.terminalService.refreshNativeSessions()
+        .catch((error: unknown) => {
+          log(`native terminal discovery failed (continuing): ${message(error)}`);
+        })
+        .finally(() => {
+          nativeRefreshInFlight = null;
+        });
+    }
+    return nativeRefreshInFlight;
+  };
   const movableNativeDescriptors = (): SessionDescriptor[] => options.terminalService
     ? descriptors.filter((descriptor) =>
         descriptor.activity?.presence === "running" &&
@@ -998,9 +1012,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   const unsubscribe = controller.subscribe(schedulePush);
 
-  void options.terminalService?.refreshNativeSessions()
+  void refreshNativeSessions()
     .then(() => pushNow(false, "inventory"))
-    .catch((error: unknown) => log(`native terminal discovery failed (continuing): ${message(error)}`));
+    .catch(() => undefined);
 
   const repushMs = options.repushIntervalMs ?? DEFAULT_REPUSH_INTERVAL_MS;
   const stopRepush = repushMs > 0 ? host.every(repushMs, () => pushNow()) : (): void => undefined;
@@ -1455,9 +1469,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   const runAttach = async (key: string, seq: number): Promise<void> => {
     if (stopped || seq !== attachSeq) return;
+    const nativeRefresh = refreshNativeSessions();
     // A new attempt supersedes the previous failure, whatever this one goes on to do.
     attachError = null;
     if (activeForeignKey === key) {
+      await nativeRefresh;
       await pushNow();
       return;
     }
@@ -1466,6 +1482,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       await releaseForeignView();
       activeForeignKey = key;
       log(`returning to locally controlled ${retained.controller.getSnapshot().activeHarness ?? "coding agent"} session`);
+      await nativeRefresh;
       await pushNow();
       return;
     }
@@ -1568,6 +1585,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       `${Math.round(attachedAt - attachStartedAt)}ms total = ${Math.round(initializedAt - attachStartedAt)}ms seeded init + ` +
       `${Math.round(attachedAt - initializedAt)}ms transcript)`,
     );
+    await nativeRefresh;
     await pushNow();
   };
 
@@ -1602,7 +1620,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     if (panelVisibility !== null) {
       panelVisible = panelVisibility;
       if (!panelVisible) rebuildDescriptors(false);
-      if (panelVisible) await pushNow(true);
+      if (panelVisible) {
+        await pushNow(true);
+        void refreshNativeSessions().then(() => pushNow(false, "inventory"));
+      }
       return;
     }
     if (uiIntent?.action === "loadSessions") {

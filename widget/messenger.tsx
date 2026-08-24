@@ -648,6 +648,11 @@ export function mountMessenger(
         });
         return;
       }
+      if (activeConversationKey && canMoveToTerminal) {
+        requestedTerminalConversation.current = activeConversationKey;
+        await sendBridgeIntent({ action: "moveToTerminal" });
+        return;
+      }
       if (
         activeConversationKey &&
         displayState.canResume &&
@@ -656,10 +661,6 @@ export function mountMessenger(
         requestedTerminalConversation.current = activeConversationKey;
         await sendBridgeIntent({ action: "resume", mode: "terminal" });
         return;
-      }
-      if (activeConversationKey && canMoveToTerminal) {
-        requestedTerminalConversation.current = activeConversationKey;
-        await sendBridgeIntent({ action: "moveToTerminal" });
       }
     }
 
