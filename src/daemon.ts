@@ -265,6 +265,7 @@ export interface DaemonOptions {
 
 export interface TerminalService {
   snapshot(): Promise<TerminalServiceSnapshot>;
+  refreshNativeSessions(): Promise<void>;
   create(
     harness: "claude-code" | "codex",
     cwd: string,
@@ -273,6 +274,14 @@ export interface TerminalService {
     harness: HarnessId,
     launch: StructuredLaunch,
     conversationKey?: string | null,
+  ): Promise<TerminalServiceSnapshot>;
+  canMoveSession(harness: HarnessId, sessionId: string): boolean;
+  moveSession(
+    harness: HarnessId,
+    nativeSessionId: string,
+    launch: StructuredLaunch,
+    conversationKey: string,
+    proof: { observedAtMs: number; source: string; turn: "idle" },
   ): Promise<TerminalServiceSnapshot>;
   attach(
     sessionId: string,
@@ -294,6 +303,12 @@ type TerminalIntent =
   | { action: "terminalClose"; sessionId: string }
   | { action: "terminalOpenLocal"; sessionId: string }
   | { action: "terminalDismiss" };
+
+function isMoveToTerminalIntent(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+  const value = payload as Record<string, unknown>;
+  return value.action === "moveToTerminal" && Object.keys(value).length === 1;
+}
 
 function parseTerminalHostIntent(payload: unknown): TerminalIntent | null {
   if (!payload || typeof payload !== "object" || Array.isArray(payload))
@@ -564,6 +579,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   let actionError: string | null = null;
   let exportReceipt: ExportReceipt | null = null;
   let terminalHost = options.terminalService ? await options.terminalService.snapshot() : null;
+  let terminalMove: { key: string; status: "waiting" | "moving" } | null = null;
+  let terminalMoveInFlight: Promise<void> | null = null;
   const materializeArtifact = options.materializeArtifact
     ?? ((artifact: SessionArtifact): Promise<ExportReceipt> => writeSessionArtifact(artifact, join(options.workspace, ".supercode", "exports")));
 
@@ -785,6 +802,15 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       ? sessionRuntimeStatus(activeDescriptor)
       : null;
     const canResume = projected.canResume && activeDescriptor !== undefined && activeRuntimeStatus === null;
+    const canMoveToTerminal = Boolean(
+      options.terminalService &&
+      activeDescriptor?.activity?.presence === "running" &&
+      (activeDescriptor.locator.harness === "claude-code" || activeDescriptor.locator.harness === "codex") &&
+      options.terminalService.canMoveSession(
+        activeDescriptor.locator.harness,
+        activeDescriptor.locator.session_id,
+      )
+    );
     const loadedMessages = snapshot.activeSession?.messages.length
       ?? snapshot.conversation.filter((entry) => entry.kind === "message").length;
     const hasEarlier = snapshot.conversation.length > transcriptLimit || (
@@ -813,7 +839,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           sessions: [],
         }
       : null;
-    const state: WidgetState & { terminalHost?: TerminalServiceSnapshot } = {
+    const activeMoveStatus = terminalMove?.key === draftKey ? terminalMove.status : null;
+    const state: WidgetState & {
+      canMoveToTerminal?: boolean;
+      terminalHost?: TerminalServiceSnapshot;
+      terminalMoveStatus?: "waiting" | "moving" | null;
+    } = {
       ...projected,
       pill: startup === "ready" ? projected.pill : { tone: "off", label: startupLabel },
       startup,
@@ -830,6 +861,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       // dishonest; the original button or draft remains the real retry path.
       recoverable: actionError === null && projected.recoverable,
       canResume,
+      canMoveToTerminal,
+      terminalMoveStatus: activeMoveStatus,
       canExport: typeof activeController().exportSession === "function" && snapshot.operation === null && Boolean(snapshot.activeSessionKey || snapshot.activeSessionId),
       // Vibewaiting's first complete product lane is intentionally Claude Code + Codex. Supercode
       // retains its full translation/reduction surface; this thin consumer does not advertise
@@ -877,7 +910,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       ...(terminalView ? { terminalHost: terminalView } : {}),
     };
     lastPushed = state;
-    const inventoryPatch: Partial<WidgetState> = {
+    const inventoryPatch: Partial<WidgetState> & {
+      canMoveToTerminal?: boolean;
+      terminalMoveStatus?: "waiting" | "moving" | null;
+    } = {
       pill: state.pill,
       startup: state.startup,
       sessions: state.sessions,
@@ -888,6 +924,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       history: state.history,
       error: state.error,
       recoverable: state.recoverable,
+      canResume: state.canResume,
+      canMoveToTerminal: state.canMoveToTerminal === true,
+      terminalMoveStatus: state.terminalMoveStatus ?? null,
       canExport: state.canExport,
       canReduce: state.canReduce,
       continuationModes: state.continuationModes,
@@ -929,6 +968,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   };
 
   const unsubscribe = controller.subscribe(schedulePush);
+
+  void options.terminalService?.refreshNativeSessions()
+    .then(() => pushNow(false, "inventory"))
+    .catch((error: unknown) => log(`native terminal discovery failed (continuing): ${message(error)}`));
 
   const repushMs = options.repushIntervalMs ?? DEFAULT_REPUSH_INTERVAL_MS;
   const stopRepush = repushMs > 0 ? host.every(repushMs, () => pushNow()) : (): void => undefined;
@@ -1026,6 +1069,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const onSessionActivity = (event: SessionActivityEvent): void => {
     if (stopped || event.subscription !== activitySubscription) return;
     if (applyActivities(event.activities)) void pushNow(false, "inventory");
+    void processTerminalMove();
   };
   activityTransport?.on("sessionActivityEvent", onSessionActivity);
 
@@ -1171,6 +1215,70 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     });
     return refreshInFlight;
   };
+
+  async function processTerminalMove(): Promise<void> {
+    if (!terminalMove || terminalMoveInFlight || !options.terminalService) return;
+    const queuedKey = terminalMove.key;
+    const descriptor = descriptors.find((candidate) => sessionKey(candidate.locator) === queuedKey);
+    if (!descriptor || descriptor.activity?.presence !== "running") {
+      terminalMove = null;
+      actionError = "the native session ended before it could be moved; its persisted conversation is still safe to resume";
+      await pushNow(true);
+      return;
+    }
+    if (descriptor.activity.turn !== "idle") return;
+    terminalMoveInFlight = (async () => {
+      terminalMove = { key: queuedKey, status: "moving" };
+      await pushNow(true);
+      try {
+        // Native terminal discovery can take a few seconds. Finish it before taking the
+        // authoritative Supercode activity sample so the idle proof cannot expire in transit.
+        await options.terminalService!.refreshNativeSessions();
+        await refreshSessions();
+        const current = descriptors.find((candidate) => sessionKey(candidate.locator) === queuedKey);
+        const activity = current?.activity;
+        if (!current || activity?.presence !== "running" || activity.turn !== "idle") {
+          terminalMove = { key: queuedKey, status: "waiting" };
+          await pushNow(false, "inventory");
+          return;
+        }
+        if (current.locator.harness !== "claude-code" && current.locator.harness !== "codex") {
+          throw new Error(`${current.locator.harness} native terminal handoff is not supported`);
+        }
+        if (!options.terminalService!.canMoveSession(current.locator.harness, current.locator.session_id)) {
+          throw new Error("the native terminal owning this session is no longer visible");
+        }
+        const { launch } = await requireClient(options).resumeInstructions({
+          locator: current.locator,
+          cwd: current.cwd ?? options.workspace,
+          ...(options.policy ? { policy: options.policy } : {}),
+        });
+        terminalHost = await options.terminalService!.moveSession(
+          current.locator.harness,
+          current.locator.session_id,
+          launch,
+          queuedKey,
+          {
+            observedAtMs: activity.evidence.observed_at_ms,
+            source: activity.evidence.source,
+            turn: "idle",
+          },
+        );
+        terminalMove = null;
+        actionError = null;
+        log(`moved ${current.locator.harness} session from its native terminal into owned tmux`);
+        await pushNow(true);
+      } catch (error) {
+        terminalMove = null;
+        actionError = message(error);
+        log(`native terminal move failed: ${actionError}`);
+        await pushNow(true);
+      }
+    })().finally(() => {
+      terminalMoveInFlight = null;
+    });
+    await terminalMoveInFlight;
+  }
 
   const recoverSessionIndex = (): Promise<void> => {
     if (indexRecoveryInFlight) return indexRecoveryInFlight;
@@ -1697,6 +1805,19 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       attachError = null;
       actionError = null;
       await pushNow();
+      return;
+    }
+    if (isMoveToTerminalIntent(intent.payload)) {
+      actionError = null;
+      if (!options.terminalService || !activeForeignKey) {
+        actionError = "open a live native-terminal conversation before moving it";
+      } else if (terminalMove?.key === activeForeignKey && terminalMove.status === "waiting") {
+        terminalMove = null;
+      } else {
+        terminalMove = { key: activeForeignKey, status: "waiting" };
+      }
+      await pushNow(true);
+      void processTerminalMove();
       return;
     }
     if (uiIntent?.action === "resume") {
