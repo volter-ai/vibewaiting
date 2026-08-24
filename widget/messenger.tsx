@@ -26,10 +26,6 @@ import type { ComponentType, JSX } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import type { MessengerTransport } from "./transport.js";
 import type { MessengerHostEvent } from "./transport.js";
-import type {
-  BrowserContextAttachment,
-  BrowserTextAttachment,
-} from "../src/browser-context.js";
 import {
   VIBEWAITING_PRESENTATION,
   type VibewaitingPresentation,
@@ -234,12 +230,6 @@ function pickLocalFiles(): Promise<TranscriptAttachment[] | null> {
   });
 }
 
-function browserCandidateKind(
-  value: BrowserContextAttachment,
-): BrowserTextAttachment["kind"] | null {
-  return "detail" in value ? value.kind : null;
-}
-
 function showShortcutHelp(): void {
   if (document.querySelector(".vw-shortcut-help")) return;
   const dialog = document.createElement("dialog");
@@ -252,7 +242,7 @@ function showShortcutHelp(): void {
   const list = document.createElement("dl");
   for (const [label, shortcut] of [
     ["Focus message box", "focus"],
-    ["Attach selection or current page", "attach"],
+    ["Attach selection, pointed target, or page", "attach"],
     ["Previous conversation", "previous"],
     ["Next conversation", "next"],
   ] as const) {
@@ -421,15 +411,7 @@ export function mountMessenger(
 
   async function pickAttachments(): Promise<TranscriptAttachment[] | null> {
     if (!widget.requestBrowserContext) return pickLocalFiles();
-    const candidates = await widget.requestBrowserContext("candidates");
-    const preferred = candidates?.find(
-      (item) => browserCandidateKind(item) === "browser-selection",
-    ) ?? candidates?.find(
-      (item) => browserCandidateKind(item) === "web-reference",
-    ) ?? candidates?.find(
-      (item) => browserCandidateKind(item) === "browser-page",
-    );
-    return preferred ? [preferred] : null;
+    return await widget.requestBrowserContext("candidates");
   }
 
   function composerNavigation(
@@ -475,8 +457,8 @@ export function mountMessenger(
     }
     messengerNavigation = composerNavigation(state, event.id);
     composerCommand =
-      event.command === "attach-browser-context" && event.attachment
-        ? { id: event.id, action: "attach", attachments: event.attachment }
+      event.command === "attach-browser-context" && event.attachments?.length
+        ? { id: event.id, action: "attach", attachments: event.attachments }
         : { id: event.id, action: "focus" };
     renderCurrentPanel();
   }
@@ -702,7 +684,7 @@ export function mountMessenger(
             adapter={adapter}
             navigation={messengerNavigation}
             composerCommand={composerCommand}
-            labels={{ attachContext: "Attach selected text or current page" }}
+            labels={{ attachContext: "Attach from this page" }}
             components={{ TaskPlan: () => null }}
             slots={{
               headerActions: (header) => (

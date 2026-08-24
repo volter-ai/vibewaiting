@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  browserElementAttachment,
+  browserImageAttachment,
   browserSelectionAttachment,
   browserWebReferenceAttachment,
   MAX_BROWSER_CONTEXT_DETAIL,
@@ -61,6 +63,28 @@ describe("browser context trust boundary", () => {
       "GitHub pull request · volter-ai/vibewaiting #104",
     );
     expect(parseBrowserContextAttachments([reference])).toEqual([reference]);
+
+    const image = browserImageAttachment(
+      source,
+      "Architecture diagram",
+      "https://example.com/diagram.png?utm_source=feed&size=large",
+    );
+    expect(image).toEqual({
+      id: "capture-1",
+      kind: "browser-image",
+      label: "Architecture diagram",
+      url: "https://example.com/diagram.png?size=large",
+    });
+    const element = browserElementAttachment(
+      source,
+      "Build failed",
+      "Role: button\nViewport bounds: 10,20 120×32",
+      "Build failed with two errors",
+    );
+    expect(parseBrowserContextAttachments([image, element])).toEqual([
+      image,
+      element,
+    ]);
 
     expect(
       parseBrowserContextAttachments([

@@ -111,8 +111,8 @@ function isHostEvent(value: unknown): value is MessengerHostEvent {
       candidate.command !== "next-conversation"
   )
     return false;
-  if (candidate.attachment === undefined) return true;
-  return parseBrowserContextAttachments([candidate.attachment]) !== null;
+  if (candidate.attachments === undefined) return true;
+  return parseBrowserContextAttachments(candidate.attachments) !== null;
 }
 
 const transport: MessengerTransport = {

@@ -45,16 +45,18 @@ credential-like parameters, and tracking parameters while semantic identity such
 item IDs and GitHub line anchors survives. Every text payload is size-bounded and validated on both
 sides of the tab boundary.
 
-The composer's attach button is deliberately one-step: it attaches selected text when a selection
-exists, otherwise it attaches a typed web reference with sanitized visible-page evidence. GitHub
-repository, issue, pull request, discussion, commit, file/line, and Actions-run URLs retain their
-domain identity; Hacker News item URLs retain their item ID. Right-click any link and choose
-**Attach link to Vibewaiting** to attach the target without opening it. Files can be dragged directly
-onto the composer. Four browser-remappable commands make the overlay callable
+The composer's attach button and shortcut share one deliberately one-step resolver. They attach an
+active selection first, then a keyboard-focused or pointed link, image, or meaningful element, and
+fall back to a typed reference for the visible page only when no precise target exists. The last
+real page target survives the pointer crossing into the overlay, so clicking Attach does not lose
+what the user was pointing at. GitHub repository, issue, pull request, discussion, commit,
+file/line, and Actions-run URLs retain their domain identity; Hacker News item URLs retain their
+item ID. The browser's right-click link entry remains a precision fallback rather than the taught
+workflow. Files can be dragged directly onto the composer. Four browser-remappable commands make the overlay callable
 without hunting for its launcher:
 
 - `⌥⇧V` (`Alt+Shift+V`) opens Vibewaiting and focuses the message box.
-- `⌥⇧A` (`Alt+Shift+A`) immediately attaches the current selection or current page.
+- `⌥⇧A` (`Alt+Shift+A`) immediately attaches the current selection, pointed target, or page.
 - `⌥⇧←` (`Alt+Shift+Left`) opens the previous conversation.
 - `⌥⇧→` (`Alt+Shift+Right`) opens the next conversation.
 
