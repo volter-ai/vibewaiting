@@ -105,6 +105,7 @@ class RecordingTerminalService implements TerminalService {
     nativeSessionId: string;
     proof: Parameters<TerminalService["moveSession"]>[4];
   }> = [];
+  nativeRefreshes = 0;
   nativeVisible = false;
   state: TerminalServiceSnapshot = {
     available: true,
@@ -116,7 +117,7 @@ class RecordingTerminalService implements TerminalService {
   };
 
   async snapshot(): Promise<TerminalServiceSnapshot> { return this.state; }
-  async refreshNativeSessions(): Promise<void> {}
+  async refreshNativeSessions(): Promise<void> { this.nativeRefreshes += 1; }
   canMoveSession(): boolean { return this.nativeVisible; }
   async create(): Promise<TerminalServiceSnapshot> { return this.state; }
   async launchSession(
@@ -491,6 +492,9 @@ describe("messenger session state machine", () => {
       () => 2_000_001,
       terminalService,
     );
+    await waitFor(() => terminalService.nativeRefreshes === 1);
+    await host.fireIntent(INTENT_QUEUE, { action: "panelVisible" });
+    await waitFor(() => terminalService.nativeRefreshes === 2);
     await host.fireIntent(INTENT_QUEUE, { action: "attach", key: sessionKey(ATLAS.locator) });
     await waitFor(() => (lastPush() as WidgetState & { canMoveToTerminal?: boolean }).canMoveToTerminal === true);
 

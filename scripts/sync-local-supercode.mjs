@@ -47,9 +47,10 @@ const widgetShellSource = resolve(process.env.WIDGET_SHELL_DIR ?? join(root, "..
 if (syncLocalSurfaces && existsSync(join(widgetShellSource, "package.json"))) {
   packages.push([widgetShellSource, "@volter-ai-dev/widget-shell"]);
 }
-const termfleetSource = resolve(process.env.TERMFLEET_DIR ?? join(root, "../termfleet"));
-if (existsSync(join(termfleetSource, "src/native-terminal.ts"))) {
-  packages.push([termfleetSource, "termfleet"]);
+const termfleetRoot = resolve(process.env.TERMFLEET_DIR ?? join(root, "../termfleet"));
+const termfleetTerminalSource = join(termfleetRoot, "packages/terminal");
+if (existsSync(join(termfleetTerminalSource, "src/native-host.ts"))) {
+  packages.push([termfleetTerminalSource, "@termfleet/terminal"]);
 }
 
 function run(program, args, options) {
@@ -131,21 +132,8 @@ if (packages.some(([, name]) => name === "@volter-ai-dev/widget-shell")) {
     throw new Error("Local Widget Shell has no dist and cannot build. Run npm install in its checkout.");
   }
 }
-if (packages.some(([, name]) => name === "termfleet")) {
-  const output = join(termfleetSource, "dist/native-terminal.js");
-  const inputs = [
-    "package.json",
-    "src/native-terminal.ts",
-    "src/instance/native-agent-session.ts",
-    "src/instance/native-terminal-ingest.ts",
-    "src/instance/drivers/iterm-driver.ts",
-    "src/instance/drivers/terminal-app-driver.ts",
-  ].map((path) => join(termfleetSource, path));
-  if (!existsSync(output) || inputs.some((path) => statSync(path).mtimeMs > statSync(output).mtimeMs)) {
-    run("npm", ["run", "build:server"], { cwd: termfleetSource });
-  } else {
-    process.stdout.write("local Termfleet native host is current; skipping rebuild\n");
-  }
+if (packages.some(([, name]) => name === "@termfleet/terminal")) {
+  run("npm", ["run", "build"], { cwd: termfleetTerminalSource });
 }
 
 const scratch = mkdtempSync(join(tmpdir(), "vibewaiting-supercode-"));

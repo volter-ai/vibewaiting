@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
+import {
+  NativeTerminalSessionHost,
+  type NativeSessionIdleProof,
+} from "@termfleet/terminal/native-host.js";
 import type { HarnessId, StructuredLaunch } from "@volter-ai-dev/supercode-harness-sdk";
 import {
   TerminalWebSocketBridge,
@@ -7,10 +11,6 @@ import {
   type EmbeddedTerminalAttachmentGrant,
   type TerminalSession,
 } from "@volter-ai-dev/supercode-terminal";
-import {
-  NativeTerminalSessionHost,
-  type NativeSessionIdleProof,
-} from "termfleet/native-terminal";
 import { shortCwd } from "./sessions.js";
 
 export interface TerminalServiceSnapshot {
@@ -154,7 +154,7 @@ export class LocalTerminalService {
   ): Promise<TerminalServiceSnapshot> {
     const agentSessionId = nativeAgentSessionId(harness, nativeSessionId);
     if (!this.nativeSessionIds.has(agentSessionId)) {
-      throw new Error("this conversation is not running in a native terminal visible to Termfleet");
+      throw new Error("this conversation is not running in a local terminal visible to Vibewaiting");
     }
     await this.nativeHost.relinquishSession(agentSessionId, proof);
     this.nativeSessionIds.delete(agentSessionId);
