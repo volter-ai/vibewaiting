@@ -49,6 +49,7 @@ type WidgetIntent =
   | { action: "mounted" }
   | { action: "panelVisible" }
   | { action: "panelHidden" }
+  | { action: "moveToTerminal" }
   | TerminalIntent
   | { action: "resolveImage"; requestId: string; reference: string };
 
@@ -497,6 +498,11 @@ export function mountMessenger(
     const lastTerminalAttachmentId = useRef<string | null>(null);
     const requestedTerminalConversation = useRef<string | null>(null);
     const normalized = normalizeUiState(state);
+    const canMoveToTerminal = isRecord(state) && state.canMoveToTerminal === true;
+    const terminalMoveStatus = isRecord(state) &&
+      (state.terminalMoveStatus === "waiting" || state.terminalMoveStatus === "moving")
+      ? state.terminalMoveStatus
+      : null;
     const terminals = options.TerminalPanel ? terminalHostState(state) : null;
     const TerminalPanel = options.TerminalPanel;
     const message =
@@ -615,6 +621,11 @@ export function mountMessenger(
     async function showTerminal(): Promise<void> {
       if (!terminals || presentationPending) return;
       setPresentationError(null);
+      if (terminalMoveStatus === "waiting") {
+        requestedTerminalConversation.current = null;
+        await sendBridgeIntent({ action: "moveToTerminal" });
+        return;
+      }
       if (activeBinding) {
         requestedTerminalConversation.current = activeConversationKey;
         await sendBridgeIntent({
@@ -631,6 +642,11 @@ export function mountMessenger(
       ) {
         requestedTerminalConversation.current = activeConversationKey;
         await sendBridgeIntent({ action: "resume", mode: "terminal" });
+        return;
+      }
+      if (activeConversationKey && canMoveToTerminal) {
+        requestedTerminalConversation.current = activeConversationKey;
+        await sendBridgeIntent({ action: "moveToTerminal" });
       }
     }
 
@@ -639,6 +655,7 @@ export function mountMessenger(
       if (!inConversation && !terminalsOpen) return null;
       const canEnterTerminal = Boolean(
         activeBinding ||
+        canMoveToTerminal ||
         (inConversation &&
           displayState.canResume &&
           displayState.continuationModes.includes("terminal")),
@@ -655,13 +672,29 @@ export function mountMessenger(
           </button>
           <button
             type="button"
-            aria-label={activeBinding ? "Show terminal" : "Open in tmux"}
+            aria-label={
+              terminalMoveStatus === "waiting"
+                ? "Cancel move to tmux"
+                : activeBinding
+                  ? "Show terminal"
+                  : canMoveToTerminal
+                    ? "Move to tmux"
+                    : "Open in tmux"
+            }
             aria-pressed={terminalsOpen}
-            disabled={presentationPending || (!terminalsOpen && !canEnterTerminal)}
-            title={!activeBinding && canEnterTerminal ? "Open this chat in tmux" : undefined}
+            disabled={presentationPending || terminalMoveStatus === "moving" || (!terminalsOpen && !canEnterTerminal)}
+            title={
+              terminalMoveStatus === "waiting"
+                ? "Cancel pending move"
+                : !activeBinding && canEnterTerminal
+                  ? canMoveToTerminal
+                    ? "Move here when idle"
+                    : "Open this chat in tmux"
+                  : undefined
+            }
             onClick={() => void showTerminal()}
           >
-            Terminal
+            {terminalMoveStatus === "waiting" ? "Waiting…" : terminalMoveStatus === "moving" ? "Moving…" : "Terminal"}
           </button>
         </nav>
       );

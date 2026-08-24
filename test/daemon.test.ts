@@ -99,6 +99,13 @@ class RecordingTerminalService implements TerminalService {
     harness: string;
     launch: Parameters<TerminalService["launchSession"]>[1];
   }> = [];
+  readonly moved: Array<{
+    conversationKey: string;
+    harness: string;
+    nativeSessionId: string;
+    proof: Parameters<TerminalService["moveSession"]>[4];
+  }> = [];
+  nativeVisible = false;
   state: TerminalServiceSnapshot = {
     available: true,
     bindings: [],
@@ -109,6 +116,8 @@ class RecordingTerminalService implements TerminalService {
   };
 
   async snapshot(): Promise<TerminalServiceSnapshot> { return this.state; }
+  async refreshNativeSessions(): Promise<void> {}
+  canMoveSession(): boolean { return this.nativeVisible; }
   async create(): Promise<TerminalServiceSnapshot> { return this.state; }
   async launchSession(
     harness: Parameters<TerminalService["launchSession"]>[0],
@@ -131,6 +140,16 @@ class RecordingTerminalService implements TerminalService {
         : [],
     };
     return this.state;
+  }
+  async moveSession(
+    harness: Parameters<TerminalService["moveSession"]>[0],
+    nativeSessionId: Parameters<TerminalService["moveSession"]>[1],
+    launch: Parameters<TerminalService["moveSession"]>[2],
+    conversationKey: Parameters<TerminalService["moveSession"]>[3],
+    proof: Parameters<TerminalService["moveSession"]>[4],
+  ): Promise<TerminalServiceSnapshot> {
+    this.moved.push({ conversationKey, harness, nativeSessionId, proof });
+    return await this.launchSession(harness, launch, conversationKey);
   }
   async attach(): Promise<TerminalServiceSnapshot> { return this.state; }
   async close(): Promise<TerminalServiceSnapshot> { return this.state; }
@@ -445,6 +464,70 @@ describe("messenger session state machine", () => {
     await host.fireIntent(INTENT_QUEUE, { action: "resume", mode: "headless" });
     expect(client.resumedWith).toEqual([]);
     expect(lastPush().error).toContain("active in another agent window");
+  });
+
+  it("moves a native session only after a fresh idle observation and lets the user cancel while waiting", async () => {
+    type Activity = NonNullable<typeof ATLAS.activity>;
+    const working: Activity = {
+      harness: ATLAS.locator.harness,
+      session_id: ATLAS.locator.session_id,
+      presence: "running",
+      turn: "working",
+      evidence: {
+        source: "claude_transcript",
+        native_state: "busy",
+        observed_at_ms: 2_000_000,
+        harness_version: null,
+      },
+    };
+    const client = new FakeHarnessClient({ sessions: [{ ...ATLAS, activity: working }] });
+    const terminalService = new RecordingTerminalService();
+    terminalService.nativeVisible = true;
+    const { daemon, host, lastPush } = await sessionRig(
+      [{ ...ATLAS, activity: working }],
+      client,
+      undefined,
+      undefined,
+      () => 2_000_001,
+      terminalService,
+    );
+    await host.fireIntent(INTENT_QUEUE, { action: "attach", key: sessionKey(ATLAS.locator) });
+    await waitFor(() => (lastPush() as WidgetState & { canMoveToTerminal?: boolean }).canMoveToTerminal === true);
+
+    await host.fireIntent(INTENT_QUEUE, { action: "moveToTerminal" });
+    expect((lastPush() as WidgetState & { terminalMoveStatus?: string }).terminalMoveStatus).toBe("waiting");
+    expect(terminalService.moved).toEqual([]);
+    await host.fireIntent(INTENT_QUEUE, { action: "moveToTerminal" });
+    expect((lastPush() as WidgetState & { terminalMoveStatus?: string }).terminalMoveStatus).toBeNull();
+
+    const idle: Activity = {
+      ...working,
+      turn: "idle",
+      evidence: {
+        ...working.evidence,
+        native_state: "idle",
+        observed_at_ms: 2_000_001,
+      },
+    };
+    client.sessions.splice(0, 1, { ...ATLAS, activity: idle });
+    await daemon.refreshSessions();
+    expect(lastPush().sessions.find((row) => row.key === sessionKey(ATLAS.locator))?.runtimeStatus).toBe("idle");
+
+    await host.fireIntent(INTENT_QUEUE, { action: "moveToTerminal" });
+    await waitFor(() => terminalService.moved.length === 1);
+
+    expect(terminalService.moved).toEqual([{
+      conversationKey: sessionKey(ATLAS.locator),
+      harness: "claude-code",
+      nativeSessionId: "atlas-1",
+      proof: {
+        observedAtMs: 2_000_001,
+        source: "claude_transcript",
+        turn: "idle",
+      },
+    }]);
+    expect(client.resumeInstructionsWith).toEqual([{ locator: ATLAS.locator, cwd: ATLAS.cwd }]);
+    expect((lastPush() as WidgetState & { terminalMoveStatus?: string }).terminalMoveStatus).toBeNull();
   });
 
   it("retains a resumed conversation across switching and closes it only with the daemon", async () => {

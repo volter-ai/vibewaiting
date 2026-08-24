@@ -7,6 +7,10 @@ import {
   type EmbeddedTerminalAttachmentGrant,
   type TerminalSession,
 } from "@volter-ai-dev/supercode-terminal";
+import {
+  NativeTerminalSessionHost,
+  type NativeSessionIdleProof,
+} from "termfleet/native-terminal";
 import { shortCwd } from "./sessions.js";
 
 export interface TerminalServiceSnapshot {
@@ -25,6 +29,8 @@ export class LocalTerminalService {
   private readonly allowedOrigin: string;
   private readonly host: TmuxTerminalHost;
   private readonly bridge: TerminalWebSocketBridge;
+  private readonly nativeHost = new NativeTerminalSessionHost();
+  private readonly nativeSessionIds = new Set<string>();
   private readonly conversationBySession = new Map<string, string>();
   private attachment: TerminalServiceSnapshot["attachment"] = null;
   private error: string | null = null;
@@ -60,7 +66,8 @@ export class LocalTerminalService {
 
   async snapshot(): Promise<TerminalServiceSnapshot> {
     try {
-      const sessions = (await this.host.listSessions()).map((session) => ({
+      const ownedSessions = await this.host.listSessions();
+      const sessions = ownedSessions.map((session) => ({
         ...session,
         cwd: shortCwd(session.cwd, homedir()) || null,
       }));
@@ -127,6 +134,32 @@ export class LocalTerminalService {
     return await this.snapshot();
   }
 
+  canMoveSession(harness: HarnessId, sessionId: string): boolean {
+    return this.nativeSessionIds.has(nativeAgentSessionId(harness, sessionId));
+  }
+
+  async refreshNativeSessions(): Promise<void> {
+    const sessions = await this.nativeHost.listSessions();
+    this.nativeSessionIds.clear();
+    for (const session of sessions)
+      this.nativeSessionIds.add(session.agentSessionId);
+  }
+
+  async moveSession(
+    harness: HarnessId,
+    nativeSessionId: string,
+    launch: StructuredLaunch,
+    conversationKey: string,
+    proof: NativeSessionIdleProof,
+  ): Promise<TerminalServiceSnapshot> {
+    const agentSessionId = nativeAgentSessionId(harness, nativeSessionId);
+    if (!this.nativeSessionIds.has(agentSessionId)) {
+      throw new Error("this conversation is not running in a native terminal visible to Termfleet");
+    }
+    await this.nativeHost.relinquishSession(agentSessionId, proof);
+    return await this.launchSession(harness, launch, conversationKey);
+  }
+
   async attach(sessionId: string, mode: "observe" | "control"): Promise<TerminalServiceSnapshot> {
     this.attachment = this.attachmentFor(sessionId, mode);
     return await this.snapshot();
@@ -158,4 +191,10 @@ export class LocalTerminalService {
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function nativeAgentSessionId(harness: HarnessId, sessionId: string): string {
+  if (harness === "claude-code") return `claude:${sessionId}`;
+  if (harness === "codex") return `codex:${sessionId}`;
+  throw new Error(`${harness} native terminal handoff is not supported`);
 }

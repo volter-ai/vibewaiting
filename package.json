@@ -45,6 +45,7 @@
     "esbuild": "^0.28.2",
     "lucarne": "^1.7.4",
     "preact": "^10.19.0",
+    "termfleet": "0.2.8",
     "ws": "^8.21.0"
   },
   "devDependencies": {
