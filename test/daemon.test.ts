@@ -144,6 +144,18 @@ class RecordingTerminalService implements TerminalService {
     };
     return this.state;
   }
+  async bindContext(sessionId: string, conversationKey: string): Promise<TerminalServiceSnapshot> {
+    this.state = {
+      ...this.state,
+      attachment: this.state.attachment?.sessionId === sessionId
+        ? { ...this.state.attachment, conversationKey }
+        : this.state.attachment,
+      bindings: [{ conversationKey, sessionId }],
+      sessions: this.state.sessions.map((session) =>
+        session.id === sessionId ? { ...session, contextKey: conversationKey } : session),
+    };
+    return this.state;
+  }
   async moveSession(
     harness: Parameters<TerminalService["moveSession"]>[0],
     nativeSessionId: Parameters<TerminalService["moveSession"]>[1],

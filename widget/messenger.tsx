@@ -302,6 +302,7 @@ export function mountMessenger(
   >();
   let messengerNavigation: MessengerNavigation | null = null;
   let composerCommand: MessengerComposerCommand | null = null;
+  let terminalSurfaceOpen = false;
 
   function resolveBridgeCompletion(id: string): void {
     const resolve = bridgeCompletions.get(id);
@@ -548,6 +549,7 @@ export function mountMessenger(
       setPresentationError(null);
       try {
         await options.requestPresentation(name);
+        terminalSurfaceOpen = true;
         setTerminalsOpen(true);
         return true;
       } catch (error) {
@@ -576,6 +578,7 @@ export function mountMessenger(
       setPresentationError(null);
       try {
         await options.requestPresentation("messenger");
+        terminalSurfaceOpen = false;
         setTerminalsOpen(false);
       } catch (error) {
         setPresentationError(
@@ -936,6 +939,19 @@ export function mountMessenger(
       if (key !== "imageResolution") accumulatedState[key] = value;
     }
     const state = normalizeUiState(accumulatedState);
+    const terminalState = terminalHostState(accumulatedState);
+    const boundConversationKey = terminalState?.attachment?.conversationKey ?? null;
+    if (
+      terminalSurfaceOpen &&
+      boundConversationKey !== null &&
+      state.attached?.key === boundConversationKey
+    ) {
+      messengerNavigation = {
+        id: `terminal-bound:${boundConversationKey}`,
+        view: "chat",
+        sessionKey: boundConversationKey,
+      };
+    }
     lastPanelState = accumulatedState;
     renderCurrentPanel();
     syncLauncher(state);
