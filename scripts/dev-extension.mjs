@@ -2,26 +2,78 @@
 import { spawn, spawnSync } from "node:child_process";
 import { access, readFileSync, watch } from "node:fs";
 import { homedir, platform } from "node:os";
-import { delimiter, join, resolve } from "node:path";
+import { basename, delimiter, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  matchingDevelopmentBrowserPort,
+  parseDevelopmentBrowserProcesses,
+} from "../dist/dev-browser-selection.js";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const extensionDirectory = join(root, "dist/extension");
 const cliPath = join(root, "dist/cli.js");
-const cdpPort = Number(process.env.VIBEWAITING_DEV_CDP_PORT || 49160);
+const requestedCdpPort = Number(process.env.VIBEWAITING_DEV_CDP_PORT || 49160);
+let cdpPort = requestedCdpPort;
 if (!Number.isInteger(cdpPort) || cdpPort < 1 || cdpPort > 65_535)
   throw new Error("VIBEWAITING_DEV_CDP_PORT must be a valid TCP port");
-const cdpBase = `http://127.0.0.1:${cdpPort}`;
+let cdpBase = `http://127.0.0.1:${cdpPort}`;
 const defaultProfileDirectory =
   platform() === "darwin"
     ? join(homedir(), "Library/Caches/Vibewaiting/ExtensionDevProfile")
     : join(homedir(), ".cache/vibewaiting/extension-dev-profile");
-const profileDirectory = resolve(
+let profileDirectory = resolve(
   process.env.VIBEWAITING_DEV_PROFILE || defaultProfileDirectory,
 );
 const startUrl = process.env.VIBEWAITING_DEV_URL || "https://example.com";
 const devWorkspace = resolve(process.env.VIBEWAITING_DEV_WORKSPACE || root);
 const extensionId = "dbcbmeiocgelabifljkclkacecapalgj";
+
+function useCdpPort(port) {
+  cdpPort = port;
+  cdpBase = `http://127.0.0.1:${port}`;
+}
+
+function developmentBrowserProcesses() {
+  const result = spawnSync("ps", ["-axo", "command="], { encoding: "utf8" });
+  if (result.status !== 0 || typeof result.stdout !== "string") return [];
+  return parseDevelopmentBrowserProcesses(result.stdout);
+}
+
+async function cdpReadyAt(port) {
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/json/version`, {
+      signal: AbortSignal.timeout(1_000),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function selectDevelopmentBrowser() {
+  if (process.env.VIBEWAITING_DEV_CDP_PORT) return;
+  const processes = developmentBrowserProcesses();
+  const matchingPort = matchingDevelopmentBrowserPort(processes, extensionDirectory);
+  if (matchingPort) {
+    if (matchingPort !== cdpPort) {
+      useCdpPort(matchingPort);
+      process.stdout.write(`development browser: matched current checkout on ${cdpBase}\n`);
+    }
+    return;
+  }
+  if (!(await cdpReadyAt(cdpPort))) return;
+  for (let candidate = 49_160; candidate < 49_200; candidate += 1) {
+    if (await cdpReadyAt(candidate)) continue;
+    useCdpPort(candidate);
+    const suffix = basename(root).replace(/[^a-z0-9_-]+/gi, "-");
+    profileDirectory = `${defaultProfileDirectory}-${suffix}`;
+    process.stdout.write(
+      `development browser: CDP ${requestedCdpPort} belongs to another checkout; using ${cdpBase}\n`,
+    );
+    return;
+  }
+  throw new Error("No free Vibewaiting development CDP port is available from 49160 through 49199");
+}
 
 function command(program, args, options = {}) {
   return new Promise((resolveCommand, reject) => {
@@ -276,14 +328,23 @@ async function waitForExtensionTarget() {
 }
 
 async function ensureDevSettings() {
-  const extension = await waitForExtensionTarget();
   const key = "vibewaiting:settings";
   const expression = `(async()=>{const key=${JSON.stringify(key)};const stored=(await chrome.storage.local.get(key))[key];if(stored&&typeof stored.workspace==="string"&&stored.workspace)return{seeded:false,workspace:stored.workspace};const settings={workspace:${JSON.stringify(devWorkspace)}};await chrome.storage.local.set({[key]:settings});return{seeded:true,workspace:settings.workspace}})()`;
-  const result = await cdpCommand(
-    extension.webSocketDebuggerUrl,
-    "Runtime.evaluate",
-    { expression, awaitPromise: true, returnByValue: true },
-  );
+  let result;
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    try {
+      const extension = await waitForExtensionTarget();
+      result = await cdpCommand(
+        extension.webSocketDebuggerUrl,
+        "Runtime.evaluate",
+        { expression, awaitPromise: true, returnByValue: true },
+      );
+      break;
+    } catch (error) {
+      if (attempt === 9) throw error;
+      await delay(100);
+    }
+  }
   const settings = result?.result?.value;
   if (settings?.seeded)
     process.stdout.write(`development workspace: ${settings.workspace}\n`);
@@ -323,11 +384,7 @@ async function reloadExtensionAndTabs() {
     { expression: "chrome.runtime.reload()", returnByValue: true },
     true,
   );
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    const current = await json("/json/list");
-    if (extensionTarget(current)) break;
-    await delay(100);
-  }
+  await waitForExpectedBuild();
   // The first run after upgrading an older development bundle cannot ask that old background to
   // disconnect. Load the new bundle once, use its handshake, then reload a second time so the very
   // first resulting connection also starts the freshly-built native daemon.
@@ -340,11 +397,7 @@ async function reloadExtensionAndTabs() {
       { expression: "chrome.runtime.reload()", returnByValue: true },
       true,
     );
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      const current = await json("/json/list");
-      if (extensionTarget(current)) break;
-      await delay(100);
-    }
+    await waitForExpectedBuild();
   }
   const current = await json("/json/list");
   const pages = current.filter(
@@ -361,7 +414,39 @@ async function reloadExtensionAndTabs() {
     (result) => result.status === "fulfilled",
   ).length;
   process.stdout.write(
-    `extension reloaded · ${refreshed}/${pages.length} web tabs refreshed\n`,
+    `extension build ${readFileSync(join(extensionDirectory, "build-id.txt"), "utf8").trim()} attested · ${refreshed}/${pages.length} web tabs refreshed\n`,
+  );
+}
+
+async function loadedBuildId() {
+  const extension = await waitForExtensionTarget();
+  const result = await cdpCommand(
+    extension.webSocketDebuggerUrl,
+    "Runtime.evaluate",
+    {
+      expression: `fetch(chrome.runtime.getURL("build-id.txt"),{cache:"no-store"}).then(response=>response.ok?response.text():null).catch(()=>null)`,
+      awaitPromise: true,
+      returnByValue: true,
+    },
+  );
+  return typeof result?.result?.value === "string"
+    ? result.result.value.trim()
+    : null;
+}
+
+async function waitForExpectedBuild() {
+  const expected = readFileSync(join(extensionDirectory, "build-id.txt"), "utf8").trim();
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    try {
+      if ((await loadedBuildId()) === expected) return;
+    } catch {
+      // The service worker target is expected to disappear briefly during chrome.runtime.reload().
+    }
+    await delay(100);
+  }
+  const loaded = await loadedBuildId().catch(() => null);
+  throw new Error(
+    `extension reload was stale on CDP ${cdpPort}: expected build ${expected}, loaded ${loaded ?? "no build id"}`,
   );
 }
 
@@ -376,6 +461,7 @@ await command(process.execPath, [
   "--extension-id",
   extensionId,
 ]);
+await selectDevelopmentBrowser();
 await launchBrowser(choice);
 await ensureDevSettings();
 await reloadExtensionAndTabs();

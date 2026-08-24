@@ -484,6 +484,9 @@ export function mountMessenger(
       return sendBridgeIntent(intent);
     },
     onClose: closeMessenger,
+    ...(widget.requestBrowserContext
+      ? { openKeyboardShortcuts: showShortcutHelp }
+      : {}),
     pickContext: pickAttachments,
     resolveImage: resolveHistoricalImage,
     copyText(value: string): Promise<void> | void {
@@ -774,33 +777,7 @@ export function mountMessenger(
             components={{ TaskPlan: () => null }}
             slots={{
               beforeSessions: NativeTerminalMoveBanner,
-              headerActions: (header) => (
-                <>
-                  <HeaderModeToggle value={header.value} />
-                  {widget.requestBrowserContext ? (
-                    <button
-                      type="button"
-                      class="vw-shortcut-launch"
-                      aria-label="Keyboard shortcuts"
-                      title="Keyboard shortcuts"
-                      onClick={showShortcutHelp}
-                    >
-                      <svg
-                        aria-hidden="true"
-                        viewBox="0 0 24 24"
-                        width="16"
-                        height="16"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="1.8"
-                      >
-                        <rect x="3" y="6" width="18" height="12" rx="2" />
-                        <path d="M7 10h.01M11 10h.01M15 10h.01M18 10h.01M7 14h2M11 14h6" />
-                      </svg>
-                    </button>
-                  ) : null}
-                </>
-              ),
+              headerActions: (header) => <HeaderModeToggle value={header.value} />,
             }}
           />
         </div>

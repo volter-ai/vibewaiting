@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
@@ -48,8 +49,19 @@ for (const name of ["manifest.json", "app.html", "options.html", "options.css"])
   await cp(join(source, name), join(output, name));
 }
 
-const assets = await Promise.all(["background.js", "content.js", "app.js", "options.js", "app.css"].map(async (name) => {
-  const bytes = (await readFile(join(output, name))).byteLength;
+const assetNames = ["background.js", "content.js", "app.js", "options.js", "app.css"];
+const assetContents = await Promise.all(assetNames.map((name) => readFile(join(output, name))));
+const buildHash = createHash("sha256");
+for (let index = 0; index < assetNames.length; index += 1) {
+  buildHash.update(assetNames[index]);
+  buildHash.update("\0");
+  buildHash.update(assetContents[index]);
+}
+const buildId = buildHash.digest("hex").slice(0, 20);
+await writeFile(join(output, "build-id.txt"), `${buildId}\n`, "utf8");
+
+const assets = assetNames.map((name, index) => {
+  const bytes = assetContents[index].byteLength;
   return `${name} ${(bytes / 1024).toFixed(1)} kB`;
-}));
-process.stdout.write(`extension → ${output}\n  ${assets.join(" · ")}\n`);
+});
+process.stdout.write(`extension → ${output}\n  ${assets.join(" · ")} · build ${buildId}\n`);

@@ -42,10 +42,6 @@ body { background:transparent }
   box-sizing:border-box; padding:5px 7px 7px; background:var(--sctui-terminal-background); color:#e7e9ea }
 .vw-terminal-surface > .sctui-viewer { min-width:0; min-height:0; flex:1 }
 
-.vw-shortcut-launch { display:grid; width:30px; height:30px; place-items:center; padding:0; border:0; border-radius:8px;
-  color:var(--scui-muted); background:transparent; cursor:pointer }
-.vw-shortcut-launch:hover,.vw-shortcut-launch:focus-visible { color:var(--scui-fg); background:var(--scui-fill); outline:0 }
-.vw-shortcut-launch svg { display:block; width:16px; height:16px }
 .vw-shortcut-help { width:min(300px,calc(100vw - 28px)); margin:auto; padding:16px; border:1px solid var(--scui-border-strong);
   border-radius:12px; color:var(--scui-fg); background:var(--scui-bg); box-shadow:0 18px 50px rgba(16,24,40,.22);
   font-family:var(--scui-font) }
