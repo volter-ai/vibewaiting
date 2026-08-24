@@ -530,6 +530,59 @@ describe("messenger session state machine", () => {
     expect((lastPush() as WidgetState & { terminalMoveStatus?: string }).terminalMoveStatus).toBeNull();
   });
 
+  it("moves every idle native session while retaining one cancellable queue for busy turns", async () => {
+    const activity = (
+      descriptor: typeof ATLAS,
+      turn: "idle" | "working",
+    ): NonNullable<typeof ATLAS.activity> => ({
+      harness: descriptor.locator.harness,
+      session_id: descriptor.locator.session_id,
+      presence: "running",
+      turn,
+      evidence: {
+        source: descriptor.locator.harness === "codex" ? "codex_rollout" : "claude_transcript",
+        native_state: turn,
+        observed_at_ms: 2_000_001,
+        harness_version: null,
+      },
+    });
+    const busyClaude = { ...ATLAS, activity: activity(ATLAS, "working") };
+    const idleCodex = { ...BRIDGE, activity: activity(BRIDGE, "idle") };
+    const client = new FakeHarnessClient({ sessions: [busyClaude, idleCodex] });
+    const terminalService = new RecordingTerminalService();
+    terminalService.nativeVisible = true;
+    const { host, lastPush } = await sessionRig(
+      [busyClaude, idleCodex],
+      client,
+      undefined,
+      undefined,
+      () => 2_000_001,
+      terminalService,
+    );
+    await waitFor(() => (lastPush() as WidgetState & { movableNativeSessionCount?: number }).movableNativeSessionCount === 2);
+
+    await host.fireIntent(INTENT_QUEUE, { action: "moveAllToTerminal" });
+    await waitFor(() => terminalService.moved.length === 1);
+
+    expect(terminalService.moved[0]).toMatchObject({
+      conversationKey: sessionKey(BRIDGE.locator),
+      harness: "codex",
+      nativeSessionId: "bridge-1",
+      proof: { observedAtMs: 2_000_001, source: "codex_rollout", turn: "idle" },
+    });
+    expect(lastPush()).toMatchObject({
+      terminalMoveQueuedCount: 1,
+      terminalMoveWaitingCount: 1,
+    });
+
+    await host.fireIntent(INTENT_QUEUE, { action: "moveAllToTerminal" });
+    expect(lastPush()).toMatchObject({
+      terminalMoveQueuedCount: 0,
+      terminalMoveWaitingCount: 0,
+    });
+    expect(terminalService.moved).toHaveLength(1);
+  });
+
   it("retains a resumed conversation across switching and closes it only with the daemon", async () => {
     const { daemon, host, client, lastPush } = await sessionRig();
     const atlasKey = sessionKey(ATLAS.locator);

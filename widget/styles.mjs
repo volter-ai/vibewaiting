@@ -25,6 +25,17 @@ body { background:transparent }
 .vw-mode-toggle button[aria-pressed="true"] { color:var(--scui-fg); background:var(--scui-bg); box-shadow:0 1px 3px rgba(17,24,39,.12) }
 .vw-mode-toggle button:disabled { opacity:.42; cursor:default }
 
+.vw-native-move { display:flex; align-items:center; gap:10px; margin:7px 9px 2px; padding:9px 10px;
+  border:1px solid var(--scui-border); border-radius:9px; color:var(--scui-fg); background:var(--scui-bg-raised) }
+.vw-native-move span { min-width:0; flex:1 }
+.vw-native-move strong,.vw-native-move small { display:block }
+.vw-native-move strong { overflow:hidden; font:650 11px/1.25 var(--scui-font); text-overflow:ellipsis; white-space:nowrap }
+.vw-native-move small { margin-top:2px; color:var(--scui-muted); font:500 9.5px/1.25 var(--scui-font) }
+.vw-native-move button { flex:none; padding:6px 8px; border:1px solid var(--scui-border-strong); border-radius:7px;
+  color:var(--scui-fg); background:var(--scui-bg); font:650 9.5px/1 var(--scui-font); cursor:pointer }
+.vw-native-move button:hover,.vw-native-move button:focus-visible { background:var(--scui-fill); outline:0 }
+.vw-native-move button:disabled { opacity:.45; cursor:default }
+
 .vw-terminal-surface { position:absolute; z-index:11; top:49px; right:0; bottom:0; left:0; display:flex; min-width:0; min-height:0;
   box-sizing:border-box; padding:5px 7px 7px; background:var(--sctui-terminal-background); color:#e7e9ea }
 .vw-terminal-surface > .sctui-viewer { min-width:0; min-height:0; flex:1 }
