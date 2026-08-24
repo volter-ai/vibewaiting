@@ -11,9 +11,13 @@ import { shortCwd } from "./sessions.js";
 
 export interface TerminalServiceSnapshot {
   available: boolean;
+  bindings: Array<{ conversationKey: string; sessionId: string }>;
   canOpenLocal: boolean;
   sessions: TerminalSession[];
-  attachment: (EmbeddedTerminalAttachmentGrant & { sessionId: string }) | null;
+  attachment: (EmbeddedTerminalAttachmentGrant & {
+    conversationKey: string | null;
+    sessionId: string;
+  }) | null;
   error: string | null;
 }
 
@@ -21,6 +25,7 @@ export class LocalTerminalService {
   private readonly allowedOrigin: string;
   private readonly host: TmuxTerminalHost;
   private readonly bridge: TerminalWebSocketBridge;
+  private readonly conversationBySession = new Map<string, string>();
   private attachment: TerminalServiceSnapshot["attachment"] = null;
   private error: string | null = null;
 
@@ -28,7 +33,11 @@ export class LocalTerminalService {
     sessionId: string,
     mode: "observe" | "control",
   ): NonNullable<TerminalServiceSnapshot["attachment"]> {
-    return { ...this.bridge.issueAttachment(sessionId, { mode }), sessionId };
+    return {
+      ...this.bridge.issueAttachment(sessionId, { mode }),
+      conversationKey: this.conversationBySession.get(sessionId) ?? null,
+      sessionId,
+    };
   }
 
   constructor(allowedOrigin: string) {
@@ -55,10 +64,18 @@ export class LocalTerminalService {
         ...session,
         cwd: shortCwd(session.cwd, homedir()) || null,
       }));
+      this.conversationBySession.clear();
+      for (const session of sessions) {
+        if (session.contextKey)
+          this.conversationBySession.set(session.id, session.contextKey);
+      }
       this.error = null;
       return {
         attachment: this.attachment,
         available: true,
+        bindings: [...this.conversationBySession].map(
+          ([sessionId, conversationKey]) => ({ conversationKey, sessionId }),
+        ),
         canOpenLocal: process.platform === "darwin",
         error: null,
         sessions,
@@ -68,6 +85,7 @@ export class LocalTerminalService {
       return {
         attachment: null,
         available: false,
+        bindings: [],
         canOpenLocal: process.platform === "darwin",
         error: this.error,
         sessions: [],
@@ -90,6 +108,7 @@ export class LocalTerminalService {
   async launchSession(
     harness: HarnessId,
     launch: StructuredLaunch,
+    conversationKey: string | null = null,
   ): Promise<TerminalServiceSnapshot> {
     const label = harness === "claude-code" ? "claude" : harness;
     const session = await this.host.createSession({
@@ -97,10 +116,13 @@ export class LocalTerminalService {
         program: launch.program,
         arguments: launch.arguments,
       },
+      ...(conversationKey ? { contextKey: conversationKey } : {}),
       cwd: launch.cwd,
       env: launch.env,
       name: `vibewaiting-${label}-${randomUUID().slice(0, 8)}`,
     });
+    if (session.contextKey)
+      this.conversationBySession.set(session.id, session.contextKey);
     this.attachment = this.attachmentFor(session.id, "control");
     return await this.snapshot();
   }
@@ -112,6 +134,7 @@ export class LocalTerminalService {
 
   async close(sessionId: string): Promise<TerminalServiceSnapshot> {
     this.host.closeSession(sessionId);
+    this.conversationBySession.delete(sessionId);
     if (this.attachment?.sessionId === sessionId) this.attachment = null;
     return await this.snapshot();
   }

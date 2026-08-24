@@ -16,14 +16,18 @@ body { background:transparent }
   --scui-height:100%;
   width:100%; height:100%; border:0; border-radius:0;
 }
+.vw-dialog[data-terminal="true"] .scui-root > section > :not(.scui-head) { visibility:hidden; pointer-events:none }
 
-.vw-terminal-launch { position:relative; display:grid; width:30px; height:30px; place-items:center;
-  padding:0; border:0; border-radius:8px; color:var(--scui-muted); background:transparent; font:600 11px/1 var(--scui-font); cursor:pointer }
-.vw-terminal-launch:hover { color:var(--scui-fg); background:var(--scui-fill) }
-.vw-terminal-launch > span { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace }
-.vw-terminal-launch small { position:absolute; top:-4px; right:-5px; display:grid; min-width:14px; height:14px; place-items:center;
-  padding:0 2px; border:2px solid var(--scui-bg-raised); border-radius:8px; background:var(--scui-muted); color:var(--scui-bg);
-  font:700 8px/1 var(--scui-font) }
+.vw-mode-toggle { display:flex; height:26px; flex:none; align-items:center; padding:2px; border:1px solid var(--scui-border);
+  border-radius:7px; background:var(--scui-fill); font:600 9.5px/1 var(--scui-font) }
+.vw-mode-toggle button { height:22px; min-width:37px; padding:0 7px; border:0; border-radius:5px; color:var(--scui-muted);
+  background:transparent; font:inherit; cursor:pointer }
+.vw-mode-toggle button[aria-pressed="true"] { color:var(--scui-fg); background:var(--scui-bg); box-shadow:0 1px 3px rgba(17,24,39,.12) }
+.vw-mode-toggle button:disabled { opacity:.42; cursor:default }
+
+.vw-terminal-surface { position:absolute; z-index:11; top:49px; right:0; bottom:0; left:0; display:flex; min-width:0; min-height:0;
+  box-sizing:border-box; padding:5px 7px 7px; background:var(--sctui-terminal-background); color:#e7e9ea }
+.vw-terminal-surface > .sctui-viewer { min-width:0; min-height:0; flex:1 }
 
 .vw-shortcut-launch { display:grid; width:30px; height:30px; place-items:center; padding:0; border:0; border-radius:8px;
   color:var(--scui-muted); background:transparent; cursor:pointer }
@@ -57,6 +61,9 @@ body { background:transparent }
 @media (prefers-color-scheme:dark) {
   .vw-dialog { --scui-bg:#151515; --scui-bg-raised:#1c1c1b; --scui-fill:#242422; --scui-fill-strong:#30302d;
     --scui-fg:#f3f3ef; --scui-muted:#a3a39d; --scui-border:#353532; --scui-border-strong:#4a4a45; --scui-danger:#ff747d }
+}
+@media (max-width:640px) {
+  .vw-terminal-surface { top:52px }
 }
 .vw-presentation-error { position:absolute; z-index:20; right:12px; bottom:12px; left:12px; padding:10px 12px;
   border:1px solid color-mix(in srgb, #b42318 36%, transparent); border-radius:10px; color:#7a271a;

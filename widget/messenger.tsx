@@ -56,14 +56,17 @@ type WidgetIntent =
   | TerminalIntent
   | { action: "resolveImage"; requestId: string; reference: string };
 
-export type TerminalHostState = TerminalUiState;
+export type TerminalHostState = Omit<TerminalUiState, "attachment"> & {
+  attachment: (NonNullable<TerminalUiState["attachment"]> & {
+    conversationKey: string | null;
+    sessionId: string;
+  }) | null;
+  bindings: Array<{ conversationKey: string; sessionId: string }>;
+};
 
 export interface TerminalPanelProps {
   state: TerminalHostState;
-  viewportMode: "scale" | "fit";
   send(intent: TerminalIntent): void | Promise<void>;
-  onClose(): void;
-  onViewportModeChange(mode: "scale" | "fit"): void | Promise<void>;
 }
 
 export interface MessengerOptions {
@@ -73,7 +76,33 @@ export interface MessengerOptions {
 
 function terminalHostState(value: unknown): TerminalHostState | null {
   if (!isRecord(value) || !isRecord(value.terminalHost)) return null;
-  return normalizeTerminalUiState(value.terminalHost);
+  const normalized = normalizeTerminalUiState(value.terminalHost);
+  const rawAttachment = value.terminalHost.attachment;
+  const attachment = normalized.attachment &&
+    isRecord(rawAttachment) &&
+    typeof normalized.attachment.sessionId === "string"
+    ? {
+        ...normalized.attachment,
+        conversationKey:
+          typeof rawAttachment.conversationKey === "string"
+            ? rawAttachment.conversationKey
+            : null,
+        sessionId: normalized.attachment.sessionId,
+      }
+    : null;
+  const bindings = Array.isArray(value.terminalHost.bindings)
+    ? value.terminalHost.bindings.flatMap((binding) =>
+        isRecord(binding) &&
+        typeof binding.conversationKey === "string" &&
+        typeof binding.sessionId === "string"
+          ? [{
+              conversationKey: binding.conversationKey,
+              sessionId: binding.sessionId,
+            }]
+          : [],
+      )
+    : [];
+  return { ...normalized, attachment, bindings };
 }
 
 const INTENT_QUEUE = "agent";
@@ -476,15 +505,13 @@ export function mountMessenger(
 
   function MessengerDialog({ state }: { state: unknown }): JSX.Element {
     const [terminalsOpen, setTerminalsOpen] = useState(false);
-    const [terminalPresentation, setTerminalPresentation] =
-      useState<VibewaitingPresentation | null>(null);
     const [presentationPending, setPresentationPending] = useState(false);
     const [presentationError, setPresentationError] = useState<string | null>(
       null,
     );
     const presentationTransition = useRef(false);
     const lastTerminalAttachmentId = useRef<string | null>(null);
-    const terminalLauncher = useRef<HTMLButtonElement>(null);
+    const requestedTerminalConversation = useRef<string | null>(null);
     const normalized = normalizeUiState(state);
     const terminals = options.TerminalPanel ? terminalHostState(state) : null;
     const TerminalPanel = options.TerminalPanel;
@@ -503,9 +530,9 @@ export function mountMessenger(
         }
       : normalized;
     async function requestTerminalPresentation(
-      name: VibewaitingPresentation,
+      name: typeof VIBEWAITING_PRESENTATION.terminal,
     ): Promise<boolean> {
-      if (terminalsOpen && terminalPresentation === name) return true;
+      if (terminalsOpen) return true;
       if (presentationTransition.current) return false;
       if (!options.requestPresentation) {
         setPresentationError(
@@ -518,7 +545,6 @@ export function mountMessenger(
       setPresentationError(null);
       try {
         await options.requestPresentation(name);
-        setTerminalPresentation(name);
         setTerminalsOpen(true);
         return true;
       } catch (error) {
@@ -534,7 +560,7 @@ export function mountMessenger(
       }
     }
 
-    async function closeTerminalPresentation(): Promise<void> {
+    async function showChat(): Promise<void> {
       if (presentationTransition.current) return;
       if (!options.requestPresentation) {
         setPresentationError(
@@ -547,13 +573,7 @@ export function mountMessenger(
       setPresentationError(null);
       try {
         await options.requestPresentation("messenger");
-        setTerminalPresentation(null);
         setTerminalsOpen(false);
-        queueMicrotask(() =>
-          terminalLauncher.current?.focus({ preventScroll: true }),
-        );
-        if (terminals?.attachment)
-          void sendBridgeIntent({ action: "terminalDismiss" });
       } catch (error) {
         setPresentationError(
           error instanceof Error
@@ -573,18 +593,99 @@ export function mountMessenger(
         attachmentId !== null &&
         attachmentId !== lastTerminalAttachmentId.current;
       lastTerminalAttachmentId.current = attachmentId;
-      if (!terminalsOpen && attachmentBecameAvailable) {
-        void requestTerminalPresentation(VIBEWAITING_PRESENTATION.terminal);
-      }
+      if (!attachmentBecameAvailable || terminalsOpen) return;
+      const conversationKey = terminals.attachment?.conversationKey ?? null;
+      const requestedKey = requestedTerminalConversation.current;
+      const requestedAttachment = requestedKey !== null && requestedKey === conversationKey;
+      const unboundNewTerminal = conversationKey === null && requestedKey === null;
+      if (!requestedAttachment && !unboundNewTerminal) return;
+      requestedTerminalConversation.current = null;
+      void requestTerminalPresentation(VIBEWAITING_PRESENTATION.terminal);
     }, [
       terminals?.attachment?.id,
       terminalsOpen,
-      terminalPresentation,
       presentationPending,
     ]);
+
+    const activeConversationKey = displayState.attached?.key || null;
+    const activeBinding = activeConversationKey
+      ? terminals?.bindings.find(
+          (binding) => binding.conversationKey === activeConversationKey,
+        )
+      : null;
+    const visibleAttachment = terminals?.attachment && (
+      terminals.attachment.conversationKey === activeConversationKey ||
+      (activeConversationKey === null && terminals.attachment.conversationKey === null)
+    )
+      ? terminals.attachment
+      : null;
+
+    useEffect(() => {
+      if (terminalsOpen && !visibleAttachment) void showChat();
+    }, [
+      activeConversationKey,
+      terminalsOpen,
+      visibleAttachment?.id,
+    ]);
+
+    async function showTerminal(): Promise<void> {
+      if (!terminals || presentationPending) return;
+      setPresentationError(null);
+      if (activeBinding) {
+        requestedTerminalConversation.current = activeConversationKey;
+        await sendBridgeIntent({
+          action: "terminalAttach",
+          mode: "control",
+          sessionId: activeBinding.sessionId,
+        });
+        return;
+      }
+      if (
+        activeConversationKey &&
+        displayState.canResume &&
+        displayState.continuationModes.includes("terminal")
+      ) {
+        requestedTerminalConversation.current = activeConversationKey;
+        await sendBridgeIntent({ action: "resume", mode: "terminal" });
+      }
+    }
+
+    function HeaderModeToggle({ value }: { value: unknown }): JSX.Element | null {
+      const inConversation = value === "chat" && activeConversationKey !== null;
+      if (!inConversation && !terminalsOpen) return null;
+      const canEnterTerminal = Boolean(
+        activeBinding ||
+        (inConversation &&
+          displayState.canResume &&
+          displayState.continuationModes.includes("terminal")),
+      );
+      return (
+        <nav class="vw-mode-toggle" aria-label="Conversation view">
+          <button
+            type="button"
+            aria-pressed={!terminalsOpen}
+            disabled={presentationPending}
+            onClick={() => void showChat()}
+          >
+            Chat
+          </button>
+          <button
+            type="button"
+            aria-label={activeBinding ? "Show terminal" : "Open in tmux"}
+            aria-pressed={terminalsOpen}
+            disabled={presentationPending || (!terminalsOpen && !canEnterTerminal)}
+            title={!activeBinding && canEnterTerminal ? "Open this chat in tmux" : undefined}
+            onClick={() => void showTerminal()}
+          >
+            Terminal
+          </button>
+        </nav>
+      );
+    }
     return (
       <div
         class="vw-dialog"
+        data-terminal={String(terminalsOpen)}
         tabIndex={-1}
         onKeyDown={(event): void => {
           if (event.key !== "Escape" || terminalsOpen) return;
@@ -593,11 +694,7 @@ export function mountMessenger(
           closeMessenger();
         }}
       >
-        <div
-          class="vw-messenger-layer"
-          aria-hidden={terminalsOpen ? "true" : undefined}
-          inert={terminalsOpen}
-        >
+        <div class="vw-messenger-layer">
           <SupercodeMessenger
             state={displayState}
             adapter={adapter}
@@ -606,8 +703,9 @@ export function mountMessenger(
             labels={{ attachContext: "Attach selected text or current page" }}
             components={{ TaskPlan: () => null }}
             slots={{
-              headerActions: () => (
+              headerActions: (header) => (
                 <>
+                  <HeaderModeToggle value={header.value} />
                   {widget.requestBrowserContext ? (
                     <button
                       type="button"
@@ -630,47 +728,15 @@ export function mountMessenger(
                       </svg>
                     </button>
                   ) : null}
-                  {terminals ? (
-                      <button
-                        ref={terminalLauncher}
-                        type="button"
-                        class="vw-terminal-launch"
-                        aria-label={`Terminals · ${terminals.sessions.length} local sessions`}
-                        aria-busy={presentationPending}
-                        disabled={presentationPending}
-                        onClick={() => {
-                          void requestTerminalPresentation(
-                            VIBEWAITING_PRESENTATION.terminal,
-                          ).then((opened) => {
-                            if (opened)
-                              return sendBridgeIntent({
-                                action: "terminalRefresh",
-                              });
-                          });
-                        }}
-                      >
-                        <span aria-hidden="true">&gt;_</span>
-                        <small>{terminals.sessions.length}</small>
-                      </button>
-                  ) : null}
                 </>
               ),
             }}
           />
         </div>
-        {terminalsOpen && terminals && TerminalPanel ? (
+        {terminalsOpen && terminals && visibleAttachment && TerminalPanel ? (
           <TerminalPanel
-            state={terminals}
-            viewportMode={terminalPresentation === VIBEWAITING_PRESENTATION.terminalFit ? "fit" : "scale"}
+            state={{ ...terminals, attachment: visibleAttachment }}
             send={sendBridgeIntent}
-            onClose={() => {
-              void closeTerminalPresentation();
-            }}
-            onViewportModeChange={(mode) => requestTerminalPresentation(
-              mode === "fit"
-                ? VIBEWAITING_PRESENTATION.terminalFit
-                : VIBEWAITING_PRESENTATION.terminal,
-            ).then(() => undefined)}
           />
         ) : null}
         {presentationError ? (
