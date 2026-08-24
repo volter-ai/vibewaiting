@@ -19,11 +19,13 @@ body { background:transparent }
 .vw-dialog[data-terminal="true"] .scui-root > section > :not(.scui-head) { visibility:hidden; pointer-events:none }
 
 .vw-mode-toggle { display:flex; height:26px; flex:none; align-items:center; padding:2px; border:1px solid var(--scui-border);
-  border-radius:7px; background:var(--scui-fill); font:600 9.5px/1 var(--scui-font) }
-.vw-mode-toggle button { height:22px; min-width:37px; padding:0 7px; border:0; border-radius:5px; color:var(--scui-muted);
-  background:transparent; font:inherit; cursor:pointer }
+  border-radius:7px; background:var(--scui-fill) }
+.vw-mode-toggle button { position:relative; display:grid; width:26px; height:22px; place-items:center; padding:0; border:0;
+  border-radius:5px; color:var(--scui-muted); background:transparent; cursor:pointer }
 .vw-mode-toggle button[aria-pressed="true"] { color:var(--scui-fg); background:var(--scui-bg); box-shadow:0 1px 3px rgba(17,24,39,.12) }
 .vw-mode-toggle button:disabled { opacity:.42; cursor:default }
+.vw-mode-toggle svg { display:block; width:15px; height:15px; fill:none; stroke:currentColor; stroke-width:1.8;
+  stroke-linecap:round; stroke-linejoin:round }
 
 .vw-native-move { display:flex; align-items:center; gap:10px; margin:7px 9px 2px; padding:9px 10px;
   border:1px solid var(--scui-border); border-radius:9px; color:var(--scui-fg); background:var(--scui-bg-raised) }
