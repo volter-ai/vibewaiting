@@ -32,10 +32,10 @@
   },
   "dependencies": {
     "@homebridge/node-pty-prebuilt-multiarch": "^0.13.1",
-    "@termfleet/terminal": "0.1.8",
+    "@termfleet/terminal": "0.1.9",
     "@volter-ai-dev/supercode-client": "^0.3.24",
-    "@volter-ai-dev/supercode-harness-sdk": "^0.3.13",
-    "@volter-ai-dev/supercode-terminal": "^0.2.9",
+    "@volter-ai-dev/supercode-harness-sdk": "^0.3.14",
+    "@volter-ai-dev/supercode-terminal": "^0.2.10",
     "@volter-ai-dev/supercode-ui": "^0.1.45",
     "@volter-ai-dev/widget-shell": "0.3.2",
     "@xterm/addon-fit": "^0.11.0",
