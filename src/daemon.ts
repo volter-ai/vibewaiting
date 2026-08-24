@@ -837,10 +837,36 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     const transcriptWindowKey = activeForeignKey ?? "@owned";
     const transcriptLimit = transcriptLimits.get(transcriptWindowKey) ?? initialTranscriptLimit;
     const observedAt = now();
-    const sessions = projectSessions(descriptors, { now: observedAt, home, active: ref, max: sessionLimit, preserveOrder: true });
     const ownSnapshot = controller.getSnapshot();
     const ownRef = activeRef(ownSnapshot);
-    const ownRows = projectSessions(descriptors, { now: observedAt, home, active: ownRef, max: sessionLimit, preserveOrder: true });
+    const writableSessionKeys = new Set(
+      (terminalHost?.bindings ?? []).map((binding) => binding.conversationKey),
+    );
+    if (ownSnapshot.availableActions.send && ownRef?.sessionId) {
+      const ownedDescriptor = descriptors.find((descriptor) => matchesActive(descriptor, ownRef));
+      if (ownedDescriptor) writableSessionKeys.add(sessionKey(ownedDescriptor.locator));
+    }
+    for (const [key, slot] of foreignControllers) {
+      if (slot.controller.getSnapshot().availableActions.send) writableSessionKeys.add(key);
+    }
+    const isWritable = (descriptor: SessionDescriptor): boolean =>
+      writableSessionKeys.has(sessionKey(descriptor.locator));
+    const sessions = projectSessions(descriptors, {
+      now: observedAt,
+      home,
+      active: ref,
+      isWritable,
+      max: sessionLimit,
+      preserveOrder: true,
+    });
+    const ownRows = projectSessions(descriptors, {
+      now: observedAt,
+      home,
+      active: ownRef,
+      isWritable,
+      max: sessionLimit,
+      preserveOrder: true,
+    });
     imageProjection = projectWithImages(snapshot, { ...options.projection, maxEntries: transcriptLimit });
     const projected = imageProjection.state;
     const startupLabel = startup === "connecting"

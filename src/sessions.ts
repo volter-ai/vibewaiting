@@ -63,6 +63,7 @@ export function projectSessions(
     now: number;
     home?: string;
     active?: ActiveSessionRef | null;
+    isWritable?: (descriptor: SessionDescriptor) => boolean;
     max?: number;
     preserveOrder?: boolean;
   },
@@ -72,6 +73,9 @@ export function projectSessions(
     now: options.now,
     ...(options.home !== undefined ? { home: options.home } : {}),
     ...(options.active !== undefined ? { active: options.active } : {}),
+    ...(options.isWritable !== undefined
+      ? { isWritable: options.isWritable }
+      : {}),
     maxSessions: options.max ?? MAX_SESSION_ROWS,
     ...(options.preserveOrder !== undefined
       ? { preserveOrder: options.preserveOrder }

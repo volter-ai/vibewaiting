@@ -434,6 +434,8 @@ describe("messenger session state machine", () => {
       mode: "mirror",
       messaging: "live_peer",
     });
+    expect(lastPush().sessions.find((row) => row.key === sessionKey(live.locator))?.writable)
+      .toBe(true);
     expect(client.messages).toEqual([{ locator: live.locator, text: "please wrap up" }]);
     expect(lastPush().transcript.some((entry) => entry.text === "please wrap up")).toBe(false);
 
@@ -483,6 +485,8 @@ describe("messenger session state machine", () => {
     expect(lastPush()).toMatchObject({ canResume: false, continuationModes: [] });
     expect(lastPush().sessions.find((row) => row.key === sessionKey(active.locator))?.runtimeStatus)
       .toBe("busy");
+    expect(lastPush().sessions.find((row) => row.key === sessionKey(active.locator))?.writable)
+      .toBe(false);
 
     await host.fireIntent(INTENT_QUEUE, { action: "resume", mode: "headless" });
     expect(client.resumedWith).toEqual([]);
@@ -700,6 +704,8 @@ describe("messenger session state machine", () => {
       },
     }]);
     expect(daemon.activeController().getSnapshot().connection.mode).toBe("mirror");
+    expect(lastPush().sessions.find((row) => row.key === sessionKey(ATLAS.locator))?.writable)
+      .toBe(true);
     expect((lastPush() as WidgetState & { terminalHost: TerminalServiceSnapshot }).terminalHost.attachment?.id)
       .toBe("opaque-terminal-grant");
   });
