@@ -1,3 +1,9 @@
+import {
+  classifyWebReference,
+  describeWebReferenceTarget,
+  webReferenceLabel,
+} from "./web-reference.js";
+
 export const MAX_BROWSER_CONTEXT_DETAIL = 20_000;
 export const MAX_BROWSER_CONTEXT_ITEMS = 4;
 
@@ -5,7 +11,7 @@ export type BrowserContextAction = "candidates";
 
 export interface BrowserTextAttachment {
   id: string;
-  kind: "browser-selection" | "browser-page";
+  kind: "browser-selection" | "browser-page" | "web-reference";
   label: string;
   detail: string;
 }
@@ -32,17 +38,45 @@ export function sanitizeBrowserUrl(value: string): string {
     if (url.protocol !== "http:" && url.protocol !== "https:") return "";
     url.username = "";
     url.password = "";
-    url.search = "";
-    if (
-      url.hash &&
-      (!url.hash.startsWith("#/") ||
-        /(?:token|secret|password|auth|session|key)=/i.test(url.hash))
-    )
+    for (const key of [...url.searchParams.keys()]) {
+      if (
+        /(?:token|secret|password|passwd|auth|session|api[-_]?key|access[-_]?key|signature|credential)/i.test(key) ||
+        /^(?:utm_.+|fbclid|gclid|mc_.+)$/i.test(key)
+      )
+        url.searchParams.delete(key);
+    }
+    if (url.hash && /(?:token|secret|password|auth|session|key)=/i.test(url.hash))
       url.hash = "";
     return url.toString();
   } catch {
     return "";
   }
+}
+
+export function browserWebReferenceAttachment(
+  source: BrowserCaptureSource,
+  targetUrl: string,
+  evidence: string,
+  linkLabel = "",
+): BrowserTextAttachment {
+  const safeUrl = sanitizeBrowserUrl(targetUrl);
+  const reference = classifyWebReference(safeUrl);
+  const label = reference
+    ? webReferenceLabel(reference, linkLabel || source.title)
+    : linkLabel || source.title || "Web page";
+  const target = reference
+    ? describeWebReferenceTarget(reference.target)
+    : ["Type: Web page"];
+  const body = [
+    "--- BEGIN WEB REFERENCE ---",
+    `Target: ${safeUrl || "URL unavailable"}`,
+    ...target,
+    ...(linkLabel.trim() ? [`Link text: ${compact(linkLabel, 500)}`] : []),
+    "",
+    compact(evidence, 16_000) || "[No visible semantic evidence]",
+    "--- END WEB REFERENCE ---",
+  ].join("\n");
+  return attachment(source, "web-reference", label, body);
 }
 
 function sourceHeader(source: BrowserCaptureSource): string {
@@ -125,7 +159,9 @@ export function parseBrowserContextAttachments(
     if (
       typeof candidate.detail !== "string" ||
       candidate.detail.length > MAX_BROWSER_CONTEXT_DETAIL ||
-      candidate.kind !== "browser-selection" && candidate.kind !== "browser-page"
+      candidate.kind !== "browser-selection" &&
+      candidate.kind !== "browser-page" &&
+      candidate.kind !== "web-reference"
     )
       return null;
     parsed.push({

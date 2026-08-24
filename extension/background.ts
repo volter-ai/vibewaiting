@@ -10,6 +10,7 @@ import {
 import { VIBEWAITING_NEUTRAL } from "../src/theme.js";
 
 const SETTINGS_KEY = "vibewaiting:settings";
+const ATTACH_LINK_MENU = "vibewaiting:attach-link";
 const contentPorts = new Set<ExtensionPort>();
 const contentPortsByTab = new Map<number, ExtensionPort>();
 const guestPorts = new Map<
@@ -29,6 +30,22 @@ let nativeReady = false;
 let nativeConnecting: Promise<void> | null = null;
 let lastPatch: unknown;
 let lastStatus: { phase: string; message?: string } = { phase: "stopped" };
+
+function installContextMenus(): void {
+  const options = {
+    id: ATTACH_LINK_MENU,
+    title: "Attach link to Vibewaiting",
+    contexts: ["link"] as Array<"link">,
+  };
+  chrome.contextMenus.create(options, () => {
+    if (!chrome.runtime.lastError) return;
+    chrome.contextMenus.update(ATTACH_LINK_MENU, options, () => {
+      void chrome.runtime.lastError;
+    });
+  });
+}
+
+installContextMenus();
 
 function record(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -518,6 +535,19 @@ chrome.action.onClicked.addListener(
 );
 chrome.runtime.onInstalled.addListener((details) => {
   if (details.reason === "install") void chrome.runtime.openOptionsPage();
+});
+
+chrome.contextMenus.onClicked.addListener((info, tab) => {
+  if (info.menuItemId !== ATTACH_LINK_MENU || !info.linkUrl) return;
+  if (!Number.isInteger(tab?.id)) return;
+  const content = contentPortsByTab.get(tab!.id!);
+  if (!content) return;
+  post(content, {
+    type: "browser-context-menu",
+    id: `context-menu:${Date.now().toString(36)}:${crypto.randomUUID()}`,
+    action: "link",
+    targetUrl: info.linkUrl,
+  });
 });
 
 chrome.commands.onCommand.addListener((command, tab) => {
