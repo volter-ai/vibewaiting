@@ -31,7 +31,6 @@ import type {
   BrowserTextAttachment,
 } from "../src/browser-context.js";
 import {
-  terminalListPresentationSize,
   VIBEWAITING_PRESENTATION,
   type VibewaitingPresentation,
 } from "../src/presentations.js";
@@ -68,7 +67,6 @@ export interface TerminalPanelProps {
 export interface MessengerOptions {
   TerminalPanel?: ComponentType<TerminalPanelProps>;
   requestPresentation?(name: VibewaitingPresentation): Promise<void>;
-  reportContentSize?(size: { width: number; height: number }): Promise<void>;
 }
 
 function terminalHostState(value: unknown): TerminalHostState | null {
@@ -573,9 +571,7 @@ export function mountMessenger(
         attachmentId !== null &&
         attachmentId !== lastTerminalAttachmentId.current;
       lastTerminalAttachmentId.current = attachmentId;
-      const desired = terminals.attachment
-        ? VIBEWAITING_PRESENTATION.terminal
-        : VIBEWAITING_PRESENTATION.terminalList;
+      const desired = VIBEWAITING_PRESENTATION.terminal;
       if ((!terminalsOpen && attachmentBecameAvailable) ||
           (terminalsOpen && terminalPresentation !== desired)) {
         void requestTerminalPresentation(desired);
@@ -585,37 +581,6 @@ export function mountMessenger(
       terminalsOpen,
       terminalPresentation,
       presentationPending,
-    ]);
-    useEffect(() => {
-      if (
-        !terminalsOpen ||
-        !terminals ||
-        terminals.attachment ||
-        terminalPresentation !== VIBEWAITING_PRESENTATION.terminalList ||
-        !options.reportContentSize
-      ) return;
-      let active = true;
-      void options
-        .reportContentSize(
-          terminalListPresentationSize(terminals.sessions.length),
-        )
-        .catch((error: unknown) => {
-          if (!active) return;
-          setPresentationError(
-            error instanceof Error
-              ? error.message
-              : "The terminal surface could not be resized.",
-          );
-        });
-      return () => {
-        active = false;
-      };
-    }, [
-      terminalsOpen,
-      terminals?.attachment?.id,
-      terminals?.sessions.length,
-      terminalPresentation,
-      options.reportContentSize,
     ]);
     return (
       <div
@@ -675,7 +640,7 @@ export function mountMessenger(
                         disabled={presentationPending}
                         onClick={() => {
                           void requestTerminalPresentation(
-                            VIBEWAITING_PRESENTATION.terminalList,
+                            VIBEWAITING_PRESENTATION.terminal,
                           ).then((opened) => {
                             if (opened)
                               return sendBridgeIntent({

@@ -14,14 +14,14 @@ describe("terminal presentation", () => {
       name: VIBEWAITING_PRESENTATION.terminal,
       physical: { width: 512, height: 320 },
       presentation,
-      requested: { width: 640, height: 400 },
+      requested: { width: 760, height: 430 },
       surface: "floating",
     });
 
     expect(snapshot).toMatchObject({
-      logical: { width: 640, height: 400 },
-      rendered: { width: 512, height: 320 },
-      scale: 0.8,
+      logical: { width: 760, height: 430 },
+      rendered: { width: 512, height: 289.6842105263158 },
+      scale: 0.6736842105263158,
       viewport: "virtual",
     });
   });

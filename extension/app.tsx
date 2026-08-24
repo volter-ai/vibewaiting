@@ -1,5 +1,6 @@
 import { connectOverlayApp } from "@volter-ai-dev/widget-shell/frame";
-import { TerminalPanel } from "@volter-ai-dev/supercode-terminal/ui";
+import { TerminalWorkspace } from "@volter-ai-dev/supercode-terminal/ui";
+import { harnessLogoDataUrl } from "@volter-ai-dev/supercode-ui/preact/logo";
 import type { JSX } from "preact";
 import {
   parseBrowserContextAttachments,
@@ -13,17 +14,31 @@ import type {
   MessengerTransport,
 } from "../widget/transport.js";
 
+function requiredHarnessLogo(harness: "claude-code" | "codex"): string {
+  const logo = harnessLogoDataUrl(harness);
+  if (!logo) throw new Error(`Supercode UI is missing the ${harness} logo.`);
+  return logo;
+}
+
 function LocalTerminalPanel({
   state,
   send,
   onClose,
 }: TerminalPanelProps): JSX.Element {
   return (
-    <TerminalPanel
+    <TerminalWorkspace
       state={state}
       createActions={[
-        { id: "claude-code", label: "New Claude Code" },
-        { id: "codex", label: "New Codex" },
+        {
+          id: "claude-code",
+          label: "New Claude Code",
+          icon: <img alt="" src={requiredHarnessLogo("claude-code")} />,
+        },
+        {
+          id: "codex",
+          label: "New Codex",
+          icon: <img alt="" src={requiredHarnessLogo("codex")} />,
+        },
       ]}
       onClose={onClose}
       onRefresh={() => send({ action: "terminalRefresh" })}
@@ -38,7 +53,6 @@ function LocalTerminalPanel({
       onOpen={(sessionId) =>
         send({ action: "terminalOpenLocal", sessionId })
       }
-      onDismiss={() => send({ action: "terminalDismiss" })}
     />
   );
 }
@@ -168,8 +182,5 @@ mountMessenger(transport, {
   TerminalPanel: LocalTerminalPanel,
   requestPresentation: async (name) => {
     await shell.requestPresentation(name);
-  },
-  reportContentSize: async (size) => {
-    await shell.reportContentSize(size);
   },
 });

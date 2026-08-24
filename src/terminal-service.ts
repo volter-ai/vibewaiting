@@ -13,7 +13,7 @@ export interface TerminalServiceSnapshot {
   available: boolean;
   canOpenLocal: boolean;
   sessions: TerminalSession[];
-  attachment: EmbeddedTerminalAttachmentGrant | null;
+  attachment: (EmbeddedTerminalAttachmentGrant & { sessionId: string }) | null;
   error: string | null;
 }
 
@@ -23,6 +23,13 @@ export class LocalTerminalService {
   private readonly bridge: TerminalWebSocketBridge;
   private attachment: TerminalServiceSnapshot["attachment"] = null;
   private error: string | null = null;
+
+  private attachmentFor(
+    sessionId: string,
+    mode: "observe" | "control",
+  ): NonNullable<TerminalServiceSnapshot["attachment"]> {
+    return { ...this.bridge.issueAttachment(sessionId, { mode }), sessionId };
+  }
 
   constructor(allowedOrigin: string) {
     if (!/^(chrome|moz)-extension:\/\/[^/]+\/?$/.test(allowedOrigin)) {
@@ -76,7 +83,7 @@ export class LocalTerminalService {
       cwd,
       name: `vibewaiting-${label}-${randomUUID().slice(0, 8)}`,
     });
-    this.attachment = this.bridge.issueAttachment(session.id, { mode: "control" });
+    this.attachment = this.attachmentFor(session.id, "control");
     return await this.snapshot();
   }
 
@@ -94,18 +101,18 @@ export class LocalTerminalService {
       env: launch.env,
       name: `vibewaiting-${label}-${randomUUID().slice(0, 8)}`,
     });
-    this.attachment = this.bridge.issueAttachment(session.id, { mode: "control" });
+    this.attachment = this.attachmentFor(session.id, "control");
     return await this.snapshot();
   }
 
   async attach(sessionId: string, mode: "observe" | "control"): Promise<TerminalServiceSnapshot> {
-    this.attachment = this.bridge.issueAttachment(sessionId, { mode });
+    this.attachment = this.attachmentFor(sessionId, mode);
     return await this.snapshot();
   }
 
   async close(sessionId: string): Promise<TerminalServiceSnapshot> {
     this.host.closeSession(sessionId);
-    if (this.attachment) this.attachment = null;
+    if (this.attachment?.sessionId === sessionId) this.attachment = null;
     return await this.snapshot();
   }
 

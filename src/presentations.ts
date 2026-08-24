@@ -1,6 +1,5 @@
 import type {
   OverlayPresentation,
-  PresentationSize,
 } from "@volter-ai-dev/widget-shell";
 
 export const VIBEWAITING_PRESENTATION = Object.freeze({
@@ -12,31 +11,7 @@ export const VIBEWAITING_PRESENTATION = Object.freeze({
 export type VibewaitingPresentation =
   (typeof VIBEWAITING_PRESENTATION)[keyof typeof VIBEWAITING_PRESENTATION];
 
-const TERMINAL_LIST_CHROME_HEIGHT = 92;
-const TERMINAL_ROW_HEIGHT = 46;
-const TERMINAL_LIST_MIN_HEIGHT = 220;
-const TERMINAL_LIST_MAX_HEIGHT = 400;
-const TERMINAL_LOGICAL_SIZE = Object.freeze({ width: 640, height: 400 });
-
-/**
- * Terminal inventory is content-sized. Its live PTY uses the separate stable virtual viewport
- * below, so adding a session never changes the scale of an attached terminal.
- */
-export function terminalListPresentationSize(
-  sessionCount: number,
-): PresentationSize {
-  const visibleRows = Math.max(0, Math.min(8, Math.floor(sessionCount)));
-  return {
-    width: 600,
-    height: Math.max(
-      TERMINAL_LIST_MIN_HEIGHT,
-      Math.min(
-        TERMINAL_LIST_MAX_HEIGHT,
-        TERMINAL_LIST_CHROME_HEIGHT + visibleRows * TERMINAL_ROW_HEIGHT,
-      ),
-    ),
-  };
-}
+const TERMINAL_LOGICAL_SIZE = Object.freeze({ width: 760, height: 430 });
 
 /**
  * The messenger is deliberately phone-sized. A terminal needs enough physical columns and rows to
@@ -53,13 +28,14 @@ export const VIBEWAITING_PRESENTATIONS = Object.freeze({
     surface: "auto",
   },
   [VIBEWAITING_PRESENTATION.terminalList]: {
-    footprint: {
-      mode: "content-fit",
-      preferred: { width: 600, height: 320 },
-      min: { width: 480, height: TERMINAL_LIST_MIN_HEIGHT },
-      max: { width: 680, height: TERMINAL_LIST_MAX_HEIGHT },
+    // Compatibility alias for persisted Widget Shell presentation memory from the former picker.
+    footprint: { mode: "resizable", preferred: TERMINAL_LOGICAL_SIZE },
+    viewport: {
+      mode: "virtual",
+      ...TERMINAL_LOGICAL_SIZE,
+      allowUpscale: true,
+      minimumScale: 0.65,
     },
-    viewport: { mode: "responsive" },
     surface: "auto",
   },
   [VIBEWAITING_PRESENTATION.terminal]: {
@@ -74,7 +50,7 @@ export const VIBEWAITING_PRESENTATIONS = Object.freeze({
       mode: "virtual",
       ...TERMINAL_LOGICAL_SIZE,
       allowUpscale: true,
-      minimumScale: 0.75,
+      minimumScale: 0.65,
     },
     surface: "auto",
   },

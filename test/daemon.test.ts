@@ -120,6 +120,7 @@ class RecordingTerminalService implements TerminalService {
         mode: "control",
         expiresAt: Date.now() + 30_000,
         baseUrl: "http://127.0.0.1:49999",
+        sessionId: "opaque-session-id",
       },
     };
     return this.state;
