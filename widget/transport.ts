@@ -2,6 +2,7 @@ import type {
   BrowserContextAction,
   BrowserContextAttachment,
 } from "../src/browser-context.js";
+import type { LauncherBadgeTone } from "../src/launcher.js";
 
 export type MessengerHostEvent =
   | {
@@ -28,6 +29,7 @@ export interface MessengerTransport {
     readonly icon?: string | null;
     readonly hidden?: boolean;
     readonly badge?: string | number | null;
+    readonly badgeTone?: LauncherBadgeTone;
   }): void;
   closeShell(): void;
   destroy(): void;

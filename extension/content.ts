@@ -44,7 +44,10 @@ port.onMessage.addListener((raw) => {
       icon,
       hidden: message.hidden === true || icon === null,
     });
-    overlay.setBadge(typeof message.badge === "number" ? message.badge : null);
+    overlay.setBadge(
+      typeof message.badge === "number" ? message.badge : null,
+      message.badgeTone === "neutral" ? "neutral" : "attention",
+    );
     return;
   }
   if (

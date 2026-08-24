@@ -31,6 +31,7 @@ import {
   type VibewaitingPresentation,
 } from "../src/presentations.js";
 import { browserShortcutLabel } from "../src/browser-shortcuts.js";
+import { launcherBadgeFromState } from "../src/launcher.js";
 
 export type TerminalIntent =
   | { action: "terminalRefresh" }
@@ -856,13 +857,7 @@ export function mountMessenger(
       state.harness ||
       state.sessions.find((session) => session.active)?.harness ||
       "";
-    const unreadKeys = new Set(state.attention.map((item) => item.key));
-    let unreadCount = state.attention.reduce((total, item) => total + (item.unreadCount ?? 1), 0);
-    if (state.needsInput) {
-      const key = state.attached?.key || state.owned?.key || "@needs-input";
-      if (!unreadKeys.has(key)) unreadCount += 1;
-      unreadKeys.add(key);
-    }
+    const badge = launcherBadgeFromState(state);
     const label = state.pill.label
       ? `Open agent chats · ${state.pill.label}`
       : "Open agent chats";
@@ -871,7 +866,8 @@ export function mountMessenger(
         hidden: true,
         icon: null,
         label,
-        badge: unreadCount,
+        badge: badge.count,
+        badgeTone: badge.tone,
       });
       return;
     }
@@ -881,7 +877,8 @@ export function mountMessenger(
     widget.setLauncher({
       hidden: false,
       label,
-      badge: unreadCount,
+      badge: badge.count,
+      badgeTone: badge.tone,
       ...(icon ? { icon } : {}),
     });
   }
