@@ -682,11 +682,15 @@ export function mountMessenger(
         <nav class="vw-mode-toggle" aria-label="Conversation view">
           <button
             type="button"
+            aria-label="Show chat"
             aria-pressed={!terminalsOpen}
             disabled={presentationPending}
+            title="Chat"
             onClick={() => void showChat()}
           >
-            Chat
+            <svg aria-hidden="true" viewBox="0 0 24 24">
+              <path d="M5 5.75h14a1.75 1.75 0 0 1 1.75 1.75v8A1.75 1.75 0 0 1 19 17.25h-7.1L7.25 20v-2.75H5a1.75 1.75 0 0 1-1.75-1.75v-8A1.75 1.75 0 0 1 5 5.75Z" />
+            </svg>
           </button>
           <button
             type="button"
@@ -700,6 +704,7 @@ export function mountMessenger(
                     : "Open in tmux"
             }
             aria-pressed={terminalsOpen}
+            aria-busy={terminalMoveStatus === "moving"}
             disabled={presentationPending || terminalMoveStatus === "moving" || (!terminalsOpen && !canEnterTerminal)}
             title={
               terminalMoveStatus === "waiting"
@@ -712,7 +717,9 @@ export function mountMessenger(
             }
             onClick={() => void showTerminal()}
           >
-            {terminalMoveStatus === "waiting" ? "Waiting…" : terminalMoveStatus === "moving" ? "Moving…" : "Terminal"}
+            <svg aria-hidden="true" viewBox="0 0 24 24">
+              <path d="m5.5 7.5 4 4-4 4M11.75 16h6.75" />
+            </svg>
           </button>
         </nav>
       );
