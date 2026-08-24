@@ -503,7 +503,21 @@ describe("messenger session state machine", () => {
         harness_version: null,
       },
     };
-    const client = new FakeHarnessClient({ sessions: [{ ...ATLAS, activity: working }] });
+    // More than one visible page reproduces the real machine: each harness contributes a bounded
+    // slice, but only 30 merged rows fit. A refresh must neither reinterpret the older 32 rows as
+    // new conversations nor evict the attached migration while its ownership proof is refreshed.
+    const archive = [
+      ...Array.from({ length: 30 }, (_, index) => descriptor({
+        sessionId: `claude-archive-${index}`,
+        updatedAtMs: 1_900_000 - index,
+      })),
+      ...Array.from({ length: 31 }, (_, index) => descriptor({
+        harness: "codex",
+        sessionId: `codex-archive-${index}`,
+        updatedAtMs: 1_800_000 - index,
+      })),
+    ];
+    const client = new FakeHarnessClient({ sessions: [{ ...ATLAS, activity: working }, ...archive] });
     const terminalService = new RecordingTerminalService();
     terminalService.nativeVisible = true;
     const { daemon, host, lastPush } = await sessionRig(

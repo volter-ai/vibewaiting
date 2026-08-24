@@ -1050,6 +1050,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   let refreshInFlight: Promise<void> | null = null;
   let initialInventorySettled = false;
   const sessionsByHarness = new Map<HarnessId, SessionDescriptor[]>();
+  // Polling returns a bounded slice per harness. Remember every key that has crossed that boundary
+  // so an older off-screen row is not mistaken for a newly-created conversation on every refresh.
+  const knownDescriptorKeys = new Set<string>();
   const topicCandidatesBySession = new Map<string, SessionDescriptor["preview_candidates"]>();
   const topicAttemptedAtBySession = new Map<string, number>();
   const retainTopic = (descriptor: SessionDescriptor): SessionDescriptor => {
@@ -1076,26 +1079,39 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       || left.locator.session_id.localeCompare(right.locator.session_id));
     hasMoreSessions = all.length > sessionLimit
       || [...sessionsByHarness.values()].some((sessions) => sessions.length > sessionLimit);
+    const unseen = all.filter((descriptor) => !knownDescriptorKeys.has(sessionKey(descriptor.locator)));
+    for (const descriptor of all) knownDescriptorKeys.add(sessionKey(descriptor.locator));
     if (!preserveVisibleOrder || descriptors.length === 0) {
       descriptors = all.slice(0, sessionLimit);
       return;
     }
     const updatedByKey = new Map(all.map((descriptor) => [sessionKey(descriptor.locator), descriptor]));
+    const pinnedKeys = new Set([
+      ...(activeForeignKey ? [activeForeignKey] : []),
+      ...terminalMoves.keys(),
+    ]);
     const stable = descriptors.flatMap((descriptor) => {
       const key = sessionKey(descriptor.locator);
       const updated = updatedByKey.get(key);
-      if (!updated) return [];
+      if (!updated) return pinnedKeys.has(key) ? [descriptor] : [];
       updatedByKey.delete(key);
       return [updated];
     });
     // New conversations append while the panel is open instead of reordering the row under the
     // pointer. At a full page they replace only the oldest visible rows; appending after all 30 and
     // then truncating used to make every newly-created conversation invisible until panel close.
-    const additions = [...updatedByKey.values()];
-    descriptors = [
-      ...stable.slice(0, Math.max(0, sessionLimit - additions.length)),
-      ...additions,
-    ].slice(0, sessionLimit);
+    const additions = unseen.filter((descriptor) => updatedByKey.has(sessionKey(descriptor.locator)));
+    const pinnedCount = stable.filter((descriptor) => pinnedKeys.has(sessionKey(descriptor.locator))).length;
+    const selectedAdditions = additions.slice(0, Math.max(0, sessionLimit - pinnedCount));
+    const stableBudget = sessionLimit - selectedAdditions.length;
+    let unpinnedSlots = Math.max(0, stableBudget - pinnedCount);
+    const selectedStable = stable.filter((descriptor) => {
+      if (pinnedKeys.has(sessionKey(descriptor.locator))) return true;
+      if (unpinnedSlots === 0) return false;
+      unpinnedSlots -= 1;
+      return true;
+    });
+    descriptors = [...selectedStable, ...selectedAdditions].slice(0, sessionLimit);
   };
   const activityCandidate = discovery as (SessionDiscoveryClient & Partial<SessionActivityEventSource>) | undefined;
   const activityTransport = activityCandidate?.subscribeSessionActivity
