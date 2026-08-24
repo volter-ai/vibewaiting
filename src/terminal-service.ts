@@ -157,6 +157,7 @@ export class LocalTerminalService {
       throw new Error("this conversation is not running in a native terminal visible to Termfleet");
     }
     await this.nativeHost.relinquishSession(agentSessionId, proof);
+    this.nativeSessionIds.delete(agentSessionId);
     return await this.launchSession(harness, launch, conversationKey);
   }
 

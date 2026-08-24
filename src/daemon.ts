@@ -310,6 +310,12 @@ function isMoveToTerminalIntent(payload: unknown): boolean {
   return value.action === "moveToTerminal" && Object.keys(value).length === 1;
 }
 
+function isMoveAllToTerminalIntent(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+  const value = payload as Record<string, unknown>;
+  return value.action === "moveAllToTerminal" && Object.keys(value).length === 1;
+}
+
 function parseTerminalHostIntent(payload: unknown): TerminalIntent | null {
   if (!payload || typeof payload !== "object" || Array.isArray(payload))
     return null;
@@ -579,8 +585,18 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   let actionError: string | null = null;
   let exportReceipt: ExportReceipt | null = null;
   let terminalHost = options.terminalService ? await options.terminalService.snapshot() : null;
-  let terminalMove: { key: string; status: "waiting" | "moving" } | null = null;
+  const terminalMoves = new Map<string, "waiting" | "moving">();
   let terminalMoveInFlight: Promise<void> | null = null;
+  const movableNativeDescriptors = (): SessionDescriptor[] => options.terminalService
+    ? descriptors.filter((descriptor) =>
+        descriptor.activity?.presence === "running" &&
+        (descriptor.locator.harness === "claude-code" || descriptor.locator.harness === "codex") &&
+        options.terminalService!.canMoveSession(
+          descriptor.locator.harness,
+          descriptor.locator.session_id,
+        )
+      )
+    : [];
   const materializeArtifact = options.materializeArtifact
     ?? ((artifact: SessionArtifact): Promise<ExportReceipt> => writeSessionArtifact(artifact, join(options.workspace, ".supercode", "exports")));
 
@@ -839,10 +855,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           sessions: [],
         }
       : null;
-    const activeMoveStatus = terminalMove?.key === draftKey ? terminalMove.status : null;
+    const activeMoveStatus = draftKey ? terminalMoves.get(draftKey) ?? null : null;
+    const movableNativeSessionCount = movableNativeDescriptors().length;
     const state: WidgetState & {
       canMoveToTerminal?: boolean;
+      movableNativeSessionCount?: number;
       terminalHost?: TerminalServiceSnapshot;
+      terminalMoveQueuedCount?: number;
+      terminalMoveWaitingCount?: number;
       terminalMoveStatus?: "waiting" | "moving" | null;
     } = {
       ...projected,
@@ -862,6 +882,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       recoverable: actionError === null && projected.recoverable,
       canResume,
       canMoveToTerminal,
+      movableNativeSessionCount,
+      terminalMoveQueuedCount: terminalMoves.size,
+      terminalMoveWaitingCount: [...terminalMoves.values()].filter((status) => status === "waiting").length,
       terminalMoveStatus: activeMoveStatus,
       canExport: typeof activeController().exportSession === "function" && snapshot.operation === null && Boolean(snapshot.activeSessionKey || snapshot.activeSessionId),
       // Vibewaiting's first complete product lane is intentionally Claude Code + Codex. Supercode
@@ -912,6 +935,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     lastPushed = state;
     const inventoryPatch: Partial<WidgetState> & {
       canMoveToTerminal?: boolean;
+      movableNativeSessionCount?: number;
+      terminalMoveQueuedCount?: number;
+      terminalMoveWaitingCount?: number;
       terminalMoveStatus?: "waiting" | "moving" | null;
     } = {
       pill: state.pill,
@@ -926,6 +952,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       recoverable: state.recoverable,
       canResume: state.canResume,
       canMoveToTerminal: state.canMoveToTerminal === true,
+      movableNativeSessionCount: state.movableNativeSessionCount ?? 0,
+      terminalMoveQueuedCount: state.terminalMoveQueuedCount ?? 0,
+      terminalMoveWaitingCount: state.terminalMoveWaitingCount ?? 0,
       terminalMoveStatus: state.terminalMoveStatus ?? null,
       canExport: state.canExport,
       canReduce: state.canReduce,
@@ -1217,18 +1246,28 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   };
 
   async function processTerminalMove(): Promise<void> {
-    if (!terminalMove || terminalMoveInFlight || !options.terminalService) return;
-    const queuedKey = terminalMove.key;
-    const descriptor = descriptors.find((candidate) => sessionKey(candidate.locator) === queuedKey);
-    if (!descriptor || descriptor.activity?.presence !== "running") {
-      terminalMove = null;
-      actionError = "the native session ended before it could be moved; its persisted conversation is still safe to resume";
-      await pushNow(true);
+    if (terminalMoves.size === 0 || terminalMoveInFlight || !options.terminalService) return;
+    let queueChanged = false;
+    let queuedKey: string | null = null;
+    for (const [key, status] of terminalMoves) {
+      if (status !== "waiting") continue;
+      const descriptor = descriptors.find((candidate) => sessionKey(candidate.locator) === key);
+      if (!descriptor || descriptor.activity?.presence !== "running") {
+        terminalMoves.delete(key);
+        queueChanged = true;
+        continue;
+      }
+      if (descriptor.activity.turn === "idle") {
+        queuedKey = key;
+        break;
+      }
+    }
+    if (!queuedKey) {
+      if (queueChanged) await pushNow(true);
       return;
     }
-    if (descriptor.activity.turn !== "idle") return;
     terminalMoveInFlight = (async () => {
-      terminalMove = { key: queuedKey, status: "moving" };
+      terminalMoves.set(queuedKey, "moving");
       await pushNow(true);
       try {
         // Native terminal discovery can take a few seconds. Finish it before taking the
@@ -1238,7 +1277,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         const current = descriptors.find((candidate) => sessionKey(candidate.locator) === queuedKey);
         const activity = current?.activity;
         if (!current || activity?.presence !== "running" || activity.turn !== "idle") {
-          terminalMove = { key: queuedKey, status: "waiting" };
+          terminalMoves.set(queuedKey, "waiting");
           await pushNow(false, "inventory");
           return;
         }
@@ -1264,18 +1303,19 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
             turn: "idle",
           },
         );
-        terminalMove = null;
+        terminalMoves.delete(queuedKey);
         actionError = null;
         log(`moved ${current.locator.harness} session from its native terminal into owned tmux`);
         await pushNow(true);
       } catch (error) {
-        terminalMove = null;
+        terminalMoves.delete(queuedKey);
         actionError = message(error);
         log(`native terminal move failed: ${actionError}`);
         await pushNow(true);
       }
     })().finally(() => {
       terminalMoveInFlight = null;
+      void processTerminalMove();
     });
     await terminalMoveInFlight;
   }
@@ -1811,10 +1851,29 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       actionError = null;
       if (!options.terminalService || !activeForeignKey) {
         actionError = "open a live native-terminal conversation before moving it";
-      } else if (terminalMove?.key === activeForeignKey && terminalMove.status === "waiting") {
-        terminalMove = null;
-      } else {
-        terminalMove = { key: activeForeignKey, status: "waiting" };
+      } else if (terminalMoves.get(activeForeignKey) === "waiting") {
+        terminalMoves.delete(activeForeignKey);
+      } else if (terminalMoves.get(activeForeignKey) !== "moving") {
+        terminalMoves.set(activeForeignKey, "waiting");
+      }
+      await pushNow(true);
+      void processTerminalMove();
+      return;
+    }
+    if (isMoveAllToTerminalIntent(intent.payload)) {
+      actionError = null;
+      const waiting = [...terminalMoves].filter(([, status]) => status === "waiting");
+      if (waiting.length > 0) {
+        for (const [key] of waiting) terminalMoves.delete(key);
+      } else if (![...terminalMoves.values()].includes("moving")) {
+        const candidates = movableNativeDescriptors();
+        if (candidates.length === 0) {
+          actionError = "no live Claude Code or Codex terminal sessions are available to move";
+        } else {
+          for (const descriptor of candidates) {
+            terminalMoves.set(sessionKey(descriptor.locator), "waiting");
+          }
+        }
       }
       await pushNow(true);
       void processTerminalMove();

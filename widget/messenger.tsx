@@ -49,6 +49,7 @@ type WidgetIntent =
   | { action: "mounted" }
   | { action: "panelVisible" }
   | { action: "panelHidden" }
+  | { action: "moveAllToTerminal" }
   | { action: "moveToTerminal" }
   | TerminalIntent
   | { action: "resolveImage"; requestId: string; reference: string };
@@ -503,6 +504,18 @@ export function mountMessenger(
       (state.terminalMoveStatus === "waiting" || state.terminalMoveStatus === "moving")
       ? state.terminalMoveStatus
       : null;
+    const movableNativeSessionCount = isRecord(state) &&
+      typeof state.movableNativeSessionCount === "number"
+      ? Math.max(0, Math.floor(state.movableNativeSessionCount))
+      : 0;
+    const terminalMoveQueuedCount = isRecord(state) &&
+      typeof state.terminalMoveQueuedCount === "number"
+      ? Math.max(0, Math.floor(state.terminalMoveQueuedCount))
+      : 0;
+    const terminalMoveWaitingCount = isRecord(state) &&
+      typeof state.terminalMoveWaitingCount === "number"
+      ? Math.max(0, Math.floor(state.terminalMoveWaitingCount))
+      : 0;
     const terminals = options.TerminalPanel ? terminalHostState(state) : null;
     const TerminalPanel = options.TerminalPanel;
     const message =
@@ -699,6 +712,34 @@ export function mountMessenger(
         </nav>
       );
     }
+
+    function NativeTerminalMoveBanner({ value }: { value: unknown }): JSX.Element | null {
+      const query = isRecord(value) && typeof value.query === "string" ? value.query : "";
+      if (query || (movableNativeSessionCount < 2 && terminalMoveQueuedCount === 0)) return null;
+      const moving = terminalMoveQueuedCount - terminalMoveWaitingCount;
+      const headline = terminalMoveQueuedCount > 0
+        ? moving > 0
+          ? terminalMoveWaitingCount > 0
+            ? `Moving one · ${terminalMoveWaitingCount} waiting`
+            : "Moving terminal session…"
+          : `${terminalMoveWaitingCount} waiting for idle`
+        : `${movableNativeSessionCount} live terminal sessions`;
+      return (
+        <aside class="vw-native-move" aria-live="polite">
+          <span>
+            <strong>{headline}</strong>
+            <small>Each moves here after its current turn.</small>
+          </span>
+          <button
+            type="button"
+            disabled={terminalMoveQueuedCount > 0 && terminalMoveWaitingCount === 0}
+            onClick={() => void sendBridgeIntent({ action: "moveAllToTerminal" })}
+          >
+            {terminalMoveWaitingCount > 0 ? "Cancel" : "Bring all here"}
+          </button>
+        </aside>
+      );
+    }
     return (
       <div
         class="vw-dialog"
@@ -720,6 +761,7 @@ export function mountMessenger(
             labels={{ attachContext: "Attach from this page" }}
             components={{ TaskPlan: () => null }}
             slots={{
+              beforeSessions: NativeTerminalMoveBanner,
               headerActions: (header) => (
                 <>
                   <HeaderModeToggle value={header.value} />
