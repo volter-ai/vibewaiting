@@ -4,6 +4,12 @@ import {
   browserShortcutLabel,
   type BrowserShortcut,
 } from "../src/browser-shortcuts.js";
+import qrcode from "qrcode-generator";
+import {
+  parseRemoteAccessConfiguration,
+  type RemoteAccessConfiguration,
+  type RemoteAccessProvider,
+} from "../src/extension-protocol.js";
 
 const SETTINGS_KEY = "vibewaiting:settings";
 const form = document.querySelector<HTMLFormElement>("form");
@@ -12,6 +18,29 @@ const harness = document.querySelector<HTMLSelectElement>("#harness");
 const policy = document.querySelector<HTMLSelectElement>("#policy");
 const statusOutput = document.querySelector<HTMLOutputElement>("output");
 const extensionId = document.querySelector<HTMLElement>("#extension-id");
+const remoteEnabled = document.querySelector<HTMLInputElement>("#remote-enabled");
+const remoteProvider = document.querySelector<HTMLSelectElement>("#remote-provider");
+const remoteDetail = document.querySelector<HTMLElement>("#remote-detail");
+const remoteHandoff = document.querySelector<HTMLElement>("#remote-handoff");
+const remoteQr = document.querySelector<HTMLImageElement>("#remote-qr");
+const remoteCode = document.querySelector<HTMLElement>("#remote-code");
+const remoteLink = document.querySelector<HTMLAnchorElement>("#remote-link");
+const remoteCopy = document.querySelector<HTMLButtonElement>("#remote-copy");
+const remoteStability = document.querySelector<HTMLElement>("#remote-stability");
+const remoteError = document.querySelector<HTMLElement>("#remote-error");
+let activeRemoteConfiguration: RemoteAccessConfiguration = { enabled: false, provider: "auto" };
+
+type Capability = { detail: string; provider: Exclude<RemoteAccessProvider, "auto">; status: "needs-setup" | "ready" | "unavailable" };
+type RemoteSnapshot = {
+  activeProvider?: Exclude<RemoteAccessProvider, "auto">;
+  capabilities: Capability[];
+  enabled: boolean;
+  error?: string;
+  provider: RemoteAccessProvider;
+  publicUrl?: string;
+  stability?: "stable" | "temporary";
+  status: "connected" | "error" | "off" | "reconnecting" | "starting";
+};
 for (const node of document.querySelectorAll<HTMLElement>("[data-shortcut]")) {
   const shortcut = node.dataset.shortcut as BrowserShortcut | undefined;
   if (shortcut) node.textContent = browserShortcutLabel(shortcut);
@@ -37,6 +66,10 @@ port.onMessage.addListener((raw) => {
   )
     return;
   const message = raw as Record<string, unknown>;
+  if (message.type === "remote-access") {
+    renderRemoteAccess(message.snapshot, message.passcode);
+    return;
+  }
   if (message.type !== "status" || typeof message.phase !== "string") return;
   statusOutput.dataset.phase = message.phase;
   statusOutput.value =
@@ -60,6 +93,107 @@ if (typeof stored === "object" && stored !== null && !Array.isArray(stored)) {
     harness.value = settings.harness;
   if (policy && typeof settings.policy === "string")
     policy.value = settings.policy;
+  const configuration = parseRemoteAccessConfiguration(settings.remoteAccess);
+  if (configuration) {
+    activeRemoteConfiguration = configuration;
+    if (remoteEnabled) remoteEnabled.checked = configuration.enabled;
+    if (remoteProvider) remoteProvider.value = configuration.provider;
+  }
+}
+
+async function configureRemoteAccess(configuration: RemoteAccessConfiguration): Promise<void> {
+  activeRemoteConfiguration = configuration;
+  if (remoteEnabled) remoteEnabled.checked = configuration.enabled;
+  if (remoteProvider) remoteProvider.value = configuration.provider;
+  const current = (await chrome.storage.local.get(SETTINGS_KEY))[SETTINGS_KEY];
+  const settings = typeof current === "object" && current !== null && !Array.isArray(current)
+    ? current as Record<string, unknown>
+    : {};
+  await chrome.storage.local.set({ [SETTINGS_KEY]: { ...settings, remoteAccess: configuration } });
+  port.postMessage({ type: "remote-access-configure", configuration });
+}
+
+remoteEnabled?.addEventListener("change", () => {
+  void configureRemoteAccess({ enabled: remoteEnabled.checked, provider: activeRemoteConfiguration.provider });
+});
+remoteProvider?.addEventListener("change", () => {
+  const provider = remoteProvider.value as RemoteAccessProvider;
+  void configureRemoteAccess({ enabled: activeRemoteConfiguration.enabled, provider });
+});
+
+function renderRemoteAccess(rawSnapshot: unknown, rawPasscode: unknown): void {
+  if (!isRemoteSnapshot(rawSnapshot)) return;
+  activeRemoteConfiguration = { enabled: rawSnapshot.enabled, provider: rawSnapshot.provider };
+  if (remoteEnabled) {
+    remoteEnabled.checked = rawSnapshot.enabled;
+    remoteEnabled.disabled = rawSnapshot.status === "starting" || rawSnapshot.status === "reconnecting";
+  }
+  if (remoteProvider) {
+    remoteProvider.value = rawSnapshot.provider;
+    remoteProvider.disabled = rawSnapshot.status === "starting" || rawSnapshot.status === "reconnecting";
+    for (const option of remoteProvider.options) {
+      if (option.value === "auto") continue;
+      const capability = rawSnapshot.capabilities.find((entry) => entry.provider === option.value);
+      option.disabled = capability?.status !== "ready";
+      option.textContent = `${providerLabel(option.value as RemoteAccessProvider)}${capability?.status === "ready" ? "" : " · setup needed"}`;
+    }
+  }
+  if (remoteDetail) remoteDetail.textContent = remoteDescription(rawSnapshot);
+  if (remoteError) remoteError.textContent = rawSnapshot.error ?? "";
+  const connected = rawSnapshot.status === "connected" && typeof rawSnapshot.publicUrl === "string";
+  if (remoteHandoff) remoteHandoff.hidden = !connected;
+  if (!connected || !rawSnapshot.publicUrl) return;
+  const passcode = typeof rawPasscode === "string" ? rawPasscode : "";
+  if (remoteCode) remoteCode.textContent = /^\d{6}$/.test(passcode) ? `${passcode.slice(0, 3)} ${passcode.slice(3)}` : passcode;
+  if (remoteLink) {
+    remoteLink.href = rawSnapshot.publicUrl;
+    remoteLink.textContent = rawSnapshot.publicUrl;
+  }
+  if (remoteQr) {
+    const qr = qrcode(0, "M");
+    qr.addData(rawSnapshot.publicUrl);
+    qr.make();
+    remoteQr.src = qr.createDataURL(6, 2);
+  }
+  if (remoteStability) remoteStability.textContent = rawSnapshot.stability === "temporary"
+    ? "This link changes when the tunnel reconnects."
+    : "This link remains stable across restarts.";
+}
+
+remoteCopy?.addEventListener("click", () => {
+  const value = remoteLink?.href;
+  if (!value) return;
+  void navigator.clipboard.writeText(value).then(() => {
+    if (!remoteCopy) return;
+    remoteCopy.textContent = "Copied";
+    window.setTimeout(() => { if (remoteCopy) remoteCopy.textContent = "Copy link"; }, 1_500);
+  });
+});
+
+function isRemoteSnapshot(value: unknown): value is RemoteSnapshot {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  return typeof candidate.enabled === "boolean" &&
+    (candidate.provider === "auto" || candidate.provider === "cloudflare" || candidate.provider === "ngrok" || candidate.provider === "stable") &&
+    typeof candidate.status === "string" && Array.isArray(candidate.capabilities);
+}
+
+function providerLabel(provider: RemoteAccessProvider): string {
+  if (provider === "cloudflare") return "Cloudflare";
+  if (provider === "ngrok") return "ngrok";
+  if (provider === "stable") return "Stable relay";
+  return "Automatic";
+}
+
+function remoteDescription(snapshot: RemoteSnapshot): string {
+  if (snapshot.status === "connected" && snapshot.activeProvider) return `Connected with ${providerLabel(snapshot.activeProvider)}.`;
+  if (snapshot.status === "starting") return "Opening a secure phone link…";
+  if (snapshot.status === "reconnecting") return "Reconnecting the phone link…";
+  if (snapshot.status === "error") return "Phone access could not connect.";
+  const capability = snapshot.capabilities.find((entry) => entry.provider === snapshot.provider);
+  return snapshot.provider === "auto"
+    ? "Automatic prefers your stable relay, then Cloudflare, then configured ngrok."
+    : capability?.detail ?? "Only this computer can access Vibewaiting.";
 }
 
 form?.addEventListener("submit", async (event) => {
@@ -70,6 +204,7 @@ form?.addEventListener("submit", async (event) => {
       workspace: workspace.value.trim(),
       ...(harness?.value ? { harness: harness.value } : {}),
       ...(policy?.value ? { policy: policy.value } : {}),
+      remoteAccess: activeRemoteConfiguration,
     },
   });
   await chrome.runtime.sendMessage({ type: "settings-changed" });

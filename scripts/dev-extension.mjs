@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from "node:child_process";
-import { access, readFileSync, watch } from "node:fs";
+import { access, readFileSync, readdirSync, statSync, watch } from "node:fs";
 import { homedir, platform } from "node:os";
 import { basename, delimiter, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -216,10 +216,10 @@ async function browserChoice() {
   );
 }
 
-async function launchBrowser(choice) {
+async function launchBrowser(choice, urls = [startUrl]) {
   if (await cdpReady()) {
     process.stdout.write(`development browser: reusing ${cdpBase}\n`);
-    return;
+    return false;
   }
   const args = [
     `--remote-debugging-port=${cdpPort}`,
@@ -228,7 +228,7 @@ async function launchBrowser(choice) {
     "--disable-default-apps",
     `--disable-extensions-except=${extensionDirectory}`,
     `--load-extension=${extensionDirectory}`,
-    startUrl,
+    ...urls,
   ];
   if (platform() === "darwin") {
     const child = spawn("open", ["-na", choice.app, "--args", ...args], {
@@ -247,6 +247,7 @@ async function launchBrowser(choice) {
   process.stdout.write(
     `development browser: ${choice.id} · ${profileDirectory}\n`,
   );
+  return true;
 }
 
 function cdpCommand(webSocketUrl, method, params = {}, closeIsSuccess = false) {
@@ -295,20 +296,35 @@ function cdpCommand(webSocketUrl, method, params = {}, closeIsSuccess = false) {
 
 function extensionTarget(targets) {
   const origin = `chrome-extension://${extensionId}/`;
-  return (
-    targets.find((target) => target.url === `${origin}background.js`) ||
-    targets.find((target) => target.url.startsWith(origin))
-  );
+  return targets.find((target) => target.url === `${origin}background.js`);
+}
+
+function extensionPageTarget(targets) {
+  const origin = `chrome-extension://${extensionId}/`;
+  return targets.find((target) => target.type === "page" && target.url.startsWith(origin));
 }
 
 async function waitForExtensionTarget() {
-  let wakeRequested = false;
+  let extensionWakeRequested = false;
+  let pageWakeRequested = false;
   for (let attempt = 0; attempt < 30; attempt += 1) {
     const targets = await json("/json/list");
     const target = extensionTarget(targets);
     if (target?.webSocketDebuggerUrl) return target;
-    if (!wakeRequested) {
-      wakeRequested = true;
+    const extensionPage = extensionPageTarget(targets);
+    if (!extensionWakeRequested && extensionPage?.webSocketDebuggerUrl) {
+      extensionWakeRequested = true;
+      await cdpCommand(
+        extensionPage.webSocketDebuggerUrl,
+        "Runtime.evaluate",
+        {
+          expression: 'chrome.runtime.sendMessage({type:"development-wake"}).catch(()=>undefined)',
+          awaitPromise: true,
+          returnByValue: true,
+        },
+      ).catch(() => undefined);
+    } else if (!pageWakeRequested) {
+      pageWakeRequested = true;
       const page = targets.find(
         (candidate) =>
           candidate.type === "page" &&
@@ -376,45 +392,21 @@ async function disconnectNativeHost({ required = true } = {}) {
 }
 
 async function reloadExtensionAndTabs() {
-  let extension = await waitForExtensionTarget();
-  const supportsCleanDisconnect = await disconnectNativeHost({ required: false });
-  await cdpCommand(
-    extension.webSocketDebuggerUrl,
-    "Runtime.evaluate",
-    { expression: "chrome.runtime.reload()", returnByValue: true },
-    true,
-  );
-  await waitForExpectedBuild();
-  // The first run after upgrading an older development bundle cannot ask that old background to
-  // disconnect. Load the new bundle once, use its handshake, then reload a second time so the very
-  // first resulting connection also starts the freshly-built native daemon.
-  if (!supportsCleanDisconnect) {
-    await disconnectNativeHost();
-    extension = await waitForExtensionTarget();
-    await cdpCommand(
-      extension.webSocketDebuggerUrl,
-      "Runtime.evaluate",
-      { expression: "chrome.runtime.reload()", returnByValue: true },
-      true,
-    );
-    await waitForExpectedBuild();
-  }
   const current = await json("/json/list");
-  const pages = current.filter(
-    (target) => target.type === "page" && /^https?:\/\//.test(target.url),
-  );
-  const results = await Promise.allSettled(
-    pages.map((target) =>
-      cdpCommand(target.webSocketDebuggerUrl, "Page.reload", {
-        ignoreCache: true,
-      }),
-    ),
-  );
-  const refreshed = results.filter(
-    (result) => result.status === "fulfilled",
-  ).length;
+  const urls = [...new Set(current
+    .filter((target) => target.type === "page" && /^https?:\/\//.test(target.url))
+    .map((target) => target.url))];
+  await disconnectNativeHost({ required: false });
+  const version = await json("/json/version");
+  if (!version.webSocketDebuggerUrl) throw new Error("Development browser has no browser CDP target");
+  await cdpCommand(version.webSocketDebuggerUrl, "Browser.close", {}, true);
+  for (let attempt = 0; attempt < 30 && await cdpReady(); attempt += 1) await delay(100);
+  if (await cdpReady()) throw new Error(`Development browser on ${cdpBase} did not stop for extension update`);
+  await launchBrowser(choice, urls.length ? urls : [startUrl]);
+  await ensureDevSettings();
+  await waitForExpectedBuild();
   process.stdout.write(
-    `extension build ${readFileSync(join(extensionDirectory, "build-id.txt"), "utf8").trim()} attested · ${refreshed}/${pages.length} web tabs refreshed\n`,
+    `extension build ${readFileSync(join(extensionDirectory, "build-id.txt"), "utf8").trim()} attested · ${urls.length || 1} web ${urls.length === 1 ? "tab" : "tabs"} restored\n`,
   );
 }
 
@@ -462,14 +454,34 @@ await command(process.execPath, [
   extensionId,
 ]);
 await selectDevelopmentBrowser();
-await launchBrowser(choice);
+const launched = await launchBrowser(choice);
 await ensureDevSettings();
-await reloadExtensionAndTabs();
+if (launched) {
+  await waitForExpectedBuild();
+  process.stdout.write(`extension build ${readFileSync(join(extensionDirectory, "build-id.txt"), "utf8").trim()} attested at launch\n`);
+} else {
+  await reloadExtensionAndTabs();
+}
 
 let buildRunning = false;
 let buildPending = false;
 let localSyncPending = false;
 let debounce;
+
+function buildInputFingerprint() {
+  const inputs = ["extension", "mobile", "src", "widget", "package.json", "tsconfig.json", "tsconfig.extension.json"];
+  const records = [];
+  const visit = (path) => {
+    const details = statSync(path);
+    if (details.isDirectory()) {
+      for (const name of readdirSync(path).sort()) visit(join(path, name));
+      return;
+    }
+    records.push(`${path.slice(root.length)}:${details.size}:${details.mtimeMs}`);
+  };
+  for (const input of inputs) visit(join(root, input));
+  return records.join("\n");
+}
 
 async function rebuild() {
   if (buildRunning) {
@@ -477,6 +489,7 @@ async function rebuild() {
     return;
   }
   buildRunning = true;
+  const startingInputs = buildInputFingerprint();
   const started = performance.now();
   try {
     if (localSyncPending) {
@@ -486,9 +499,14 @@ async function rebuild() {
       });
     }
     await command("npm", ["run", "build"]);
-    await launchBrowser(choice);
-    await ensureDevSettings();
-    await reloadExtensionAndTabs();
+    const launched = await launchBrowser(choice);
+    if (launched) {
+      await ensureDevSettings();
+      await waitForExpectedBuild();
+      process.stdout.write(`extension build ${readFileSync(join(extensionDirectory, "build-id.txt"), "utf8").trim()} attested at launch\n`);
+    } else {
+      await reloadExtensionAndTabs();
+    }
     process.stdout.write(
       `development update ready in ${Math.round(performance.now() - started)}ms\n`,
     );
@@ -496,10 +514,9 @@ async function rebuild() {
     process.stderr.write(`development update failed: ${error.message}\n`);
   } finally {
     buildRunning = false;
-    if (buildPending) {
-      buildPending = false;
-      void rebuild();
-    }
+    const inputsChangedDuringBuild = buildPending && buildInputFingerprint() !== startingInputs;
+    buildPending = false;
+    if (localSyncPending || inputsChangedDuringBuild) void rebuild();
   }
 }
 
@@ -514,7 +531,7 @@ function scheduleLocalStackRebuild() {
 }
 
 const watchers = [];
-for (const path of ["extension", "src", "widget"]) {
+for (const path of ["extension", "mobile", "src", "widget"]) {
   watchers.push(watch(join(root, path), { recursive: true }, scheduleRebuild));
 }
 for (const path of [
