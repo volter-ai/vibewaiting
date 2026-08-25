@@ -20,14 +20,14 @@
       <output aria-live="polite"></output>
       <section class="remote" aria-labelledby="remote-title">
         <div class="remote-heading">
-          <div><h2 id="remote-title">Phone access</h2><p>Open these chats securely from another device.</p></div>
-          <label class="switch"><input id="remote-enabled" type="checkbox" aria-label="Enable phone access"><span></span></label>
+          <div><h2 id="remote-title">Remote access</h2><p>Open these chats securely from another device.</p></div>
+          <label class="switch"><input id="remote-enabled" type="checkbox" aria-label="Enable remote access"><span></span></label>
         </div>
         <label class="remote-provider">Provider<select id="remote-provider"><option value="auto">Automatic</option><option value="cloudflare">Cloudflare</option><option value="ngrok">ngrok</option><option value="stable">Stable relay</option></select></label>
         <small id="remote-detail">Checking available tunnel providers…</small>
         <div id="remote-handoff" class="remote-handoff" hidden>
-          <img id="remote-qr" alt="QR code for opening Vibewaiting on a phone">
-          <div><p>Scan with your phone, then enter:</p><strong id="remote-code"></strong><a id="remote-link" target="_blank" rel="noreferrer"></a><button id="remote-copy" type="button">Copy link</button><small id="remote-stability"></small></div>
+          <img id="remote-qr" alt="QR code for opening Vibewaiting remotely">
+          <div><p>Scan on another device, then enter:</p><strong id="remote-code"></strong><a id="remote-link" target="_blank" rel="noreferrer"></a><button id="remote-copy" type="button">Copy link</button><small id="remote-stability"></small></div>
         </div>
         <p id="remote-error" class="remote-error" role="alert"></p>
       </section>

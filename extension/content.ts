@@ -15,6 +15,14 @@ import {
   captureShortcutAttachments,
 } from "./browser-context.js";
 import { browserShortcutLabel } from "../src/browser-shortcuts.js";
+import { createRemoteAccessCompanion } from "./remote-access-companion.js";
+
+let port: ReturnType<typeof chrome.runtime.connect> | undefined;
+const remoteAccess = createRemoteAccessCompanion({
+  configure(configuration) {
+    port?.postMessage({ type: "remote-access-configure", configuration });
+  },
+});
 
 const overlay = createOverlay({
   id: "vibewaiting",
@@ -23,7 +31,11 @@ const overlay = createOverlay({
   }),
   presentations: VIBEWAITING_PRESENTATIONS,
   initialPresentation: VIBEWAITING_PRESENTATION.messenger,
-  launcher: { label: "Open agent chats", hidden: true },
+  launcher: {
+    label: "Open agent chats",
+    hidden: true,
+    companion: () => remoteAccess.node,
+  },
   behavior: {
     persistence: createExtensionGeometryPersistence(chrome.storage.local),
   },
@@ -31,10 +43,18 @@ const overlay = createOverlay({
 });
 
 overlay.mount();
-const port = chrome.runtime.connect({ name: "vibewaiting:content" });
-port.onMessage.addListener((raw) => {
+const unsubscribe = overlay.subscribe((state) => {
+  if (state.phase === "closed") remoteAccess.close();
+});
+const contentPort = chrome.runtime.connect({ name: "vibewaiting:content" });
+port = contentPort;
+contentPort.onMessage.addListener((raw) => {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return;
   const message = raw as Record<string, unknown>;
+  if (message.type === "remote-access") {
+    remoteAccess.update(message.snapshot, message.passcode);
+    return;
+  }
   if (message.type === "launcher") {
     const harness = typeof message.harness === "string" ? message.harness : "";
     const icon = harnessLogoDataUrl(harness);
@@ -56,14 +76,14 @@ port.onMessage.addListener((raw) => {
     message.action === "candidates"
   ) {
     try {
-      port.postMessage({
+      contentPort.postMessage({
         type: "browser-context-response",
         id: message.id,
         ok: true,
         attachments: captureBrowserContext(),
       });
     } catch (error) {
-      port.postMessage({
+      contentPort.postMessage({
         type: "browser-context-response",
         id: message.id,
         ok: false,
@@ -85,7 +105,7 @@ port.onMessage.addListener((raw) => {
       overlay.open();
       const attachment = captureLinkAttachment(message.targetUrl);
       requestAnimationFrame(() =>
-        port.postMessage({
+        contentPort.postMessage({
           type: "browser-shortcut-result",
           id: message.id,
           command: "attach-browser-context",
@@ -111,7 +131,7 @@ port.onMessage.addListener((raw) => {
   const finish = (attachments?: unknown): void => {
     overlay.open();
     requestAnimationFrame(() =>
-      port.postMessage({
+      contentPort.postMessage({
         type: "browser-shortcut-result",
         id,
         command,
@@ -133,7 +153,9 @@ port.onMessage.addListener((raw) => {
 window.addEventListener(
   "pagehide",
   () => {
-    port.disconnect();
+    unsubscribe();
+    remoteAccess.destroy();
+    contentPort.disconnect();
     overlay.destroy();
   },
   { once: true },
