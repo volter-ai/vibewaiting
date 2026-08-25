@@ -7,6 +7,7 @@ import {
   harnessLogoDataUrl,
   hasHarnessLogo,
 } from "@volter-ai-dev/supercode-ui/preact/logo";
+import { UiIcon } from "@volter-ai-dev/supercode-ui/preact/icon";
 import { normalizeUiState } from "@volter-ai-dev/supercode-ui/core";
 import type {
   MessengerComposerCommand,
@@ -509,10 +510,6 @@ export function mountMessenger(
       (state.terminalMoveStatus === "waiting" || state.terminalMoveStatus === "moving")
       ? state.terminalMoveStatus
       : null;
-    const movableNativeSessionCount = isRecord(state) &&
-      typeof state.movableNativeSessionCount === "number"
-      ? Math.max(0, Math.floor(state.movableNativeSessionCount))
-      : 0;
     const terminalMoveQueuedCount = isRecord(state) &&
       typeof state.terminalMoveQueuedCount === "number"
       ? Math.max(0, Math.floor(state.terminalMoveQueuedCount))
@@ -730,29 +727,40 @@ export function mountMessenger(
 
     function NativeTerminalMoveBanner({ value }: { value: unknown }): JSX.Element | null {
       const query = isRecord(value) && typeof value.query === "string" ? value.query : "";
-      if (query || (movableNativeSessionCount < 2 && terminalMoveQueuedCount === 0)) return null;
+      if (query || terminalMoveQueuedCount === 0) return null;
       const moving = terminalMoveQueuedCount - terminalMoveWaitingCount;
-      const headline = terminalMoveQueuedCount > 0
-        ? moving > 0
-          ? terminalMoveWaitingCount > 0
-            ? `Moving one · ${terminalMoveWaitingCount} waiting`
-            : "Moving terminal session…"
-          : `${terminalMoveWaitingCount} waiting for idle`
-        : `${movableNativeSessionCount} live terminal sessions`;
+      const headline = moving > 0
+        ? terminalMoveWaitingCount > 0
+          ? `Moving one · ${terminalMoveWaitingCount} waiting`
+          : "Moving terminal session…"
+        : `${terminalMoveWaitingCount} waiting for idle`;
       return (
         <aside class="vw-native-move" aria-live="polite">
-          <span>
-            <strong>{headline}</strong>
-            <small>Each moves here after its current turn.</small>
-          </span>
+          <strong>{headline}</strong>
           <button
             type="button"
-            disabled={terminalMoveQueuedCount > 0 && terminalMoveWaitingCount === 0}
+            disabled={terminalMoveWaitingCount === 0}
             onClick={() => void sendBridgeIntent({ action: "moveAllToTerminal" })}
           >
-            {terminalMoveWaitingCount > 0 ? "Cancel" : "Bring all here"}
+            Cancel
           </button>
         </aside>
+      );
+    }
+
+    function ListToolbarActions({ value }: { value: { onNew?(): void; canStart: boolean } }): JSX.Element {
+      return (
+        <button
+          class="vw-compose-chat"
+          type="button"
+          data-list-focus="new"
+          aria-label="New chat"
+          title="New chat"
+          disabled={!value.canStart}
+          onClick={value.onNew}
+        >
+          <UiIcon name="compose" size={17} />
+        </button>
       );
     }
     return (
@@ -776,6 +784,8 @@ export function mountMessenger(
             labels={{ attachContext: "Attach from this page" }}
             components={{ TaskPlan: () => null }}
             slots={{
+              listHeader: () => null,
+              listToolbarActions: ListToolbarActions,
               beforeSessions: NativeTerminalMoveBanner,
               headerActions: (header) => <HeaderModeToggle value={header.value} />,
             }}

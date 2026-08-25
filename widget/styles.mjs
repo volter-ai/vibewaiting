@@ -27,12 +27,15 @@ body { background:transparent }
 .vw-mode-toggle svg { display:block; width:15px; height:15px; fill:none; stroke:currentColor; stroke-width:1.8;
   stroke-linecap:round; stroke-linejoin:round }
 
-.vw-native-move { display:flex; align-items:center; gap:10px; margin:7px 9px 2px; padding:9px 10px;
+.vw-compose-chat { display:grid; width:31px; height:31px; flex:none; place-items:center; padding:0;
+  border:0; border-radius:7px; color:var(--scui-muted); background:transparent; cursor:pointer }
+.vw-compose-chat:hover,.vw-compose-chat:focus-visible { color:var(--scui-fg); background:var(--scui-fill); outline:0 }
+.vw-compose-chat:disabled { opacity:.4; cursor:default }
+
+.vw-native-move { display:flex; align-items:center; gap:10px; margin:7px 9px 2px; padding:7px 9px;
   border:1px solid var(--scui-border); border-radius:9px; color:var(--scui-fg); background:var(--scui-bg-raised) }
-.vw-native-move span { min-width:0; flex:1 }
-.vw-native-move strong,.vw-native-move small { display:block }
-.vw-native-move strong { overflow:hidden; font:650 11px/1.25 var(--scui-font); text-overflow:ellipsis; white-space:nowrap }
-.vw-native-move small { margin-top:2px; color:var(--scui-muted); font:500 9.5px/1.25 var(--scui-font) }
+.vw-native-move strong { min-width:0; flex:1; overflow:hidden; font:650 10.5px/1.25 var(--scui-font);
+  text-overflow:ellipsis; white-space:nowrap }
 .vw-native-move button { flex:none; padding:6px 8px; border:1px solid var(--scui-border-strong); border-radius:7px;
   color:var(--scui-fg); background:var(--scui-bg); font:650 9.5px/1 var(--scui-font); cursor:pointer }
 .vw-native-move button:hover,.vw-native-move button:focus-visible { background:var(--scui-fill); outline:0 }
