@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
 import { WebSocket as WebSocketClient, WebSocketServer, type WebSocket } from "ws";
+import { type PairingGrant, SingleUsePairingGrants } from "./pairing-grants.js";
 
 const MAX_LOGIN_BYTES = 2_048;
 const MAX_SOCKET_MESSAGE_BYTES = 1_048_576;
@@ -29,6 +30,7 @@ export class RemoteMessengerServer {
   private readonly sockets = new Set<WebSocket>();
   private readonly messengerSockets = new Set<WebSocket>();
   private readonly attempts = new Map<string, number[]>();
+  private readonly pairingGrants = new SingleUsePairingGrants();
   private readonly terminalOrigins = new Map<string, string>();
   private readonly webSockets = new WebSocketServer({ noServer: true });
   private server: ReturnType<typeof createServer> | null = null;
@@ -80,6 +82,11 @@ export class RemoteMessengerServer {
     return { localOrigin: `http://127.0.0.1:${address.port}`, passcode: this.passcode };
   }
 
+  createPairingGrant(): PairingGrant {
+    if (!this.server) throw new Error("Remote messenger is not running");
+    return this.pairingGrants.issue();
+  }
+
   setIntentHandler(handler: ((intent: RemoteIntent) => void) | null): void {
     this.intentHandler = handler;
   }
@@ -99,6 +106,7 @@ export class RemoteMessengerServer {
     for (const socket of this.sockets) socket.close(1001, "Vibewaiting stopped");
     this.sockets.clear();
     this.messengerSockets.clear();
+    this.pairingGrants.clear();
     const server = this.server;
     this.server = null;
     if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -207,6 +215,30 @@ export class RemoteMessengerServer {
       await this.login(request, response);
       return;
     }
+    if (request.method === "POST" && url.pathname === "/pair") {
+      if (!this.sameOrigin(request)) {
+        respond(
+          response,
+          403,
+          "text/plain; charset=utf-8",
+          Buffer.from("Pairing must be completed from this Vibewaiting page."),
+          { ...securityHeaders(), "cache-control": "no-store" },
+        );
+        return;
+      }
+      await this.pair(request, response);
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/pair.js") {
+      respond(
+        response,
+        200,
+        "text/javascript; charset=utf-8",
+        Buffer.from(PAIRING_JAVASCRIPT),
+        securityHeaders(),
+      );
+      return;
+    }
     if (!this.authorized(request)) {
       respond(response, 200, "text/html; charset=utf-8", Buffer.from(LOGIN_HTML), {
         ...securityHeaders(),
@@ -251,13 +283,36 @@ export class RemoteMessengerServer {
       return;
     }
     this.attempts.delete(key);
-    const secure = request.headers["x-forwarded-proto"] === "https" || (request.socket as typeof request.socket & { encrypted?: boolean }).encrypted === true;
-    response.writeHead(303, {
-      ...securityHeaders(),
-      location: "/",
-      "set-cookie": `${SESSION_COOKIE}=${this.sessionToken}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_MAX_AGE_SECONDS}${secure ? "; Secure" : ""}`,
-    });
+    response.writeHead(303, { ...this.sessionHeaders(request), location: "/" });
     response.end();
+  }
+
+  private async pair(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const body = await readBody(request, MAX_LOGIN_BYTES).catch(() => null);
+    const grant = body ? new URLSearchParams(body).get("grant") ?? "" : "";
+    if (!this.pairingGrants.consume(grant)) {
+      respond(
+        response,
+        401,
+        "text/plain; charset=utf-8",
+        Buffer.from("This pairing link is invalid, expired, or already used."),
+        { ...securityHeaders(), "cache-control": "no-store" },
+      );
+      return;
+    }
+    response.writeHead(204, this.sessionHeaders(request));
+    response.end();
+  }
+
+  private sessionHeaders(request: IncomingMessage): Record<string, string> {
+    const secure =
+      request.headers["x-forwarded-proto"] === "https" ||
+      (request.socket as typeof request.socket & { encrypted?: boolean }).encrypted === true;
+    return {
+      ...securityHeaders(),
+      "cache-control": "no-store",
+      "set-cookie": `${SESSION_COOKIE}=${this.sessionToken}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_MAX_AGE_SECONDS}${secure ? "; Secure" : ""}`,
+    };
   }
 
   private authorized(request: IncomingMessage): boolean {
@@ -356,4 +411,27 @@ function respond(
 
 const LOGIN_HTML = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="dark light"><title>Vibewaiting</title><style>
-:root{color-scheme:dark light;font:15px/1.45 system-ui,sans-serif;background:#111318;color:#f4f5f7}body{min-height:100dvh;margin:0;display:grid;place-items:center}main{box-sizing:border-box;width:min(92vw,360px);padding:24px}h1{margin:0 0 5px;font-size:24px}p{margin:0 0 20px;color:#a9adba}form{display:grid;gap:12px}label{display:grid;gap:7px;font-weight:650}input,button{box-sizing:border-box;width:100%;min-height:46px;border:1px solid #3a3e49;border-radius:10px;background:#1a1d24;color:inherit;font:inherit;padding:10px 12px}input{font:650 20px/1 ui-monospace,monospace;letter-spacing:.15em;text-align:center}button{cursor:pointer;background:#f0f1f3;color:#16171a;border-color:#f0f1f3;font-weight:700}small{color:#7f8490}</style></head><body><main><h1>Vibewaiting</h1><p>Enter the access code shown on your computer.</p><form method="post" action="/login"><label>Access code<input name="code" inputmode="numeric" pattern="[0-9 ]{6,7}" maxlength="7" autocomplete="one-time-code" autofocus required></label><button type="submit">Open chats</button></form><small>This code expires when the local bridge stops.</small></main></body></html>`;
+:root{color-scheme:dark light;font:15px/1.45 system-ui,sans-serif;background:#111318;color:#f4f5f7}body{min-height:100dvh;margin:0;display:grid;place-items:center}main{box-sizing:border-box;width:min(92vw,360px);padding:24px}h1{margin:0 0 5px;font-size:24px}p{margin:0 0 20px;color:#a9adba}form{display:grid;gap:12px}form[hidden]{display:none}label{display:grid;gap:7px;font-weight:650}input,button{box-sizing:border-box;width:100%;min-height:46px;border:1px solid #3a3e49;border-radius:10px;background:#1a1d24;color:inherit;font:inherit;padding:10px 12px}input{font:650 20px/1 ui-monospace,monospace;letter-spacing:.15em;text-align:center}button{cursor:pointer;background:#f0f1f3;color:#16171a;border-color:#f0f1f3;font-weight:700}small{color:#7f8490}</style><script src="/pair.js" defer></script></head><body><main><h1>Vibewaiting</h1><p id="pairing-status">Enter the access code shown on your computer.</p><form method="post" action="/login"><label>Access code<input name="code" inputmode="numeric" pattern="[0-9 ]{6,7}" maxlength="7" autocomplete="one-time-code" autofocus required></label><button type="submit">Open chats</button></form><small>This code expires when the local bridge stops.</small></main></body></html>`;
+
+const PAIRING_JAVASCRIPT = `(() => {
+  const parameters = new URLSearchParams(location.hash.slice(1));
+  const grant = parameters.get("pair");
+  if (!grant) return;
+  history.replaceState(null, "", location.pathname + location.search);
+  const form = document.querySelector("form");
+  const status = document.querySelector("#pairing-status");
+  if (form) form.hidden = true;
+  if (status) status.textContent = "Pairing this device…";
+  fetch("/pair", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "content-type": "application/x-www-form-urlencoded;charset=UTF-8" },
+    body: new URLSearchParams({ grant }),
+  }).then((response) => {
+    if (!response.ok) throw new Error("pairing rejected");
+    location.replace("/");
+  }).catch(() => {
+    if (form) form.hidden = false;
+    if (status) status.textContent = "This QR code expired or was already used. Enter the access code instead.";
+  });
+})();`;

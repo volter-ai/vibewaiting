@@ -9,6 +9,11 @@ export interface RemoteAccessConfiguration {
   provider: RemoteAccessProvider;
 }
 
+export interface RemotePairingHandoff {
+  expiresAt: number;
+  url: string;
+}
+
 export interface ExtensionSettings {
   workspace: string;
   harness?: string;
@@ -26,6 +31,10 @@ export type NativeHostCommand =
       protocol: typeof VIBEWAITING_EXTENSION_PROTOCOL;
       type: "remote-access";
       configuration: RemoteAccessConfiguration;
+    }
+  | {
+      protocol: typeof VIBEWAITING_EXTENSION_PROTOCOL;
+      type: "remote-access-pairing";
     }
   | {
       protocol: typeof VIBEWAITING_EXTENSION_PROTOCOL;
@@ -49,6 +58,7 @@ export type NativeHostEvent =
   | {
       protocol: typeof VIBEWAITING_EXTENSION_PROTOCOL;
       type: "remote-access";
+      pairing?: RemotePairingHandoff;
       passcode: string;
       snapshot: unknown;
     }
@@ -72,6 +82,12 @@ export function parseNativeHostCommand(
 ): NativeHostCommand | null {
   const candidate = record(value);
   if (candidate?.protocol !== VIBEWAITING_EXTENSION_PROTOCOL) return null;
+  if (candidate.type === "remote-access-pairing") {
+    return {
+      protocol: VIBEWAITING_EXTENSION_PROTOCOL,
+      type: "remote-access-pairing",
+    };
+  }
   if (candidate.type === "remote-access") {
     const configuration = parseRemoteAccessConfiguration(candidate.configuration);
     return configuration

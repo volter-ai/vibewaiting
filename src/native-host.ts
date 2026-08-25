@@ -9,6 +9,7 @@ import type { HarnessId } from "@volter-ai-dev/supercode-harness-sdk";
 import {
   createRemoteAccessController,
   type RemoteAccessController,
+  type RemoteAccessSnapshot,
 } from "@volter-ai-dev/supercode-remote-access";
 import { startDaemon, type Daemon, type WidgetBridge } from "./daemon.js";
 import {
@@ -190,13 +191,26 @@ export async function runNativeHost(extensionOrigin: string | undefined): Promis
     publicPath: "/",
     tunnelId: await persistentRemoteTunnelId(),
   });
-  remoteAccess.subscribe((snapshot) => {
-    void writeEvent({
+  let remoteAccessSnapshot = remoteAccess.snapshot();
+  const publishRemoteAccess = async (
+    snapshot: RemoteAccessSnapshot,
+    includePairing: boolean,
+  ): Promise<void> => {
+    const pairing =
+      includePairing && snapshot.status === "connected" && snapshot.publicUrl
+        ? remotePairingHandoff(snapshot.publicUrl, remoteServer.createPairingGrant())
+        : undefined;
+    await writeEvent({
       protocol: VIBEWAITING_EXTENSION_PROTOCOL,
       type: "remote-access",
+      ...(pairing ? { pairing } : {}),
       passcode: remoteEndpoint.passcode,
       snapshot,
     });
+  };
+  remoteAccess.subscribe((snapshot) => {
+    remoteAccessSnapshot = snapshot;
+    void publishRemoteAccess(snapshot, snapshot.status === "connected");
   });
   let daemon: Daemon | null = null;
   let bridge: NativeWidgetBridge | null = null;
@@ -294,6 +308,10 @@ export async function runNativeHost(extensionOrigin: string | undefined): Promis
       });
       return;
     }
+    if (command.type === "remote-access-pairing") {
+      await publishRemoteAccess(remoteAccessSnapshot, true);
+      return;
+    }
     bridge?.receive(command.id, command.payload);
   };
 
@@ -333,6 +351,15 @@ export async function runNativeHost(extensionOrigin: string | undefined): Promis
     await stopDaemon();
     await terminalService.stop();
   }
+}
+
+function remotePairingHandoff(
+  publicUrl: string,
+  grant: { expiresAt: number; token: string },
+): { expiresAt: number; url: string } {
+  const url = new URL(publicUrl);
+  url.hash = new URLSearchParams({ pair: grant.token }).toString();
+  return { expiresAt: grant.expiresAt, url: url.href };
 }
 
 async function persistentRemoteTunnelId(): Promise<string> {
