@@ -10,6 +10,10 @@ import {
   type RemoteAccessConfiguration,
   type RemoteAccessProvider,
 } from "../src/extension-protocol.js";
+import {
+  activeRemotePairingUrl,
+  parseRemotePairingHandoff,
+} from "../src/remote-pairing.js";
 
 const SETTINGS_KEY = "vibewaiting:settings";
 const form = document.querySelector<HTMLFormElement>("form");
@@ -23,12 +27,17 @@ const remoteProvider = document.querySelector<HTMLSelectElement>("#remote-provid
 const remoteDetail = document.querySelector<HTMLElement>("#remote-detail");
 const remoteHandoff = document.querySelector<HTMLElement>("#remote-handoff");
 const remoteQr = document.querySelector<HTMLImageElement>("#remote-qr");
+const remotePairingInstruction = document.querySelector<HTMLElement>(
+  "#remote-pairing-instruction",
+);
+const remoteCodeLabel = document.querySelector<HTMLElement>("#remote-code-label");
 const remoteCode = document.querySelector<HTMLElement>("#remote-code");
 const remoteLink = document.querySelector<HTMLAnchorElement>("#remote-link");
 const remoteCopy = document.querySelector<HTMLButtonElement>("#remote-copy");
 const remoteStability = document.querySelector<HTMLElement>("#remote-stability");
 const remoteError = document.querySelector<HTMLElement>("#remote-error");
 let activeRemoteConfiguration: RemoteAccessConfiguration = { enabled: false, provider: "auto" };
+let pairingRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 
 type Capability = { detail: string; provider: Exclude<RemoteAccessProvider, "auto">; status: "needs-setup" | "ready" | "unavailable" };
 type RemoteSnapshot = {
@@ -67,7 +76,7 @@ port.onMessage.addListener((raw) => {
     return;
   const message = raw as Record<string, unknown>;
   if (message.type === "remote-access") {
-    renderRemoteAccess(message.snapshot, message.passcode);
+    renderRemoteAccess(message.snapshot, message.passcode, message.pairing);
     return;
   }
   if (message.type !== "status" || typeof message.phase !== "string") return;
@@ -83,6 +92,7 @@ port.onMessage.addListener((raw) => {
             ? "Choose a workspace to connect."
             : "Not connected.";
 });
+port.postMessage({ type: "remote-access-pairing-request" });
 
 const stored = (await chrome.storage.local.get(SETTINGS_KEY))[SETTINGS_KEY];
 if (typeof stored === "object" && stored !== null && !Array.isArray(stored)) {
@@ -121,8 +131,14 @@ remoteProvider?.addEventListener("change", () => {
   void configureRemoteAccess({ enabled: activeRemoteConfiguration.enabled, provider });
 });
 
-function renderRemoteAccess(rawSnapshot: unknown, rawPasscode: unknown): void {
+function renderRemoteAccess(
+  rawSnapshot: unknown,
+  rawPasscode: unknown,
+  rawPairing: unknown,
+): void {
   if (!isRemoteSnapshot(rawSnapshot)) return;
+  if (pairingRefreshTimer) clearTimeout(pairingRefreshTimer);
+  pairingRefreshTimer = undefined;
   activeRemoteConfiguration = { enabled: rawSnapshot.enabled, provider: rawSnapshot.provider };
   if (remoteEnabled) {
     remoteEnabled.checked = rawSnapshot.enabled;
@@ -143,7 +159,33 @@ function renderRemoteAccess(rawSnapshot: unknown, rawPasscode: unknown): void {
   const connected = rawSnapshot.status === "connected" && typeof rawSnapshot.publicUrl === "string";
   if (remoteHandoff) remoteHandoff.hidden = !connected;
   if (!connected || !rawSnapshot.publicUrl) return;
+  const pairingUrl = activeRemotePairingUrl(rawPairing, rawSnapshot.publicUrl);
+  const handoff = parseRemotePairingHandoff(rawPairing);
+  if (pairingUrl && handoff) {
+    pairingRefreshTimer = setTimeout(
+      () => {
+        if (remoteQr) {
+          const qr = qrcode(0, "M");
+          qr.addData(rawSnapshot.publicUrl!);
+          qr.make();
+          remoteQr.src = qr.createDataURL(6, 2);
+          remoteQr.alt = "QR code for opening Vibewaiting remotely";
+        }
+        if (remotePairingInstruction)
+          remotePairingInstruction.textContent = "Scan to open the sign-in page.";
+        if (remoteCodeLabel) remoteCodeLabel.textContent = "Then enter:";
+        port.postMessage({ type: "remote-access-pairing-request" });
+      },
+      Math.max(0, handoff.expiresAt - Date.now() - 10_000),
+    );
+  }
   const passcode = typeof rawPasscode === "string" ? rawPasscode : "";
+  if (remotePairingInstruction)
+    remotePairingInstruction.textContent = pairingUrl
+      ? "Scan to open directly."
+      : "Scan to open the sign-in page.";
+  if (remoteCodeLabel)
+    remoteCodeLabel.textContent = pairingUrl ? "Or enter:" : "Then enter:";
   if (remoteCode) remoteCode.textContent = /^\d{6}$/.test(passcode) ? `${passcode.slice(0, 3)} ${passcode.slice(3)}` : passcode;
   if (remoteLink) {
     remoteLink.href = rawSnapshot.publicUrl;
@@ -151,9 +193,12 @@ function renderRemoteAccess(rawSnapshot: unknown, rawPasscode: unknown): void {
   }
   if (remoteQr) {
     const qr = qrcode(0, "M");
-    qr.addData(rawSnapshot.publicUrl);
+    qr.addData(pairingUrl ?? rawSnapshot.publicUrl);
     qr.make();
     remoteQr.src = qr.createDataURL(6, 2);
+    remoteQr.alt = pairingUrl
+      ? "QR code for one-scan remote pairing"
+      : "QR code for opening Vibewaiting remotely";
   }
   if (remoteStability) remoteStability.textContent = rawSnapshot.stability === "temporary"
     ? "This link changes when the tunnel reconnects."
@@ -213,4 +258,11 @@ form?.addEventListener("submit", async (event) => {
       "Saved. Vibewaiting is connecting to the local agent bridge.";
 });
 
-window.addEventListener("pagehide", () => port.disconnect(), { once: true });
+window.addEventListener(
+  "pagehide",
+  () => {
+    if (pairingRefreshTimer) clearTimeout(pairingRefreshTimer);
+    port.disconnect();
+  },
+  { once: true },
+);

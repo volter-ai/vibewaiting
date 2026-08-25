@@ -22,6 +22,9 @@ const remoteAccess = createRemoteAccessCompanion({
   configure(configuration) {
     port?.postMessage({ type: "remote-access-configure", configuration });
   },
+  requestPairing() {
+    port?.postMessage({ type: "remote-access-pairing-request" });
+  },
 });
 
 const overlay = createOverlay({
@@ -52,7 +55,7 @@ contentPort.onMessage.addListener((raw) => {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return;
   const message = raw as Record<string, unknown>;
   if (message.type === "remote-access") {
-    remoteAccess.update(message.snapshot, message.passcode);
+    remoteAccess.update(message.snapshot, message.passcode, message.pairing);
     return;
   }
   if (message.type === "launcher") {

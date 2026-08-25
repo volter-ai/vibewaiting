@@ -3,6 +3,7 @@ import type {
   RemoteAccessConfiguration,
   RemoteAccessProvider,
 } from "../src/extension-protocol.js";
+import { activeRemotePairingUrl, parseRemotePairingHandoff } from "../src/remote-pairing.js";
 
 type RemoteAccessStatus =
   | "connected"
@@ -25,7 +26,7 @@ export interface RemoteAccessCompanion {
   readonly node: HTMLElement;
   close(): void;
   destroy(): void;
-  update(snapshot: unknown, passcode: unknown): void;
+  update(snapshot: unknown, passcode: unknown, pairing: unknown): void;
 }
 
 const REMOTE_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 18.25h9M12 14.75v3.5M5.25 4.75h13.5A2.25 2.25 0 0 1 21 7v5.5a2.25 2.25 0 0 1-2.25 2.25H5.25A2.25 2.25 0 0 1 3 12.5V7a2.25 2.25 0 0 1 2.25-2.25Z"/><path d="M15.5 8.15a4.45 4.45 0 0 1 0 3.7M17.75 6.5a6.7 6.7 0 0 1 0 7"/></svg>`;
@@ -55,6 +56,7 @@ function formatPasscode(value: string): string {
 
 export function createRemoteAccessCompanion(options: {
   configure(configuration: RemoteAccessConfiguration): void;
+  requestPairing(): void;
 }): RemoteAccessCompanion {
   const root = document.createElement("div");
   root.className = "vw-remote-access";
@@ -82,6 +84,7 @@ export function createRemoteAccessCompanion(options: {
     .vw-remote-spinner { width:18px; height:18px; flex:0 0 auto; border:2px solid #d6d6dc; border-top-color:#34343a; border-radius:50%; animation:vw-remote-spin .85s linear infinite; }
     .vw-remote-handoff { display:grid; grid-template-columns:112px minmax(0,1fr); gap:14px; margin-top:16px; align-items:start; }
     .vw-remote-qr { display:block; width:112px; height:112px; border:1px solid #e0e0e4; border-radius:10px; background:white; }
+    .vw-remote-scan-label { display:block; margin:1px 0 12px; color:#35353c; font-size:12px; font-weight:650; }
     .vw-remote-code-label { display:block; color:#6a6a74; font-size:11px; }
     .vw-remote-code { display:block; margin:3px 0 8px; color:#202026; font:700 22px/1.15 ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing:.04em; }
     .vw-remote-link { display:block; overflow:hidden; color:#35353c; font-size:11px; text-decoration:underline; text-overflow:ellipsis; white-space:nowrap; }
@@ -96,6 +99,7 @@ export function createRemoteAccessCompanion(options: {
       .vw-remote-state { border-color:#202025; }
       .vw-remote-panel { border-color:rgba(255,255,255,.14); color:#f1f1f3; background:#202025; }
       .vw-remote-heading p,.vw-remote-detail,.vw-remote-progress,.vw-remote-code-label { color:#aaaab3; }
+      .vw-remote-scan-label { color:#e0e0e4; }
       .vw-remote-close { color:#b8b8c0; }.vw-remote-close:hover { background:#303036; }
       .vw-remote-code { color:#f1f1f3; }.vw-remote-link { color:#d0d0d5; }
       .vw-remote-button { border-color:#494950; color:#eeeef0; background:#2c2c31; }.vw-remote-button:hover { background:#36363c; }
@@ -149,14 +153,41 @@ export function createRemoteAccessCompanion(options: {
     status: "off",
   };
   let passcode = "";
+  let pairing: unknown;
   let qrUrl = "";
   let qrDataUrl = "";
   let copiedTimer: ReturnType<typeof setTimeout> | undefined;
+  let pairingTimer: ReturnType<typeof setTimeout> | undefined;
   const abort = new AbortController();
+
+  function clearPairingTimer(): void {
+    if (pairingTimer) clearTimeout(pairingTimer);
+    pairingTimer = undefined;
+  }
+
+  function schedulePairingRefresh(): void {
+    clearPairingTimer();
+    if (
+      panel.hidden ||
+      snapshot.status !== "connected" ||
+      !snapshot.publicUrl
+    )
+      return;
+    const handoff = parseRemotePairingHandoff(pairing);
+    const delay = handoff
+      ? Math.max(0, handoff.expiresAt - Date.now() - 10_000)
+      : 0;
+    pairingTimer = setTimeout(() => {
+      pairing = undefined;
+      render();
+      options.requestPairing();
+    }, delay);
+  }
 
   function closePanel(): void {
     panel.hidden = true;
     trigger.setAttribute("aria-expanded", "false");
+    clearPairingTimer();
   }
 
   function configure(enabled: boolean): void {
@@ -196,23 +227,32 @@ export function createRemoteAccessCompanion(options: {
       return;
     }
     if (snapshot.status === "connected" && snapshot.publicUrl) {
-      if (snapshot.publicUrl !== qrUrl) {
+      const pairingUrl = activeRemotePairingUrl(pairing, snapshot.publicUrl);
+      const nextQrUrl = pairingUrl ?? snapshot.publicUrl;
+      if (nextQrUrl !== qrUrl) {
         const qr = qrcode(0, "M");
-        qr.addData(snapshot.publicUrl);
+        qr.addData(nextQrUrl);
         qr.make();
-        qrUrl = snapshot.publicUrl;
+        qrUrl = nextQrUrl;
         qrDataUrl = qr.createDataURL(5, 2);
       }
       const handoff = document.createElement("div");
       handoff.className = "vw-remote-handoff";
       const qrImage = document.createElement("img");
       qrImage.className = "vw-remote-qr";
-      qrImage.alt = "QR code for opening Vibewaiting remotely";
+      qrImage.alt = pairingUrl
+        ? "QR code for one-scan remote pairing"
+        : "QR code for opening Vibewaiting remotely";
       qrImage.src = qrDataUrl;
       const details = document.createElement("div");
+      const scanLabel = document.createElement("span");
+      scanLabel.className = "vw-remote-scan-label";
+      scanLabel.textContent = pairingUrl
+        ? "Scan to open directly"
+        : "Scan to open the sign-in page";
       const codeLabel = document.createElement("span");
       codeLabel.className = "vw-remote-code-label";
-      codeLabel.textContent = "Scan, then enter";
+      codeLabel.textContent = pairingUrl ? "Or enter" : "Then enter";
       const code = document.createElement("strong");
       code.className = "vw-remote-code";
       code.textContent = formatPasscode(passcode);
@@ -222,7 +262,7 @@ export function createRemoteAccessCompanion(options: {
       link.target = "_blank";
       link.rel = "noreferrer";
       link.textContent = snapshot.publicUrl;
-      details.append(codeLabel, code, link);
+      details.append(scanLabel, codeLabel, code, link);
       handoff.append(qrImage, details);
       const remoteDetail = document.createElement("p");
       remoteDetail.className = "vw-remote-detail";
@@ -286,6 +326,7 @@ export function createRemoteAccessCompanion(options: {
       panel.hidden = false;
       trigger.setAttribute("aria-expanded", "true");
       if (!snapshot.enabled || snapshot.status === "off") configure(true);
+      else if (snapshot.status === "connected") options.requestPairing();
       close.focus();
     },
     { signal: abort.signal },
@@ -315,14 +356,17 @@ export function createRemoteAccessCompanion(options: {
     close: closePanel,
     destroy() {
       if (copiedTimer) clearTimeout(copiedTimer);
+      clearPairingTimer();
       abort.abort();
       root.remove();
     },
-    update(rawSnapshot, rawPasscode) {
+    update(rawSnapshot, rawPasscode, rawPairing) {
       if (!isRemoteAccessSnapshot(rawSnapshot)) return;
       snapshot = rawSnapshot;
       passcode = typeof rawPasscode === "string" ? rawPasscode : "";
+      pairing = rawPairing;
       render();
+      schedulePairingRefresh();
     },
   };
 }

@@ -32,7 +32,11 @@ let nativeReady = false;
 let nativeConnecting: Promise<void> | null = null;
 let lastPatch: unknown;
 let lastStatus: { phase: string; message?: string } = { phase: "stopped" };
-let lastRemoteAccess: { passcode: string; snapshot: unknown } | null = null;
+let lastRemoteAccess: {
+  pairing?: unknown;
+  passcode: string;
+  snapshot: unknown;
+} | null = null;
 
 function installContextMenus(): void {
   const options = {
@@ -176,6 +180,14 @@ async function configureRemoteAccess(rawConfiguration: unknown): Promise<void> {
   });
 }
 
+async function requestRemotePairing(): Promise<void> {
+  await ensureNative();
+  nativePort?.postMessage({
+    protocol: VIBEWAITING_EXTENSION_PROTOCOL,
+    type: "remote-access-pairing",
+  });
+}
+
 function broadcastPatch(patch: unknown): void {
   const launcher = launcherFromPatch(patch);
   for (const port of contentPorts)
@@ -281,7 +293,11 @@ function handleNativeMessage(raw: unknown): void {
     return;
   }
   if (message.type === "remote-access" && typeof message.passcode === "string") {
-    lastRemoteAccess = { passcode: message.passcode, snapshot: message.snapshot };
+    lastRemoteAccess = {
+      ...(message.pairing ? { pairing: message.pairing } : {}),
+      passcode: message.passcode,
+      snapshot: message.snapshot,
+    };
     broadcastRemoteAccess();
   }
 }
@@ -471,8 +487,12 @@ chrome.runtime.onConnect.addListener((port) => {
     if (lastRemoteAccess) post(port, { type: "remote-access", ...lastRemoteAccess });
     port.onMessage.addListener((raw) => {
       const message = record(raw);
-      if (message?.type !== "remote-access-configure") return;
-      void configureRemoteAccess(message.configuration);
+      if (message?.type === "remote-access-configure") {
+        void configureRemoteAccess(message.configuration);
+        return;
+      }
+      if (message?.type === "remote-access-pairing-request")
+        void requestRemotePairing();
     });
     port.onDisconnect.addListener(() => optionsPorts.delete(port));
     void ensureNative();
@@ -491,6 +511,10 @@ chrome.runtime.onConnect.addListener((port) => {
         const message = record(raw);
         if (message?.type === "remote-access-configure") {
           void configureRemoteAccess(message.configuration);
+          return;
+        }
+        if (message?.type === "remote-access-pairing-request") {
+          void requestRemotePairing();
           return;
         }
         handleContentMessage(port, tabId, raw);

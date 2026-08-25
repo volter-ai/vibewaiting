@@ -26,8 +26,8 @@
         <label class="remote-provider">Provider<select id="remote-provider"><option value="auto">Automatic</option><option value="cloudflare">Cloudflare</option><option value="ngrok">ngrok</option><option value="stable">Stable relay</option></select></label>
         <small id="remote-detail">Checking available tunnel providers…</small>
         <div id="remote-handoff" class="remote-handoff" hidden>
-          <img id="remote-qr" alt="QR code for opening Vibewaiting remotely">
-          <div><p>Scan on another device, then enter:</p><strong id="remote-code"></strong><a id="remote-link" target="_blank" rel="noreferrer"></a><button id="remote-copy" type="button">Copy link</button><small id="remote-stability"></small></div>
+          <img id="remote-qr" alt="QR code for one-scan remote pairing">
+          <div><p id="remote-pairing-instruction">Scan to open directly.</p><small id="remote-code-label">Or enter:</small><strong id="remote-code"></strong><a id="remote-link" target="_blank" rel="noreferrer"></a><button id="remote-copy" type="button">Copy link</button><small id="remote-stability"></small></div>
         </div>
         <p id="remote-error" class="remote-error" role="alert"></p>
       </section>
