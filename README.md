@@ -3,7 +3,7 @@
 [![CI](https://github.com/volter-ai/vibewaiting/actions/workflows/ci.yml/badge.svg)](https://github.com/volter-ai/vibewaiting/actions/workflows/ci.yml)
 [![Browser regression](https://github.com/volter-ai/vibewaiting/actions/workflows/browser-nightly.yml/badge.svg)](https://github.com/volter-ai/vibewaiting/actions/workflows/browser-nightly.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-2f3136.svg)](LICENSE)
-[![Node.js 22+](https://img.shields.io/badge/node-%3E%3D22-2f3136.svg)](package.json)
+[![Node.js 22.12+ LTS](https://img.shields.io/badge/node-22.12%2B%20LTS-2f3136.svg)](package.json)
 
 Vibe code without leaving your browser: a messenger in the corner of every page, wired to the coding agents in your CLIs via Supercode.
 
@@ -30,7 +30,7 @@ is an optional remote/headless viewing surface, not the primary way a local user
 
 Requirements:
 
-- Node.js 22 or newer and npm
+- Node.js 22.12 or newer on an LTS release line (22, 24, and later) and npm
 - macOS or Linux
 - Chrome, Chromium, or Brave
 - Claude Code or Codex installed locally and visible to Supercode

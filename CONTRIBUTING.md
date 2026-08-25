@@ -11,7 +11,7 @@ work should follow [SECURITY.md](SECURITY.md).
 
 Requirements:
 
-- Node.js 22 or newer and npm
+- Node.js 22.12 or newer on an LTS release line (22, 24, and later) and npm
 - macOS or Linux for native-host development
 - Chrome, Chromium, or Brave for extension validation
 - a locally installed coding harness supported by Supercode

@@ -22,7 +22,7 @@
   "type": "module",
   "license": "MIT",
   "engines": {
-    "node": ">=22"
+    "node": "^22.12.0 || >=24.0.0"
   },
   "bin": {
     "vibewaiting": "dist/cli.js"
