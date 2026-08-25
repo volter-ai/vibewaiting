@@ -23,6 +23,9 @@ const harness = document.querySelector<HTMLSelectElement>("#harness");
 const policy = document.querySelector<HTMLSelectElement>("#policy");
 const statusOutput = document.querySelector<HTMLOutputElement>("output");
 const extensionId = document.querySelector<HTMLElement>("#extension-id");
+const nativeInstallHint = document.querySelector<HTMLElement>(
+  "#native-install-hint",
+);
 const remoteEnabled = document.querySelector<HTMLInputElement>("#remote-enabled");
 const remoteProvider = document.querySelector<HTMLSelectElement>("#remote-provider");
 const remoteDetail = document.querySelector<HTMLElement>("#remote-detail");
@@ -90,6 +93,8 @@ port.onMessage.addListener((raw) => {
   }
   if (message.type !== "status" || typeof message.phase !== "string") return;
   statusOutput.dataset.phase = message.phase;
+  if (nativeInstallHint)
+    nativeInstallHint.hidden = message.phase !== "error";
   statusOutput.value =
     message.phase === "ready"
       ? "Connected. Open any regular browser tab."

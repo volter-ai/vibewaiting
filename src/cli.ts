@@ -99,7 +99,7 @@ async function runNativeInstall(argv: readonly string[]): Promise<void> {
     ...(extensionId ? { extensionId } : {}),
   });
   process.stdout.write(
-    `Vibewaiting native host installed\n  manifest → ${installed.manifestPath}\n  extension → ${installed.extensionId}\n`,
+    `Vibewaiting native host installed\n  manifest → ${installed.manifestPath}\n  extension folder → ${installed.extensionPath}\n  extension id → ${installed.extensionId}\n\nLoad the extension folder once from your browser's extensions page. Future Vibewaiting updates keep using this path.\n`,
   );
 }
 

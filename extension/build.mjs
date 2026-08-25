@@ -65,8 +65,20 @@ await writeFile(join(mobileOutput, "icon-512.png"), createMobileIconPng(512));
 for (const name of ["manifest.json", "app.html", "options.html", "options.css"]) {
   await cp(join(source, name), join(output, name));
 }
+for (const size of [16, 32, 48, 128])
+  await writeFile(join(output, `icon-${size}.png`), createMobileIconPng(size));
 
-const assetNames = ["background.js", "content.js", "app.js", "options.js", "app.css"];
+const assetNames = [
+  "background.js",
+  "content.js",
+  "app.js",
+  "options.js",
+  "app.css",
+  "icon-16.png",
+  "icon-32.png",
+  "icon-48.png",
+  "icon-128.png",
+];
 const assetContents = await Promise.all(assetNames.map((name) => readFile(join(output, name))));
 const mobileAssetNames = [
   "app.js",
