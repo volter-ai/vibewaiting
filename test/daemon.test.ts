@@ -181,7 +181,7 @@ class RecordingTerminalService implements TerminalService {
 }
 
 class MemoryPersistence implements MessengerPersistence {
-  state: PersistedMessengerState = { attention: [], drafts: {}, preferredLaunchModes: {} };
+  state: PersistedMessengerState = { attention: [], observedCursors: {}, drafts: {}, preferredLaunchModes: {} };
 
   async load(): Promise<PersistedMessengerState> {
     return structuredClone(this.state);
@@ -941,72 +941,83 @@ describe("messenger session state machine", () => {
     expect(client.activeFollows).toBe(1);
   });
 
-  it("keeps visible rows stable through heartbeat churn and acknowledges settled growth", async () => {
+  it("persists native unread boundaries without counting preview growth, tools, or replay", async () => {
     let observedAt = 2_000_000;
-    const { daemon, host, client, lastPush } = await sessionRig(
-      [OWN, ATLAS, BRIDGE],
+    const store = new MemoryPersistence();
+    const baseline = {
+      ...ATLAS,
+      latest_message_candidates: [{ cursor: "atlas-0", role: "assistant" as const, content: "baseline", metadata: { timestamp: new Date(1_900_000).toISOString() } }],
+    };
+    const first = await sessionRig(
+      [OWN, baseline, BRIDGE],
       undefined,
-      undefined,
+      store,
       undefined,
       () => observedAt,
     );
-    client.sessions = [OWN, { ...ATLAS, updated_at_ms: 2_000_050 }, BRIDGE];
-    await host.ticks.find((tick) => tick.ms === DEFAULT_DISCOVER_INTERVAL_MS)?.fn();
-    expect(lastPush().attention).toEqual([]);
+    first.client.sessions = [OWN, { ...baseline, updated_at_ms: 2_000_050 }, BRIDGE];
+    await first.host.ticks.find((tick) => tick.ms === DEFAULT_DISCOVER_INTERVAL_MS)?.fn();
+    expect(first.lastPush().attention).toEqual([]);
 
-    client.sessions = [OWN, {
-      ...ATLAS,
+    first.client.sessions = [OWN, {
+      ...baseline,
       updated_at_ms: observedAt,
-      latest_message_candidates: [{ role: "assistant", content: "settled preview", metadata: {} }],
+      latest_message_candidates: [{ cursor: "atlas-0", role: "assistant", content: "baseline grew while streaming", metadata: { timestamp: new Date(observedAt).toISOString() } }],
     }, BRIDGE];
-    await host.ticks.find((tick) => tick.ms === DEFAULT_DISCOVER_INTERVAL_MS)?.fn();
-    expect(lastPush().attention).toEqual([]);
+    await first.host.ticks.find((tick) => tick.ms === DEFAULT_DISCOVER_INTERVAL_MS)?.fn();
+    expect(first.lastPush().attention).toEqual([]);
+
+    first.client.sessions = [OWN, {
+      ...baseline,
+      updated_at_ms: observedAt,
+      message_count: (baseline.message_count ?? 0) + 20,
+      latest_message_candidates: [
+        { cursor: "atlas-1", role: "assistant", content: "settled preview", metadata: { timestamp: new Date(observedAt).toISOString() } },
+        baseline.latest_message_candidates[0]!,
+      ],
+    }, BRIDGE];
+    await first.host.ticks.find((tick) => tick.ms === DEFAULT_DISCOVER_INTERVAL_MS)?.fn();
+    expect(first.lastPush().attention).toEqual([]);
     observedAt += DEFAULT_ATTENTION_SETTLE_MS;
-    await daemon.flush();
+    await first.daemon.flush();
     const key = sessionKey(ATLAS.locator);
-    expect(lastPush().attention).toContainEqual(expect.objectContaining({ key, kind: "unseen" }));
-    await host.fireIntent(INTENT_QUEUE, { action: "ack", key });
+    expect(first.lastPush().attention).toContainEqual(expect.objectContaining({ key, kind: "unseen", unreadCount: 1 }));
+    await first.host.fireIntent(INTENT_QUEUE, { action: "ack", key });
+    await first.daemon.stop();
+    running.splice(running.indexOf(first.daemon), 1);
+    expect(store.state.observedCursors[key]).toBe("atlas-1");
 
-    const grown = { ...ATLAS, message_count: (ATLAS.message_count ?? 0) + 1 };
-    client.sessions = [OWN, { ...grown, updated_at_ms: 2_000_000 - DEFAULT_ATTENTION_SETTLE_MS }, BRIDGE];
-    await host.ticks.find((tick) => tick.ms === DEFAULT_DISCOVER_INTERVAL_MS)?.fn();
-    expect(lastPush().attention).toContainEqual(expect.objectContaining({ key, kind: "unseen" }));
+    const replayed = first.client.sessions[1]!;
+    const second = await sessionRig([OWN, replayed, BRIDGE], undefined, store, undefined, () => observedAt);
+    expect(second.lastPush().attention).toEqual([]);
 
-    await host.fireIntent(INTENT_QUEUE, { action: "ack", key });
-    expect(lastPush().attention).toEqual([]);
+    const toolOnly = { ...replayed, message_count: (replayed.message_count ?? 0) + 50 };
+    second.client.sessions = [OWN, toolOnly, BRIDGE];
+    await second.host.ticks.find((tick) => tick.ms === DEFAULT_DISCOVER_INTERVAL_MS)?.fn();
+    expect(second.lastPush().attention).toEqual([]);
 
-    const visibleOrder = lastPush().sessions.map((session) => session.key);
-    await host.fireIntent(INTENT_QUEUE, { action: "panelVisible" });
-    client.sessions = [OWN, grown, { ...BRIDGE, updated_at_ms: 3_000_000 }];
-    await host.ticks.find((tick) => tick.ms === DEFAULT_DISCOVER_INTERVAL_MS)?.fn();
-    expect(lastPush().sessions.map((session) => session.key)).toEqual(visibleOrder);
-
-    await host.fireIntent(INTENT_QUEUE, { action: "panelHidden" });
-    client.sessions = [OWN, {
-      ...grown,
-      updated_at_ms: 2_000_000,
+    second.client.sessions = [OWN, {
+      ...toolOnly,
+      updated_at_ms: observedAt - DEFAULT_ATTENTION_SETTLE_MS,
       latest_message_candidates: [{
+        cursor: "atlas-2",
         role: "assistant",
         content: "newer visible conversation",
-        metadata: { timestamp: new Date(1_900_000).toISOString() },
-      }],
-    }, {
-      ...BRIDGE,
-      updated_at_ms: 3_000_000,
-      latest_message_candidates: [{
-        role: "assistant",
-        content: "older visible conversation with a newer heartbeat",
-        metadata: { timestamp: new Date(1_800_000).toISOString() },
-      }],
+        metadata: { timestamp: new Date(observedAt - DEFAULT_ATTENTION_SETTLE_MS).toISOString() },
+      }, ...replayed.latest_message_candidates!],
     }];
-    await host.ticks.find((tick) => tick.ms === DEFAULT_DISCOVER_INTERVAL_MS)?.fn();
-    await host.fireIntent(INTENT_QUEUE, { action: "panelVisible" });
-    expect(lastPush().sessions[0]?.key).toBe(sessionKey(ATLAS.locator));
+    await second.host.ticks.find((tick) => tick.ms === DEFAULT_DISCOVER_INTERVAL_MS)?.fn();
+    await waitFor(() => second.lastPush().attention.some((item) => item.key === key));
+    expect(second.lastPush().attention).toContainEqual(expect.objectContaining({ key, unreadCount: 1 }));
   });
 
-  it("marks completed conversations only while they are in the background", async () => {
-    const { host, client, lastPush } = await sessionRig();
-    client.sessions = [OWN, { ...ATLAS, updated_at_ms: 2_000_050 }, BRIDGE];
+  it("keeps completion attention until the conversation explicitly acknowledges it", async () => {
+    const atlas = {
+      ...ATLAS,
+      latest_message_candidates: [{ cursor: "atlas-0", role: "assistant" as const, content: "baseline", metadata: { timestamp: new Date(1_900_000).toISOString() } }],
+    };
+    const { host, client, lastPush } = await sessionRig([OWN, atlas, BRIDGE]);
+    client.sessions = [OWN, { ...atlas, updated_at_ms: 2_000_050 }, BRIDGE];
     await host.ticks.find((tick) => tick.ms === DEFAULT_DISCOVER_INTERVAL_MS)?.fn();
     expect(lastPush().attention).toEqual([]);
 
@@ -1029,16 +1040,31 @@ describe("messenger session state machine", () => {
     const key = sessionKey(ATLAS.locator);
     await host.fireIntent(INTENT_QUEUE, { action: "panelVisible" });
     await host.fireIntent(INTENT_QUEUE, { action: "attach", key });
-    client.sessions = [OWN, { ...ATLAS, live_status: "busy" }, BRIDGE];
+    client.sessions = [OWN, { ...atlas, live_status: "busy" }, BRIDGE];
     await host.ticks.find((tick) => tick.ms === DEFAULT_DISCOVER_INTERVAL_MS)?.fn();
-    client.sessions = [OWN, { ...ATLAS, live_status: "idle" }, BRIDGE];
+    client.sessions = [OWN, {
+      ...atlas,
+      live_status: "idle",
+      latest_message_candidates: [
+        { cursor: "atlas-1", role: "assistant", content: "visible result", metadata: { timestamp: new Date(1_900_100).toISOString() } },
+        ...atlas.latest_message_candidates,
+      ],
+    }, BRIDGE];
     await host.ticks.find((tick) => tick.ms === DEFAULT_DISCOVER_INTERVAL_MS)?.fn();
-    expect(lastPush().attention).toEqual([]);
+    expect(lastPush().attention).toContainEqual(expect.objectContaining({ key, kind: "finished", unreadCount: 1 }));
+    await host.fireIntent(INTENT_QUEUE, { action: "ack", key });
 
     await host.fireIntent(INTENT_QUEUE, { action: "panelHidden" });
-    client.sessions = [OWN, { ...ATLAS, live_status: "busy" }, BRIDGE];
+    client.sessions = [OWN, { ...atlas, live_status: "busy", latest_message_candidates: [
+      { cursor: "atlas-1", role: "assistant", content: "visible result", metadata: { timestamp: new Date(1_900_100).toISOString() } },
+      ...atlas.latest_message_candidates,
+    ] }, BRIDGE];
     await host.ticks.find((tick) => tick.ms === DEFAULT_DISCOVER_INTERVAL_MS)?.fn();
-    client.sessions = [OWN, { ...ATLAS, live_status: "idle" }, BRIDGE];
+    client.sessions = [OWN, { ...atlas, live_status: "idle", latest_message_candidates: [
+      { cursor: "atlas-2", role: "assistant", content: "background result", metadata: { timestamp: new Date(1_900_200).toISOString() } },
+      { cursor: "atlas-1", role: "assistant", content: "visible result", metadata: { timestamp: new Date(1_900_100).toISOString() } },
+      ...atlas.latest_message_candidates,
+    ] }, BRIDGE];
     await host.ticks.find((tick) => tick.ms === DEFAULT_DISCOVER_INTERVAL_MS)?.fn();
     expect(lastPush().attention).toContainEqual(expect.objectContaining({ key, kind: "finished" }));
 
