@@ -13,7 +13,8 @@
   "browser_specific_settings": {
     "gecko": { "id": "vibewaiting@volter.ai" }
   },
-  "permissions": ["contextMenus", "nativeMessaging", "storage"],
+  "permissions": ["contextMenus", "nativeMessaging", "scripting", "storage"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' ws://127.0.0.1:*"
   },
@@ -44,13 +45,6 @@
     }
   },
   "options_page": "options.html",
-  "content_scripts": [
-    {
-      "matches": ["http://*/*", "https://*/*"],
-      "js": ["content.js"],
-      "run_at": "document_idle"
-    }
-  ],
   "web_accessible_resources": [
     {
       "resources": ["app.html", "app.js", "app.css"],

@@ -17,6 +17,8 @@ import {
 
 const SETTINGS_KEY = "vibewaiting:settings";
 const ATTACH_LINK_MENU = "vibewaiting:attach-link";
+const CONTENT_SCRIPT_ID = "vibewaiting-content";
+const SITE_ORIGINS = ["http://*/*", "https://*/*"];
 const contentPorts = new Set<ExtensionPort>();
 const contentPortsByTab = new Map<number, ExtensionPort>();
 const guestPorts = new Map<
@@ -56,8 +58,6 @@ function installContextMenus(): void {
     });
   });
 }
-
-installContextMenus();
 
 function record(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -115,6 +115,64 @@ function post(port: ExtensionPort, message: unknown): void {
       if (candidate === port) contentPortsByTab.delete(tabId);
   }
 }
+
+let siteAccessSync: Promise<void> = Promise.resolve();
+function syncSiteAccess(injectExisting = false): Promise<void> {
+  siteAccessSync = siteAccessSync.catch(() => undefined).then(async () => {
+    const allowed = await chrome.permissions.contains({ origins: SITE_ORIGINS });
+    const registered = await chrome.scripting.getRegisteredContentScripts({
+      ids: [CONTENT_SCRIPT_ID],
+    });
+    const active = registered.some((script) => script.id === CONTENT_SCRIPT_ID);
+    let registeredNow = false;
+    if (allowed && !active) {
+      await chrome.scripting.registerContentScripts([
+        {
+          id: CONTENT_SCRIPT_ID,
+          js: ["content.js"],
+          matches: SITE_ORIGINS,
+          persistAcrossSessions: true,
+          runAt: "document_idle",
+        },
+      ]);
+      registeredNow = true;
+    } else if (!allowed && active) {
+      for (const port of contentPorts)
+        post(port, { type: "site-access-revoked" });
+      await chrome.scripting.unregisterContentScripts({ ids: [CONTENT_SCRIPT_ID] });
+    }
+    if (allowed) installContextMenus();
+    else chrome.contextMenus.removeAll(() => void chrome.runtime.lastError);
+
+    if (!allowed || (!injectExisting && !registeredNow)) return;
+    const tabs = (await chrome.tabs.query({})).filter(
+      (tab) =>
+        Number.isInteger(tab.id) &&
+        typeof tab.url === "string" &&
+        /^https?:/.test(tab.url),
+    );
+    for (let offset = 0; offset < tabs.length; offset += 12) {
+      await Promise.all(
+        tabs.slice(offset, offset + 12).map((tab) =>
+          chrome.scripting
+            .executeScript({ files: ["content.js"], target: { tabId: tab.id! } })
+            .catch(() => undefined),
+        ),
+      );
+    }
+  });
+  return siteAccessSync;
+}
+
+function requestSiteAccessSync(injectExisting = false): void {
+  void syncSiteAccess(injectExisting).catch((error) => {
+    console.error("Vibewaiting could not synchronize website access", error);
+  });
+}
+
+requestSiteAccessSync();
+chrome.permissions.onAdded.addListener(() => requestSiteAccessSync(true));
+chrome.permissions.onRemoved.addListener(() => requestSiteAccessSync());
 
 function forwardHostEvent(tabId: number, event: unknown): void {
   let delivered = false;
@@ -605,9 +663,19 @@ chrome.runtime.onConnect.addListener((port) => {
 
 chrome.runtime.onMessage.addListener((raw) => {
   const message = record(raw);
-  if (message?.type !== "settings-changed") return;
-  disconnectNative();
-  void ensureNative();
+  if (message?.type === "settings-changed") {
+    disconnectNative();
+    void ensureNative();
+    return;
+  }
+  if (message?.type === "site-access-changed")
+    return syncSiteAccess(message.enabled === true).then(
+      () => ({ ok: true }),
+      (error) => ({
+        ok: false,
+        error: error instanceof Error ? error.message : "website access sync failed",
+      }),
+    );
 });
 
 chrome.action.onClicked.addListener(

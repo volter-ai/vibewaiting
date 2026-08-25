@@ -118,7 +118,7 @@ export function createRemoteAccessCompanion(options: {
       .vw-remote-button { border-color:#494950; color:#eeeef0; background:#2c2c31; }.vw-remote-button:hover { background:#36363c; }
     }
     @media (max-width:760px) { .vw-remote-panel { position:fixed; right:16px; bottom:80px; left:16px; width:auto; } }
-    @media (prefers-reduced-motion:reduce) { .vw-remote-spinner { animation-duration:1.7s; } }
+    @media (prefers-reduced-motion:reduce) { .vw-remote-spinner { animation:none; border-top-color:#d6d6dc; } }
     @keyframes vw-remote-spin { to { transform:rotate(360deg); } }
   `;
 

@@ -9,6 +9,9 @@ the complete generated notes and downloadable artifacts for each version.
 
 - Product-first open-source documentation and release packaging.
 - Reproducible extension, native companion, checksum, and SBOM artifacts.
+- Optional website-access onboarding with immediate grant revocation.
+- Ownership-safe native-host removal with an explicit local-state purge option.
+- A pinned, bundled CLI runtime with complete third-party notices.
 
 ## [0.1.0] - 2026-08-25
 

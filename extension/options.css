@@ -29,6 +29,12 @@ form {
   display: grid;
   gap: 18px;
 }
+.site-access { margin:0 0 28px; padding:16px; border:1px solid #383d4b; border-radius:10px; background:#161922 }
+.site-access h2 { margin:0 0 5px; font-size:18px }
+.site-access p { margin:0 0 14px; font-size:13px }
+.site-access button { display:block }
+.site-access small { display:block; margin-top:8px; color:#a9adba }
+.site-access[data-enabled="true"] button { background:#242731 }
 label {
   display: grid;
   gap: 7px;
@@ -103,3 +109,4 @@ code {
 .remote-handoff small { color:#a9adba; font-size:11px }
 .remote-error { min-height:18px; margin-top:9px!important; color:#ff9b9b!important }
 @media (max-width:480px) { .remote-handoff { grid-template-columns:1fr }.remote-handoff img { justify-self:center } }
+@media (prefers-reduced-motion:reduce) { .switch span::after { transition:none } }

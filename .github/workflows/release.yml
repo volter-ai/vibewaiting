@@ -16,11 +16,15 @@ jobs:
     timeout-minutes: 8
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Verify the tagged commit belongs to main
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
       - run: npm run check
       - run: npm run package:release
       - name: Attest public release artifacts

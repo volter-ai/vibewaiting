@@ -22,9 +22,12 @@ until signed store distribution is available.
 The separately published extension ZIP is the same browser payload for inspection and
 packaging; the native package already contains the durable extension folder you need.
 
-Open Vibewaiting's extension settings, choose the workspace whose sessions you want to
-follow, and select **Save and connect**. A launcher appears on ordinary HTTP and HTTPS
-pages. The default agent choice discovers Claude Code or Codex automatically.
+Open Vibewaiting's extension settings and review the website-access disclosure. Choose
+**Enable on websites** and accept the browser-owned prompt, then choose the workspace
+whose sessions you want to follow and select **Save and connect**. A launcher appears
+on ordinary HTTP and HTTPS pages. The default agent choice discovers Claude Code or
+Codex automatically. You can revoke website access from the same settings section at
+any time; revocation removes the launcher and page-context listener from open tabs.
 
 ## Update
 
@@ -42,16 +45,20 @@ this manual reload path.
 
 ## Remove
 
-Remove Vibewaiting from the browser, then uninstall its package:
+Remove Vibewaiting from the browser, unregister each browser where you installed the
+native host, then uninstall its package:
 
 ```sh
+vibewaiting native uninstall --browser chrome --purge-state
 npm uninstall --global vibewaiting
 ```
 
-The browser native-messaging manifest and local state are intentionally not deleted by
-npm. Remove the manifest printed by `vibewaiting native install` and
-`~/.local/share/vibewaiting` if you want to erase the launcher, drafts, unread state,
-presentation memory, and paired-device state as well.
+Use `--browser brave` or `--browser chromium` for each additional registration. The
+shared launcher remains until the last browser is unregistered. Omit `--purge-state`
+to preserve drafts, unread state, presentation memory, and the stable remote-tunnel
+identity in `~/.vibewaiting` for a later reinstall. Browser
+settings are removed when you remove the extension; paired-device sessions expire when
+the native bridge stops.
 
 ## Install from source
 
