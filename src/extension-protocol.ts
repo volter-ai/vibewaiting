@@ -1,3 +1,7 @@
+import type { RemoteDeviceSnapshot } from "./remote-devices.js";
+
+export type { RemoteDeviceSnapshot } from "./remote-devices.js";
+
 export const VIBEWAITING_EXTENSION_PROTOCOL =
   "vibewaiting/extension-v1" as const;
 export const NATIVE_HOST_NAME = "ai.volter.vibewaiting";
@@ -38,6 +42,10 @@ export type NativeHostCommand =
     }
   | {
       protocol: typeof VIBEWAITING_EXTENSION_PROTOCOL;
+      type: "remote-access-revoke";
+    }
+  | {
+      protocol: typeof VIBEWAITING_EXTENSION_PROTOCOL;
       type: "intent";
       id: string;
       payload: unknown;
@@ -58,6 +66,7 @@ export type NativeHostEvent =
   | {
       protocol: typeof VIBEWAITING_EXTENSION_PROTOCOL;
       type: "remote-access";
+      devices: RemoteDeviceSnapshot;
       pairing?: RemotePairingHandoff;
       passcode: string;
       snapshot: unknown;
@@ -82,6 +91,12 @@ export function parseNativeHostCommand(
 ): NativeHostCommand | null {
   const candidate = record(value);
   if (candidate?.protocol !== VIBEWAITING_EXTENSION_PROTOCOL) return null;
+  if (candidate.type === "remote-access-revoke") {
+    return {
+      protocol: VIBEWAITING_EXTENSION_PROTOCOL,
+      type: "remote-access-revoke",
+    };
+  }
   if (candidate.type === "remote-access-pairing") {
     return {
       protocol: VIBEWAITING_EXTENSION_PROTOCOL,

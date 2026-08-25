@@ -4,6 +4,10 @@ import type {
   RemoteAccessProvider,
 } from "../src/extension-protocol.js";
 import { activeRemotePairingUrl, parseRemotePairingHandoff } from "../src/remote-pairing.js";
+import {
+  parseRemoteDeviceSnapshot,
+  type RemoteDeviceSnapshot,
+} from "../src/remote-devices.js";
 
 type RemoteAccessStatus =
   | "connected"
@@ -26,7 +30,12 @@ export interface RemoteAccessCompanion {
   readonly node: HTMLElement;
   close(): void;
   destroy(): void;
-  update(snapshot: unknown, passcode: unknown, pairing: unknown): void;
+  update(
+    snapshot: unknown,
+    passcode: unknown,
+    pairing: unknown,
+    devices: unknown,
+  ): void;
 }
 
 const REMOTE_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 18.25h9M12 14.75v3.5M5.25 4.75h13.5A2.25 2.25 0 0 1 21 7v5.5a2.25 2.25 0 0 1-2.25 2.25H5.25A2.25 2.25 0 0 1 3 12.5V7a2.25 2.25 0 0 1 2.25-2.25Z"/><path d="M15.5 8.15a4.45 4.45 0 0 1 0 3.7M17.75 6.5a6.7 6.7 0 0 1 0 7"/></svg>`;
@@ -57,6 +66,7 @@ function formatPasscode(value: string): string {
 export function createRemoteAccessCompanion(options: {
   configure(configuration: RemoteAccessConfiguration): void;
   requestPairing(): void;
+  revokeDevices(): void;
 }): RemoteAccessCompanion {
   const root = document.createElement("div");
   root.className = "vw-remote-access";
@@ -88,6 +98,8 @@ export function createRemoteAccessCompanion(options: {
     .vw-remote-code-label { display:block; color:#6a6a74; font-size:11px; }
     .vw-remote-code { display:block; margin:3px 0 8px; color:#202026; font:700 22px/1.15 ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing:.04em; }
     .vw-remote-link { display:block; overflow:hidden; color:#35353c; font-size:11px; text-decoration:underline; text-overflow:ellipsis; white-space:nowrap; }
+    .vw-remote-devices { display:flex; min-height:28px; margin-top:14px; align-items:center; justify-content:space-between; gap:10px; color:#5f5f68; font-size:12px; }
+    .vw-remote-disconnect { padding:4px 0; border:0; color:#555560; background:transparent; font:600 11px/1.2 ui-sans-serif,-apple-system,sans-serif; text-decoration:underline; cursor:pointer; }
     .vw-remote-actions { display:flex; gap:8px; margin-top:16px; }
     .vw-remote-button { min-height:36px; padding:0 12px; border:1px solid #d7d7dc; border-radius:10px; color:#29292f; background:#f7f7f8; font:600 12px/1 ui-sans-serif,-apple-system,sans-serif; cursor:pointer; }
     .vw-remote-button:hover { background:#ededf0; }
@@ -100,6 +112,7 @@ export function createRemoteAccessCompanion(options: {
       .vw-remote-panel { border-color:rgba(255,255,255,.14); color:#f1f1f3; background:#202025; }
       .vw-remote-heading p,.vw-remote-detail,.vw-remote-progress,.vw-remote-code-label { color:#aaaab3; }
       .vw-remote-scan-label { color:#e0e0e4; }
+      .vw-remote-devices { color:#aaaab3; }.vw-remote-disconnect { color:#c9c9cf; }
       .vw-remote-close { color:#b8b8c0; }.vw-remote-close:hover { background:#303036; }
       .vw-remote-code { color:#f1f1f3; }.vw-remote-link { color:#d0d0d5; }
       .vw-remote-button { border-color:#494950; color:#eeeef0; background:#2c2c31; }.vw-remote-button:hover { background:#36363c; }
@@ -154,6 +167,7 @@ export function createRemoteAccessCompanion(options: {
   };
   let passcode = "";
   let pairing: unknown;
+  let devices: RemoteDeviceSnapshot | null = null;
   let qrUrl = "";
   let qrDataUrl = "";
   let copiedTimer: ReturnType<typeof setTimeout> | undefined;
@@ -227,6 +241,14 @@ export function createRemoteAccessCompanion(options: {
       return;
     }
     if (snapshot.status === "connected" && snapshot.publicUrl) {
+      const currentDevices = devices;
+      if (!currentDevices) {
+        const progress = document.createElement("div");
+        progress.className = "vw-remote-progress";
+        progress.textContent = "Checking paired phones…";
+        body.append(progress);
+        return;
+      }
       const pairingUrl = activeRemotePairingUrl(pairing, snapshot.publicUrl);
       const nextQrUrl = pairingUrl ?? snapshot.publicUrl;
       if (nextQrUrl !== qrUrl) {
@@ -264,6 +286,27 @@ export function createRemoteAccessCompanion(options: {
       link.textContent = snapshot.publicUrl;
       details.append(scanLabel, codeLabel, code, link);
       handoff.append(qrImage, details);
+      const deviceRow = document.createElement("div");
+      deviceRow.className = "vw-remote-devices";
+      const deviceStatus = document.createElement("span");
+      deviceStatus.textContent = remoteDeviceSummary(currentDevices);
+      deviceRow.append(deviceStatus);
+      if (currentDevices.authorizedDevices > 0) {
+        const disconnect = document.createElement("button");
+        disconnect.type = "button";
+        disconnect.className = "vw-remote-disconnect";
+        disconnect.textContent = "Disconnect devices";
+        disconnect.addEventListener(
+          "click",
+          () => {
+            disconnect.disabled = true;
+            disconnect.textContent = "Disconnecting…";
+            options.revokeDevices();
+          },
+          { signal: abort.signal },
+        );
+        deviceRow.append(disconnect);
+      }
       const remoteDetail = document.createElement("p");
       remoteDetail.className = "vw-remote-detail";
       remoteDetail.textContent =
@@ -296,7 +339,7 @@ export function createRemoteAccessCompanion(options: {
       stop.textContent = "Stop access";
       stop.addEventListener("click", () => configure(false), { signal: abort.signal });
       actions.append(copy, stop);
-      body.append(handoff, remoteDetail, actions);
+      body.append(handoff, deviceRow, remoteDetail, actions);
       return;
     }
     const detail = document.createElement("p");
@@ -360,13 +403,27 @@ export function createRemoteAccessCompanion(options: {
       abort.abort();
       root.remove();
     },
-    update(rawSnapshot, rawPasscode, rawPairing) {
-      if (!isRemoteAccessSnapshot(rawSnapshot)) return;
+    update(rawSnapshot, rawPasscode, rawPairing, rawDevices) {
+      const nextDevices = parseRemoteDeviceSnapshot(rawDevices);
+      if (!isRemoteAccessSnapshot(rawSnapshot) || !nextDevices) return;
       snapshot = rawSnapshot;
       passcode = typeof rawPasscode === "string" ? rawPasscode : "";
       pairing = rawPairing;
+      devices = nextDevices;
       render();
       schedulePairingRefresh();
     },
   };
+}
+
+function remoteDeviceSummary(devices: RemoteDeviceSnapshot | null): string {
+  if (!devices) return "Checking paired phones…";
+  const { authorizedDevices, connectedDevices } = devices;
+  if (connectedDevices > 0 && authorizedDevices > connectedDevices)
+    return `${connectedDevices} connected · ${authorizedDevices} paired`;
+  if (connectedDevices > 0)
+    return `${connectedDevices} ${connectedDevices === 1 ? "phone" : "phones"} connected`;
+  if (authorizedDevices > 0)
+    return `${authorizedDevices} paired ${authorizedDevices === 1 ? "phone" : "phones"} offline`;
+  return "No paired phones";
 }

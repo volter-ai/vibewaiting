@@ -10,6 +10,10 @@ import {
 } from "../src/browser-context.js";
 import { VIBEWAITING_NEUTRAL } from "../src/theme.js";
 import { launcherBadgeFromState, type LauncherBadgeTone } from "../src/launcher.js";
+import {
+  parseRemoteDeviceSnapshot,
+  type RemoteDeviceSnapshot,
+} from "../src/remote-devices.js";
 
 const SETTINGS_KEY = "vibewaiting:settings";
 const ATTACH_LINK_MENU = "vibewaiting:attach-link";
@@ -33,6 +37,7 @@ let nativeConnecting: Promise<void> | null = null;
 let lastPatch: unknown;
 let lastStatus: { phase: string; message?: string } = { phase: "stopped" };
 let lastRemoteAccess: {
+  devices: RemoteDeviceSnapshot;
   pairing?: unknown;
   passcode: string;
   snapshot: unknown;
@@ -188,6 +193,14 @@ async function requestRemotePairing(): Promise<void> {
   });
 }
 
+async function revokeRemoteDevices(): Promise<void> {
+  await ensureNative();
+  nativePort?.postMessage({
+    protocol: VIBEWAITING_EXTENSION_PROTOCOL,
+    type: "remote-access-revoke",
+  });
+}
+
 function broadcastPatch(patch: unknown): void {
   const launcher = launcherFromPatch(patch);
   for (const port of contentPorts)
@@ -293,7 +306,17 @@ function handleNativeMessage(raw: unknown): void {
     return;
   }
   if (message.type === "remote-access" && typeof message.passcode === "string") {
+    const devices = parseRemoteDeviceSnapshot(message.devices);
+    if (!devices) {
+      lastStatus = {
+        phase: "error",
+        message: "The native host sent invalid remote-device state.",
+      };
+      broadcastStatus();
+      return;
+    }
     lastRemoteAccess = {
+      devices,
       ...(message.pairing ? { pairing: message.pairing } : {}),
       passcode: message.passcode,
       snapshot: message.snapshot,
@@ -493,6 +516,8 @@ chrome.runtime.onConnect.addListener((port) => {
       }
       if (message?.type === "remote-access-pairing-request")
         void requestRemotePairing();
+      if (message?.type === "remote-access-revoke-request")
+        void revokeRemoteDevices();
     });
     port.onDisconnect.addListener(() => optionsPorts.delete(port));
     void ensureNative();
@@ -515,6 +540,10 @@ chrome.runtime.onConnect.addListener((port) => {
         }
         if (message?.type === "remote-access-pairing-request") {
           void requestRemotePairing();
+          return;
+        }
+        if (message?.type === "remote-access-revoke-request") {
+          void revokeRemoteDevices();
           return;
         }
         handleContentMessage(port, tabId, raw);

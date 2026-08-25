@@ -45,9 +45,13 @@ function connect(): void {
       // A malformed server frame cannot mutate the messenger.
     }
   });
-  next.addEventListener("close", () => {
+  next.addEventListener("close", (event) => {
     if (socket !== next) return;
     socket = null;
+    if (event.code === 4001) {
+      location.replace("/");
+      return;
+    }
     const delay = Math.min(10_000, 400 * 2 ** retry++);
     window.setTimeout(connect, delay);
   });

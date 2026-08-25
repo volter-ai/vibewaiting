@@ -25,6 +25,9 @@ const remoteAccess = createRemoteAccessCompanion({
   requestPairing() {
     port?.postMessage({ type: "remote-access-pairing-request" });
   },
+  revokeDevices() {
+    port?.postMessage({ type: "remote-access-revoke-request" });
+  },
 });
 
 const overlay = createOverlay({
@@ -55,7 +58,12 @@ contentPort.onMessage.addListener((raw) => {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return;
   const message = raw as Record<string, unknown>;
   if (message.type === "remote-access") {
-    remoteAccess.update(message.snapshot, message.passcode, message.pairing);
+    remoteAccess.update(
+      message.snapshot,
+      message.passcode,
+      message.pairing,
+      message.devices,
+    );
     return;
   }
   if (message.type === "launcher") {

@@ -1,13 +1,16 @@
-import { randomBytes, randomInt, timingSafeEqual } from "node:crypto";
+import { randomInt, timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
 import { WebSocket as WebSocketClient, WebSocketServer, type WebSocket } from "ws";
 import { type PairingGrant, SingleUsePairingGrants } from "./pairing-grants.js";
+import type { RemoteDeviceSnapshot } from "./remote-devices.js";
+import { RemoteSessionTokens } from "./remote-sessions.js";
 
 const MAX_LOGIN_BYTES = 2_048;
 const MAX_SOCKET_MESSAGE_BYTES = 1_048_576;
 const SESSION_MAX_AGE_SECONDS = 12 * 60 * 60;
+const SESSION_MAX_AGE_MS = SESSION_MAX_AGE_SECONDS * 1_000;
 const LOGIN_WINDOW_MS = 60_000;
 const MAX_LOGIN_ATTEMPTS = 8;
 const SESSION_COOKIE = "vw_remote_session";
@@ -26,14 +29,19 @@ export interface RemoteMessengerSnapshot {
  */
 export class RemoteMessengerServer {
   private readonly passcode = String(randomInt(0, 1_000_000)).padStart(6, "0");
-  private readonly sessionToken = randomBytes(32).toString("base64url");
   private readonly sockets = new Set<WebSocket>();
   private readonly messengerSockets = new Set<WebSocket>();
   private readonly attempts = new Map<string, number[]>();
   private readonly pairingGrants = new SingleUsePairingGrants();
+  private readonly remoteSessions = new RemoteSessionTokens({
+    ttlMs: SESSION_MAX_AGE_MS,
+  });
+  private readonly sessionSockets = new Map<string, Set<WebSocket>>();
   private readonly terminalOrigins = new Map<string, string>();
   private readonly webSockets = new WebSocketServer({ noServer: true });
   private server: ReturnType<typeof createServer> | null = null;
+  private sessionExpiryTimer: ReturnType<typeof setTimeout> | null = null;
+  private deviceSnapshotHandler: ((snapshot: RemoteDeviceSnapshot) => void) | null = null;
   private intentHandler: ((intent: RemoteIntent) => void) | null = null;
   private lastPatch: unknown;
   private assets: { css: Buffer; html: Buffer; javascript: Buffer } | null = null;
@@ -51,19 +59,18 @@ export class RemoteMessengerServer {
     this.assets = { css, html, javascript };
     const server = createServer((request, response) => void this.handleRequest(request, response));
     server.on("upgrade", (request, socket, head) => {
-      if (!this.authorized(request) || !this.sameOrigin(request) || new URL(request.url ?? "/", "http://localhost").pathname !== "/ws") {
+      const sessionId = this.authorizedSessionId(request);
+      if (!sessionId || !this.sameOrigin(request) || new URL(request.url ?? "/", "http://localhost").pathname !== "/ws") {
         socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
         socket.destroy();
         return;
       }
       this.webSockets.handleUpgrade(request, socket, head, (webSocket) => {
-        this.webSockets.emit("connection", webSocket, request);
+        this.trackSessionSocket(webSocket, sessionId);
+        const terminalId = new URL(request.url ?? "/", "http://localhost").searchParams.get("terminalId");
+        if (terminalId) this.attachTerminalSocket(webSocket, request, terminalId);
+        else this.attachSocket(webSocket);
       });
-    });
-    this.webSockets.on("connection", (socket, request) => {
-      const terminalId = new URL(request.url ?? "/", "http://localhost").searchParams.get("terminalId");
-      if (terminalId) this.attachTerminalSocket(socket, request, terminalId);
-      else this.attachSocket(socket);
     });
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
@@ -87,6 +94,28 @@ export class RemoteMessengerServer {
     return this.pairingGrants.issue();
   }
 
+  deviceSnapshot(): RemoteDeviceSnapshot {
+    return {
+      authorizedDevices: this.remoteSessions.size,
+      connectedDevices: this.sessionSockets.size,
+    };
+  }
+
+  setDeviceSnapshotHandler(
+    handler: ((snapshot: RemoteDeviceSnapshot) => void) | null,
+  ): void {
+    this.deviceSnapshotHandler = handler;
+    if (handler) handler(this.deviceSnapshot());
+  }
+
+  revokeRemoteSessions(): void {
+    this.pairingGrants.clear();
+    const revokedIds = this.remoteSessions.revokeAll();
+    this.closeSessionSockets(revokedIds, "Remote access was disconnected");
+    this.scheduleSessionExpiry();
+    this.publishDeviceSnapshot();
+  }
+
   setIntentHandler(handler: ((intent: RemoteIntent) => void) | null): void {
     this.intentHandler = handler;
   }
@@ -103,9 +132,14 @@ export class RemoteMessengerServer {
 
   async stop(): Promise<void> {
     this.intentHandler = null;
+    this.deviceSnapshotHandler = null;
+    if (this.sessionExpiryTimer) clearTimeout(this.sessionExpiryTimer);
+    this.sessionExpiryTimer = null;
     for (const socket of this.sockets) socket.close(1001, "Vibewaiting stopped");
     this.sockets.clear();
     this.messengerSockets.clear();
+    this.sessionSockets.clear();
+    this.remoteSessions.revokeAll();
     this.pairingGrants.clear();
     const server = this.server;
     this.server = null;
@@ -141,6 +175,79 @@ export class RemoteMessengerServer {
     };
     socket.once("close", forget);
     socket.once("error", forget);
+  }
+
+  private trackSessionSocket(socket: WebSocket, sessionId: string): void {
+    const priorCount = this.sessionSockets.size;
+    const session = this.sessionSockets.get(sessionId) ?? new Set<WebSocket>();
+    session.add(socket);
+    this.sessionSockets.set(sessionId, session);
+    if (this.sessionSockets.size !== priorCount) this.publishDeviceSnapshot();
+    let forgotten = false;
+    const forget = (): void => {
+      if (forgotten) return;
+      forgotten = true;
+      const connectedBefore = this.sessionSockets.size;
+      const active = this.sessionSockets.get(sessionId);
+      active?.delete(socket);
+      if (active?.size === 0) this.sessionSockets.delete(sessionId);
+      if (this.sessionSockets.size !== connectedBefore)
+        this.publishDeviceSnapshot();
+    };
+    socket.once("close", forget);
+    socket.once("error", forget);
+  }
+
+  private closeSessionSockets(sessionIds: string[], reason: string): void {
+    for (const sessionId of sessionIds) {
+      const sockets = this.sessionSockets.get(sessionId);
+      this.sessionSockets.delete(sessionId);
+      for (const socket of sockets ?? [])
+        socket.close(4001, reason.slice(0, 120));
+    }
+  }
+
+  private issueRemoteSession(): string {
+    const session = this.remoteSessions.issue();
+    this.closeSessionSockets(session.revokedIds, "Remote access expired");
+    this.scheduleSessionExpiry();
+    this.publishDeviceSnapshot();
+    return session.token;
+  }
+
+  private authorizedSessionId(request: IncomingMessage): string | null {
+    const cookies = parseCookies(request.headers.cookie);
+    const authentication = this.remoteSessions.authenticate(
+      cookies.get(SESSION_COOKIE) ?? "",
+    );
+    if (authentication.revokedIds.length) {
+      this.closeSessionSockets(
+        authentication.revokedIds,
+        "Remote access expired",
+      );
+      this.scheduleSessionExpiry();
+      this.publishDeviceSnapshot();
+    }
+    return authentication.id;
+  }
+
+  private scheduleSessionExpiry(): void {
+    if (this.sessionExpiryTimer) clearTimeout(this.sessionExpiryTimer);
+    this.sessionExpiryTimer = null;
+    const expiresAt = this.remoteSessions.nextExpiry();
+    if (expiresAt === null) return;
+    this.sessionExpiryTimer = setTimeout(() => {
+      this.sessionExpiryTimer = null;
+      const revokedIds = this.remoteSessions.expire();
+      this.closeSessionSockets(revokedIds, "Remote access expired");
+      this.scheduleSessionExpiry();
+      if (revokedIds.length) this.publishDeviceSnapshot();
+    }, Math.max(0, expiresAt - Date.now()));
+    this.sessionExpiryTimer.unref();
+  }
+
+  private publishDeviceSnapshot(): void {
+    this.deviceSnapshotHandler?.(this.deviceSnapshot());
   }
 
   private attachTerminalSocket(socket: WebSocket, request: IncomingMessage, terminalId: string): void {
@@ -283,7 +390,10 @@ export class RemoteMessengerServer {
       return;
     }
     this.attempts.delete(key);
-    response.writeHead(303, { ...this.sessionHeaders(request), location: "/" });
+    response.writeHead(303, {
+      ...this.sessionHeaders(request, this.issueRemoteSession()),
+      location: "/",
+    });
     response.end();
   }
 
@@ -300,24 +410,29 @@ export class RemoteMessengerServer {
       );
       return;
     }
-    response.writeHead(204, this.sessionHeaders(request));
+    response.writeHead(
+      204,
+      this.sessionHeaders(request, this.issueRemoteSession()),
+    );
     response.end();
   }
 
-  private sessionHeaders(request: IncomingMessage): Record<string, string> {
+  private sessionHeaders(
+    request: IncomingMessage,
+    sessionToken: string,
+  ): Record<string, string> {
     const secure =
       request.headers["x-forwarded-proto"] === "https" ||
       (request.socket as typeof request.socket & { encrypted?: boolean }).encrypted === true;
     return {
       ...securityHeaders(),
       "cache-control": "no-store",
-      "set-cookie": `${SESSION_COOKIE}=${this.sessionToken}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_MAX_AGE_SECONDS}${secure ? "; Secure" : ""}`,
+      "set-cookie": `${SESSION_COOKIE}=${sessionToken}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_MAX_AGE_SECONDS}${secure ? "; Secure" : ""}`,
     };
   }
 
   private authorized(request: IncomingMessage): boolean {
-    const cookies = parseCookies(request.headers.cookie);
-    return safeEqual(cookies.get(SESSION_COOKIE) ?? "", this.sessionToken);
+    return this.authorizedSessionId(request) !== null;
   }
 
   private sameOrigin(request: IncomingMessage): boolean {
