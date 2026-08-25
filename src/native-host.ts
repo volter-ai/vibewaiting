@@ -1,9 +1,15 @@
+import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { readFile, stat } from "node:fs/promises";
-import { isAbsolute } from "node:path";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SupercodeHarnessClient } from "@volter-ai-dev/supercode-harness-sdk";
 import type { HarnessId } from "@volter-ai-dev/supercode-harness-sdk";
+import {
+  createRemoteAccessController,
+  type RemoteAccessController,
+} from "@volter-ai-dev/supercode-remote-access";
 import { startDaemon, type Daemon, type WidgetBridge } from "./daemon.js";
 import {
   parseNativeHostCommand,
@@ -18,6 +24,7 @@ import {
 } from "./native-messaging.js";
 import { FileMessengerPersistence } from "./persistence.js";
 import { LocalTerminalService } from "./terminal-service.js";
+import { RemoteMessengerServer } from "./remote-messenger.js";
 
 const HARNESS_IDS = new Set<HarnessId>([
   "claude-code",
@@ -49,8 +56,13 @@ class NativeWidgetBridge implements WidgetBridge {
   private readonly timers = new Set<ReturnType<typeof setInterval>>();
   private removed = false;
 
+  constructor(private readonly remote: RemoteMessengerServer) {
+    remote.setIntentHandler((intent) => this.receive(intent.id, intent.payload));
+  }
+
   async push(patch: unknown): Promise<void> {
     if (this.removed) return;
+    this.remote.push(patch);
     await writeEvent({
       protocol: VIBEWAITING_EXTENSION_PROTOCOL,
       type: "patch",
@@ -107,6 +119,7 @@ class NativeWidgetBridge implements WidgetBridge {
     for (const timer of this.timers) clearInterval(timer);
     this.timers.clear();
     this.intentHandlers.clear();
+    this.remote.setIntentHandler(null);
   }
 }
 
@@ -170,6 +183,21 @@ export async function runNativeHost(extensionOrigin: string | undefined): Promis
   const decoder = new NativeMessageDecoder();
   const terminalService = new LocalTerminalService(extensionOrigin);
   await terminalService.start();
+  const remoteServer = new RemoteMessengerServer(extensionOrigin);
+  const remoteEndpoint = await remoteServer.start();
+  const remoteAccess: RemoteAccessController = createRemoteAccessController({
+    localOrigin: remoteEndpoint.localOrigin,
+    publicPath: "/",
+    tunnelId: await persistentRemoteTunnelId(),
+  });
+  remoteAccess.subscribe((snapshot) => {
+    void writeEvent({
+      protocol: VIBEWAITING_EXTENSION_PROTOCOL,
+      type: "remote-access",
+      passcode: remoteEndpoint.passcode,
+      snapshot,
+    });
+  });
   let daemon: Daemon | null = null;
   let bridge: NativeWidgetBridge | null = null;
   let activeDiscoveryClient: SupercodeHarnessClient | null = null;
@@ -215,7 +243,7 @@ export async function runNativeHost(extensionOrigin: string | undefined): Promis
       requestTimeoutMs: 5_000,
       ...(command ? { command } : {}),
     });
-    const nextBridge = new NativeWidgetBridge();
+    const nextBridge = new NativeWidgetBridge(remoteServer);
     try {
       const nextDaemon = await startDaemon({
         sessionId: "web-extension",
@@ -240,6 +268,11 @@ export async function runNativeHost(extensionOrigin: string | undefined): Promis
         type: "status",
         phase: "ready",
       });
+      if (requested.remoteAccess) {
+        void remoteAccess.configure(requested.remoteAccess).catch((error: unknown) => {
+          process.stderr.write(`[vibewaiting] remote access failed: ${(error as Error)?.message ?? String(error)}\n`);
+        });
+      }
     } catch (error) {
       await client.close().catch(() => undefined);
       await discoveryClient.close().catch(() => undefined);
@@ -253,6 +286,12 @@ export async function runNativeHost(extensionOrigin: string | undefined): Promis
     if (!command) throw new Error("Invalid native host command");
     if (command.type === "start") {
       await start(command.settings);
+      return;
+    }
+    if (command.type === "remote-access") {
+      void remoteAccess.configure(command.configuration).catch((error: unknown) => {
+        process.stderr.write(`[vibewaiting] remote access failed: ${(error as Error)?.message ?? String(error)}\n`);
+      });
       return;
     }
     bridge?.receive(command.id, command.payload);
@@ -289,7 +328,20 @@ export async function runNativeHost(extensionOrigin: string | undefined): Promis
     await commandQueue;
     decoder.finish();
   } finally {
+    remoteAccess.close();
+    await remoteServer.stop();
     await stopDaemon();
     await terminalService.stop();
   }
+}
+
+async function persistentRemoteTunnelId(): Promise<string> {
+  const directory = join(homedir(), ".vibewaiting");
+  const path = join(directory, "remote-tunnel-id");
+  const existing = await readFile(path, "utf8").then((value) => value.trim()).catch(() => "");
+  if (/^vw-[a-f0-9-]{36}$/i.test(existing)) return existing;
+  const created = `vw-${randomUUID()}`;
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await writeFile(path, `${created}\n`, { encoding: "utf8", mode: 0o600 });
+  return created;
 }

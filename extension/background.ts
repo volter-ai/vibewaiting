@@ -4,6 +4,7 @@ import {
   type NativeHostEvent,
   VIBEWAITING_EXTENSION_PROTOCOL,
 } from "../src/extension-protocol.js";
+import { parseRemoteAccessConfiguration } from "../src/extension-protocol.js";
 import {
   parseBrowserContextAttachments,
 } from "../src/browser-context.js";
@@ -31,6 +32,7 @@ let nativeReady = false;
 let nativeConnecting: Promise<void> | null = null;
 let lastPatch: unknown;
 let lastStatus: { phase: string; message?: string } = { phase: "stopped" };
+let lastRemoteAccess: { passcode: string; snapshot: unknown } | null = null;
 
 function installContextMenus(): void {
   const options = {
@@ -151,6 +153,11 @@ function broadcastStatus(): void {
   void chrome.action.setTitle({ title }).catch(() => undefined);
 }
 
+function broadcastRemoteAccess(): void {
+  if (!lastRemoteAccess) return;
+  for (const port of optionsPorts) post(port, { type: "remote-access", ...lastRemoteAccess });
+}
+
 function broadcastPatch(patch: unknown): void {
   const launcher = launcherFromPatch(patch);
   for (const port of contentPorts)
@@ -253,6 +260,11 @@ function handleNativeMessage(raw: unknown): void {
     };
     broadcastStatus();
     if (nativeReady) flushIntents();
+    return;
+  }
+  if (message.type === "remote-access" && typeof message.passcode === "string") {
+    lastRemoteAccess = { passcode: message.passcode, snapshot: message.snapshot };
+    broadcastRemoteAccess();
   }
 }
 
@@ -438,6 +450,20 @@ chrome.runtime.onConnect.addListener((port) => {
   if (port.name === "vibewaiting:options") {
     optionsPorts.add(port);
     post(port, { type: "status", ...lastStatus });
+    if (lastRemoteAccess) post(port, { type: "remote-access", ...lastRemoteAccess });
+    port.onMessage.addListener((raw) => {
+      const message = record(raw);
+      if (message?.type !== "remote-access-configure") return;
+      const configuration = parseRemoteAccessConfiguration(message.configuration);
+      if (!configuration) return;
+      void ensureNative().then(() => {
+        nativePort?.postMessage({
+          protocol: VIBEWAITING_EXTENSION_PROTOCOL,
+          type: "remote-access",
+          configuration,
+        });
+      });
+    });
     port.onDisconnect.addListener(() => optionsPorts.delete(port));
     void ensureNative();
     return;

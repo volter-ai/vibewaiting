@@ -34,6 +34,14 @@ await build({
     options: "extension/options.ts",
   },
 });
+
+const mobileOutput = fileURLToPath(new URL("../dist/mobile/", import.meta.url));
+await mkdir(mobileOutput, { recursive: true });
+await build({
+  ...browserBuild,
+  entryPoints: { app: "mobile/app.tsx" },
+  outdir: mobileOutput,
+});
 await build({
   ...browserBuild,
   chunkNames: "chunks/[name]-[hash]",
@@ -45,6 +53,9 @@ const supercodeCss = await readFile(fileURLToPath(import.meta.resolve("@volter-a
 const xtermCss = await readFile(fileURLToPath(import.meta.resolve("@xterm/xterm/css/xterm.css")), "utf8");
 const terminalCss = await readFile(fileURLToPath(import.meta.resolve("@volter-ai-dev/supercode-terminal/ui/styles.css")), "utf8");
 await writeFile(join(output, "app.css"), `${supercodeCss}\n${xtermCss}\n${terminalCss}\n${PANEL_CSS}`, "utf8");
+const mobileCss = await readFile(join(root, "mobile/styles.css"), "utf8");
+await writeFile(join(mobileOutput, "app.css"), `${supercodeCss}\n${xtermCss}\n${terminalCss}\n${PANEL_CSS}\n${mobileCss}`, "utf8");
+await cp(join(root, "mobile/index.html"), join(mobileOutput, "index.html"));
 for (const name of ["manifest.json", "app.html", "options.html", "options.css"]) {
   await cp(join(source, name), join(output, name));
 }

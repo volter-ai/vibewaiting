@@ -25,6 +25,9 @@ const packages = [
   [join(source, "sdk/client"), "@volter-ai-dev/supercode-client"],
   [join(source, "sdk/ui"), "@volter-ai-dev/supercode-ui"],
 ];
+if (existsSync(join(source, "sdk/remote-access/package.json"))) {
+  packages.push([join(source, "sdk/remote-access"), "@volter-ai-dev/supercode-remote-access"]);
+}
 const terminalCandidates = [
   process.env.SUPERCODE_TERMINAL_DIR,
   join(source, "sdk/terminal"),

@@ -71,6 +71,8 @@ export interface TerminalPanelProps {
 
 export interface MessengerOptions {
   TerminalPanel?: ComponentType<TerminalPanelProps>;
+  /** Standalone surfaces have no enclosing widget to dismiss, so they omit shell-only close chrome. */
+  closable?: boolean;
   requestPresentation?(name: VibewaitingPresentation): Promise<void>;
 }
 
@@ -484,7 +486,7 @@ export function mountMessenger(
     onIntent(intent: SupercodeUiIntent): void | Promise<void> {
       return sendBridgeIntent(intent);
     },
-    onClose: closeMessenger,
+    ...(options.closable === false ? {} : { onClose: closeMessenger }),
     ...(widget.requestBrowserContext
       ? { openKeyboardShortcuts: showShortcutHelp }
       : {}),

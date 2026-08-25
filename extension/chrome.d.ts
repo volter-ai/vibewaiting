@@ -71,3 +71,11 @@ declare const chrome: {
     create(options: { url: string }): Promise<{ id?: number }>;
   };
 };
+declare module "qrcode-generator" {
+  interface QrCode {
+    addData(value: string): void;
+    make(): void;
+    createDataURL(cellSize?: number, margin?: number): string;
+  }
+  export default function qrcode(typeNumber: number, errorCorrectionLevel: "L" | "M" | "Q" | "H"): QrCode;
+}
