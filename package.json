@@ -3,10 +3,26 @@
   "version": "0.1.0",
   "private": true,
   "description": "Vibe code without leaving your browser: a messenger overlay wired to local coding-agent sessions through Supercode.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/volter-ai/vibewaiting.git"
+  },
+  "homepage": "https://github.com/volter-ai/vibewaiting#readme",
+  "bugs": {
+    "url": "https://github.com/volter-ai/vibewaiting/issues"
+  },
+  "keywords": [
+    "ai-agents",
+    "browser-extension",
+    "claude-code",
+    "codex",
+    "developer-tools",
+    "terminal"
+  ],
   "type": "module",
   "license": "MIT",
   "engines": {
-    "node": ">=22"
+    "node": "^22.12.0 || >=24.0.0"
   },
   "bin": {
     "vibewaiting": "dist/cli.js"
@@ -19,7 +35,8 @@
     "build": "tsc -p tsconfig.json && node widget/build.mjs && node extension/build.mjs",
     "build:widget": "node widget/build.mjs",
     "build:extension": "node extension/build.mjs",
-    "dev:extension": "node scripts/sync-local-supercode.mjs && npm run build && node scripts/dev-extension.mjs",
+    "dev:extension": "npm run build && node scripts/dev-extension.mjs",
+    "dev:extension:local": "node scripts/sync-local-supercode.mjs && npm run build && node scripts/dev-extension.mjs",
     "sync:local": "node scripts/sync-local-supercode.mjs",
     "sync:local-ui": "npm run sync:local",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.widget.json && tsc -p tsconfig.extension.json && tsc -p tsconfig.test.json",

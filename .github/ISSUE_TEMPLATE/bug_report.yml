@@ -1,0 +1,79 @@
+name: Bug report
+description: Report a reproducible Vibewaiting defect
+title: "bug: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Remove credentials, private paths, session transcripts,
+        terminal output, and access URLs before submitting. Security issues belong in
+        private vulnerability reporting, not this form.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Extension version, build ID, release, or commit SHA.
+      placeholder: 0.1.0 or abc1234
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      options:
+        - Browser messenger
+        - Terminal view
+        - Mobile remote access
+        - Native host or setup
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, browser and version, and harness (Claude Code or Codex).
+      placeholder: macOS 15, Brave 1.x, Claude Code
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: The smallest numbered sequence that reliably reproduces the issue.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Sanitized evidence
+      description: Optional logs or recordings after removing private data.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed credentials, tokens, tunnel URLs, private paths, and session content.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

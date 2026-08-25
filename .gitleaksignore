@@ -1,0 +1,5 @@
+# The Chrome extension identity is an RSA public key, committed intentionally so unpacked builds
+# keep a stable extension ID. Ignore only the two historical finding fingerprints; other findings
+# in this file or under this rule remain visible.
+84579601813e637d2fef38bdadab1aa5c8e043c2:extension/manifest.json:generic-api-key:6
+b162681d4ed872f8e337acf2b4204d730b99e407:extension/manifest.json:generic-api-key:6

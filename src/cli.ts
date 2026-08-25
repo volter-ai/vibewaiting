@@ -50,7 +50,25 @@ The widget mounts on every page of the attached browser. Keep using that browser
 printed remote-view URL is only for headless, remote, or diagnostic access.
 `;
 
+const NATIVE_INSTALL_USAGE = `Install the Vibewaiting native-messaging host
+
+Usage
+  vibewaiting native install [--browser brave|chrome|chromium|firefox] [--extension-id <id>]
+
+Options
+  --browser <name>     browser manifest to install (default: chrome)
+  --extension-id <id>  unpacked extension ID when it differs from the development ID
+  -h, --help           print this
+
+Native host installation currently supports macOS and Linux. Chrome, Chromium, and
+Brave are the verified extension lane; Firefox packaging remains experimental.
+`;
+
 async function runNativeInstall(argv: readonly string[]): Promise<void> {
+  if (argv.includes("--help") || argv.includes("-h")) {
+    process.stdout.write(NATIVE_INSTALL_USAGE);
+    return;
+  }
   let browser: NativeBrowser | undefined;
   let extensionId: string | undefined;
   for (let index = 0; index < argv.length; index += 1) {
