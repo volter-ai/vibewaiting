@@ -44,19 +44,31 @@ export class RemoteMessengerServer {
   private deviceSnapshotHandler: ((snapshot: RemoteDeviceSnapshot) => void) | null = null;
   private intentHandler: ((intent: RemoteIntent) => void) | null = null;
   private lastPatch: unknown;
-  private assets: { css: Buffer; html: Buffer; javascript: Buffer } | null = null;
+  private assets: {
+    css: Buffer;
+    html: Buffer;
+    icon192: Buffer;
+    icon512: Buffer;
+    javascript: Buffer;
+    manifest: Buffer;
+    serviceWorker: Buffer;
+  } | null = null;
 
   constructor(private readonly terminalProxyOrigin?: string) {}
 
   async start(): Promise<RemoteMessengerSnapshot> {
     if (this.server) return this.snapshot();
     const assetRoot = new URL("./mobile/", import.meta.url);
-    const [html, javascript, css] = await Promise.all([
+    const [html, javascript, css, manifest, serviceWorker, icon192, icon512] = await Promise.all([
       readFile(fileURLToPath(new URL("index.html", assetRoot))),
       readFile(fileURLToPath(new URL("app.js", assetRoot))),
       readFile(fileURLToPath(new URL("app.css", assetRoot))),
+      readFile(fileURLToPath(new URL("manifest.webmanifest", assetRoot))),
+      readFile(fileURLToPath(new URL("service-worker.js", assetRoot))),
+      readFile(fileURLToPath(new URL("icon-192.png", assetRoot))),
+      readFile(fileURLToPath(new URL("icon-512.png", assetRoot))),
     ]);
-    this.assets = { css, html, javascript };
+    this.assets = { css, html, icon192, icon512, javascript, manifest, serviceWorker };
     const server = createServer((request, response) => void this.handleRequest(request, response));
     server.on("upgrade", (request, socket, head) => {
       const sessionId = this.authorizedSessionId(request);
@@ -342,6 +354,44 @@ export class RemoteMessengerServer {
         200,
         "text/javascript; charset=utf-8",
         Buffer.from(PAIRING_JAVASCRIPT),
+        securityHeaders(),
+      );
+      return;
+    }
+    if (this.assets && request.method === "GET" && url.pathname === "/manifest.webmanifest") {
+      respond(
+        response,
+        200,
+        "application/manifest+json; charset=utf-8",
+        this.assets.manifest,
+        securityHeaders(),
+      );
+      return;
+    }
+    if (this.assets && request.method === "GET" && url.pathname === "/service-worker.js") {
+      respond(
+        response,
+        200,
+        "text/javascript; charset=utf-8",
+        this.assets.serviceWorker,
+        {
+          ...securityHeaders(),
+          "cache-control": "no-store",
+          "service-worker-allowed": "/",
+        },
+      );
+      return;
+    }
+    if (
+      this.assets &&
+      request.method === "GET" &&
+      (url.pathname === "/icon-192.png" || url.pathname === "/icon-512.png")
+    ) {
+      respond(
+        response,
+        200,
+        "image/png",
+        url.pathname === "/icon-192.png" ? this.assets.icon192 : this.assets.icon512,
         securityHeaders(),
       );
       return;

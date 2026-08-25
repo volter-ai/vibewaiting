@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { PANEL_CSS } from "../widget/styles.mjs";
+import { createMobileIconPng } from "../mobile/icon-assets.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const source = fileURLToPath(new URL("./", import.meta.url));
@@ -56,17 +57,38 @@ await writeFile(join(output, "app.css"), `${supercodeCss}\n${xtermCss}\n${termin
 const mobileCss = await readFile(join(root, "mobile/styles.css"), "utf8");
 await writeFile(join(mobileOutput, "app.css"), `${supercodeCss}\n${xtermCss}\n${terminalCss}\n${PANEL_CSS}\n${mobileCss}`, "utf8");
 await cp(join(root, "mobile/index.html"), join(mobileOutput, "index.html"));
+await cp(join(root, "mobile/manifest.webmanifest"), join(mobileOutput, "manifest.webmanifest"));
+await cp(join(root, "mobile/service-worker.js"), join(mobileOutput, "service-worker.js"));
+await writeFile(join(mobileOutput, "icon-192.png"), createMobileIconPng(192));
+await writeFile(join(mobileOutput, "icon-512.png"), createMobileIconPng(512));
 for (const name of ["manifest.json", "app.html", "options.html", "options.css"]) {
   await cp(join(source, name), join(output, name));
 }
 
 const assetNames = ["background.js", "content.js", "app.js", "options.js", "app.css"];
 const assetContents = await Promise.all(assetNames.map((name) => readFile(join(output, name))));
+const mobileAssetNames = [
+  "app.js",
+  "app.css",
+  "index.html",
+  "manifest.webmanifest",
+  "service-worker.js",
+  "icon-192.png",
+  "icon-512.png",
+];
+const mobileAssetContents = await Promise.all(
+  mobileAssetNames.map((name) => readFile(join(mobileOutput, name))),
+);
 const buildHash = createHash("sha256");
 for (let index = 0; index < assetNames.length; index += 1) {
   buildHash.update(assetNames[index]);
   buildHash.update("\0");
   buildHash.update(assetContents[index]);
+}
+for (let index = 0; index < mobileAssetNames.length; index += 1) {
+  buildHash.update(`mobile/${mobileAssetNames[index]}`);
+  buildHash.update("\0");
+  buildHash.update(mobileAssetContents[index]);
 }
 const buildId = buildHash.digest("hex").slice(0, 20);
 await writeFile(join(output, "build-id.txt"), `${buildId}\n`, "utf8");
