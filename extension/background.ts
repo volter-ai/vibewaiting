@@ -156,6 +156,24 @@ function broadcastStatus(): void {
 function broadcastRemoteAccess(): void {
   if (!lastRemoteAccess) return;
   for (const port of optionsPorts) post(port, { type: "remote-access", ...lastRemoteAccess });
+  for (const port of contentPorts) post(port, { type: "remote-access", ...lastRemoteAccess });
+}
+
+async function configureRemoteAccess(rawConfiguration: unknown): Promise<void> {
+  const configuration = parseRemoteAccessConfiguration(rawConfiguration);
+  if (!configuration) return;
+  const current = await settings();
+  if (current) {
+    await chrome.storage.local.set({
+      [SETTINGS_KEY]: { ...current, remoteAccess: configuration },
+    });
+  }
+  await ensureNative();
+  nativePort?.postMessage({
+    protocol: VIBEWAITING_EXTENSION_PROTOCOL,
+    type: "remote-access",
+    configuration,
+  });
 }
 
 function broadcastPatch(patch: unknown): void {
@@ -454,15 +472,7 @@ chrome.runtime.onConnect.addListener((port) => {
     port.onMessage.addListener((raw) => {
       const message = record(raw);
       if (message?.type !== "remote-access-configure") return;
-      const configuration = parseRemoteAccessConfiguration(message.configuration);
-      if (!configuration) return;
-      void ensureNative().then(() => {
-        nativePort?.postMessage({
-          protocol: VIBEWAITING_EXTENSION_PROTOCOL,
-          type: "remote-access",
-          configuration,
-        });
-      });
+      void configureRemoteAccess(message.configuration);
     });
     port.onDisconnect.addListener(() => optionsPorts.delete(port));
     void ensureNative();
@@ -475,10 +485,16 @@ chrome.runtime.onConnect.addListener((port) => {
     if (lastPatch !== undefined)
       post(port, { type: "launcher", ...launcherFromPatch(lastPatch) });
     post(port, { type: "status", ...lastStatus });
+    if (lastRemoteAccess) post(port, { type: "remote-access", ...lastRemoteAccess });
     if (tabId !== null)
-      port.onMessage.addListener((message) =>
-        handleContentMessage(port, tabId, message),
-      );
+      port.onMessage.addListener((raw) => {
+        const message = record(raw);
+        if (message?.type === "remote-access-configure") {
+          void configureRemoteAccess(message.configuration);
+          return;
+        }
+        handleContentMessage(port, tabId, raw);
+      });
     port.onDisconnect.addListener(() => {
       contentPorts.delete(port);
       if (tabId !== null && contentPortsByTab.get(tabId) === port)

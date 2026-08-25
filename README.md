@@ -76,18 +76,20 @@ exact extension origin, and closing the viewer
 releases its PTY without killing the durable tmux session. Widget Shell's named presentations keep
 the messenger phone-sized and reshape the same surface for a terminal before terminal UI appears.
 
-### Phone access
+### Remote access
 
-The extension settings page can expose the same Vibewaiting messenger—not a Lucarne porthole—to a
-phone. Turn on **Phone access**, leave the provider on **Automatic**, and scan the displayed QR
-code. Automatic mode prefers a configured stable relay, then a zero-account Cloudflare Quick
-Tunnel, then an already-authenticated ngrok installation. Provider setup is never launched behind
-the user's back; unavailable choices say what is missing.
+While the messenger is open, its **Remote access** companion button appears beside the launcher.
+Opening it starts the automatic secure tunnel and presents the QR, address, and access code in
+place. Closing the messenger hides that control without stopping an active tunnel; **Stop access**
+ends it explicitly. The settings page retains the advanced provider choice. Automatic mode prefers
+a configured stable relay, then a zero-account Cloudflare Quick Tunnel, then an already-authenticated
+ngrok installation. Provider setup is never launched behind the user's back; unavailable choices
+say what is missing.
 
 The QR contains only the HTTPS address. A separately displayed six-digit access code establishes
-an `HttpOnly`, same-site cookie session on the phone and expires with the local native bridge. The
-server binds only to loopback, rate-limits login attempts, validates WebSocket origin and session cookies,
-and never puts local paths, tmux handles, or credentials in the handoff URL. Chat state and intents
+an `HttpOnly`, same-site cookie session on the remote device; that session expires with the local
+native bridge. The server binds only to loopback, rate-limits login attempts, validates WebSocket
+origin and session cookies, and never puts local paths, tmux handles, or credentials in the handoff URL. Chat state and intents
 use one authenticated WebSocket. Terminal attachments are relayed through that same origin with
 their existing opaque, short-lived grant, so the Chat/Terminal header toggle continues to work on
 mobile without exposing the terminal service's local address.
