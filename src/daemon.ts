@@ -27,7 +27,11 @@ import { createNativeInteractiveStart } from "@volter-ai-dev/supercode-harness-s
 import type { DiscoveryQuery, HarnessId, SessionArtifact, SessionDescriptor, SessionFormat, SessionLocator, StructuredLaunch } from "@volter-ai-dev/supercode-harness-sdk";
 import type { ContinuationMode } from "@volter-ai-dev/supercode-ui";
 import { parseSupercodeUiIntent } from "@volter-ai-dev/supercode-ui/core";
-import { dispatchControllerIntent } from "@volter-ai-dev/supercode-ui/controller";
+import {
+  dispatchControllerIntent,
+  projectSubagentInventory,
+  projectSubagentTranscript,
+} from "@volter-ai-dev/supercode-ui/controller";
 import { createLucarneInjector } from "@volter-ai-dev/widget-shell/lucarne";
 import { WidgetHost } from "lucarne/widget/host";
 import {
@@ -576,6 +580,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const discovery: SessionDiscoveryClient | undefined = options.discoveryClient ?? options.client;
   /** The last global scan, held whole — the row keys the panel echoes back resolve through it. */
   let descriptors: readonly SessionDescriptor[] = [];
+  let subagentDescriptors: readonly SessionDescriptor[] = [];
+  let subagentInspector: WidgetState["subagentInspector"] = null;
+  let subagentLoadGeneration = 0;
   const activityBySession = new Map<string, SessionActivityObservation>();
   let activitySubscription: string | null = null;
   let activityLocatorFingerprint = "";
@@ -859,6 +866,23 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       max: sessionLimit,
       preserveOrder: true,
     });
+    const inspector = subagentInspector ? {
+      ...subagentInspector,
+      items: projectSubagentInventory(
+        subagentDescriptors.map((descriptor) => {
+          const activity = activityBySession.get(
+            `${descriptor.locator.harness}\0${descriptor.locator.session_id}`,
+          );
+          return activity ? { ...descriptor, activity } : descriptor;
+        }),
+        {
+          keyFor: (descriptor) => sessionKey(descriptor.locator),
+          now: observedAt,
+          home,
+          maxSessions: 100,
+        },
+      ),
+    } : null;
     const ownRows = projectSessions(descriptors, {
       now: observedAt,
       home,
@@ -939,6 +963,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       // the runtime is connecting and after a failed start; hiding the launcher reads as a freeze.
       harness: projected.harness || startupHarness,
       sessions,
+      subagentInspector: inspector,
       attached,
       owned: attachmentFor(ownRef, ownRows, ownSnapshot.workspace, home),
       attachError,
@@ -1010,6 +1035,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       pill: state.pill,
       startup: state.startup,
       sessions: state.sessions,
+      subagentInspector: state.subagentInspector,
       attached: state.attached,
       owned: state.owned,
       attachError: state.attachError,
@@ -1187,7 +1213,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   const syncActivitySubscription = async (): Promise<void> => {
     if (!activityTransport || stopped) return;
-    const locators = descriptors.map((descriptor) => descriptor.locator);
+    const locators = [...descriptors, ...subagentDescriptors].map((descriptor) => descriptor.locator);
     const fingerprint = locators.map(sessionKey).sort().join("\n");
     if (fingerprint === activityLocatorFingerprint) return;
     activityLocatorFingerprint = fingerprint;
@@ -1765,6 +1791,129 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         await pushNow(true);
         void refreshNativeSessions().then(() => pushNow(false, "inventory"));
       }
+      return;
+    }
+    if (uiIntent?.action === "openSubagents") {
+      const parent = descriptors.find(
+        (descriptor) => sessionKey(descriptor.locator) === uiIntent.key,
+      );
+      if (!parent) {
+        subagentInspector = {
+          parentKey: uiIntent.key,
+          parentTitle: "Unavailable chat",
+          status: "error",
+          items: [],
+          selectedKey: null,
+          transcript: [],
+          error: "This conversation is no longer available.",
+        };
+        await pushNow(false, "inventory");
+        return;
+      }
+      if (subagentInspector?.parentKey === uiIntent.key && subagentInspector.status === "ready") {
+        subagentInspector = {
+          ...subagentInspector,
+          status: "ready",
+          selectedKey: null,
+          transcript: [],
+          error: null,
+        };
+        await pushNow(false, "inventory");
+        return;
+      }
+      const generation = ++subagentLoadGeneration;
+      const [parentRow] = projectSessions([parent], { now: now(), home, max: 1 });
+      subagentDescriptors = [];
+      subagentInspector = {
+        parentKey: uiIntent.key,
+        parentTitle: parentRow?.title ?? parent.title ?? "Untitled chat",
+        status: "loading",
+        items: [],
+        selectedKey: null,
+        transcript: [],
+        error: null,
+      };
+      await pushNow(false, "inventory");
+      try {
+        if (!discovery) throw new Error("Session discovery is unavailable.");
+        const result = await discovery.discover({
+          harnesses: [parent.locator.harness],
+          include_child_sessions: true,
+          root_session_id: parent.locator.session_id,
+          include_topic_candidates: true,
+          limit: 101,
+        });
+        if (stopped || generation !== subagentLoadGeneration) return;
+        subagentDescriptors = result.sessions.filter(
+          (descriptor) => descriptor.parent_session_id != null,
+        ).slice(0, 100);
+        subagentInspector = {
+          ...subagentInspector,
+          status: "ready",
+          error: null,
+        };
+        await syncActivitySubscription();
+      } catch (error) {
+        if (stopped || generation !== subagentLoadGeneration) return;
+        subagentInspector = {
+          ...subagentInspector,
+          status: "error",
+          error: message(error),
+        };
+      }
+      await pushNow(false, "inventory");
+      return;
+    }
+    if (uiIntent?.action === "openSubagent") {
+      const child = subagentInspector?.parentKey === uiIntent.parentKey
+        ? subagentDescriptors.find(
+            (descriptor) => sessionKey(descriptor.locator) === uiIntent.key,
+          )
+        : undefined;
+      if (!child || !subagentInspector) {
+        if (subagentInspector) {
+          subagentInspector = { ...subagentInspector, status: "error", error: "This subagent is no longer available." };
+          await pushNow(false, "inventory");
+        }
+        return;
+      }
+      const generation = ++subagentLoadGeneration;
+      subagentInspector = {
+        ...subagentInspector,
+        status: "loading",
+        selectedKey: uiIntent.key,
+        transcript: [],
+        error: null,
+      };
+      await pushNow(false, "inventory");
+      try {
+        const session = await requireClient(options).session(child.locator).load({
+          view: PASSIVE_MIRROR_VIEW,
+        });
+        if (stopped || generation !== subagentLoadGeneration) return;
+        subagentInspector = {
+          ...subagentInspector,
+          status: "ready",
+          transcript: projectSubagentTranscript(session, {
+            prefix: uiIntent.key,
+            maxEntries: options.projection?.maxEntries ?? DEFAULT_MAX_ENTRIES,
+            maxEntryChars: options.projection?.maxEntryChars ?? 16_000,
+          }),
+          error: null,
+        };
+      } catch (error) {
+        if (stopped || generation !== subagentLoadGeneration) return;
+        subagentInspector = { ...subagentInspector, status: "error", error: message(error) };
+      }
+      await pushNow(false, "inventory");
+      return;
+    }
+    if (uiIntent?.action === "closeSubagents") {
+      subagentLoadGeneration += 1;
+      subagentDescriptors = [];
+      subagentInspector = null;
+      await syncActivitySubscription();
+      await pushNow(false, "inventory");
       return;
     }
     if (uiIntent?.action === "loadSessions") {

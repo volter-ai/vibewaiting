@@ -418,6 +418,70 @@ describe("messenger session state machine", () => {
     expect(client.activeFollows).toBe(1);
   });
 
+  it("keeps native children under their parent and loads one bounded read-only detail on demand", async () => {
+    const parent = descriptor({
+      harness: "codex",
+      sessionId: "root-session",
+      title: "Ship the inspector",
+      childSessionCount: 2,
+      updatedAtMs: 3_000_000,
+    });
+    const working = descriptor({
+      harness: "codex",
+      sessionId: "working-child",
+      parentSessionId: parent.locator.session_id,
+      title: "Run the focused checks",
+      liveStatus: "busy",
+      updatedAtMs: 2_000_000,
+      messages: Array.from({ length: 140 }, (_, index) => `child-message-${index}`),
+    });
+    const idle = descriptor({
+      harness: "codex",
+      sessionId: "idle-child",
+      parentSessionId: parent.locator.session_id,
+      title: "Review the API",
+      updatedAtMs: 2_500_000,
+    });
+    const { host, client, lastPush } = await sessionRig([parent, working, idle]);
+
+    expect(lastPush().sessions).toHaveLength(1);
+    expect(lastPush().sessions[0]).toMatchObject({
+      key: sessionKey(parent.locator),
+      subagentCount: 2,
+    });
+
+    await host.fireIntent(INTENT_QUEUE, { action: "openSubagents", key: sessionKey(parent.locator) });
+    expect(lastPush().subagentInspector).toMatchObject({
+      parentKey: sessionKey(parent.locator),
+      status: "ready",
+      selectedKey: null,
+    });
+    expect(lastPush().subagentInspector?.items.map((row) => [row.key, row.activity])).toEqual([
+      [sessionKey(working.locator), "working"],
+      [sessionKey(idle.locator), "idle"],
+    ]);
+    expect(client.discoverQueries.at(-1)).toMatchObject({
+      include_child_sessions: true,
+      root_session_id: parent.locator.session_id,
+    });
+
+    await host.fireIntent(INTENT_QUEUE, {
+      action: "openSubagent",
+      parentKey: sessionKey(parent.locator),
+      key: sessionKey(working.locator),
+    });
+    expect(lastPush().subagentInspector).toMatchObject({
+      status: "ready",
+      selectedKey: sessionKey(working.locator),
+    });
+    expect(lastPush().subagentInspector?.transcript).toHaveLength(120);
+    expect(lastPush().subagentInspector?.transcript[0]?.text).toBe("child-message-20");
+
+    await host.fireIntent(INTENT_QUEUE, { action: "closeSubagents" });
+    expect(lastPush().subagentInspector).toBeNull();
+    expect(lastPush().sessions).toHaveLength(1);
+  });
+
   it("messages a proven live peer without taking ownership or fabricating a local transcript row", async () => {
     const live = descriptor({
       sessionId: "live-1",

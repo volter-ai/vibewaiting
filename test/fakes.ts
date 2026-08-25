@@ -163,6 +163,8 @@ export function descriptor(over: {
   messages?: string[];
   liveEndpoint?: string | null;
   liveStatus?: "running" | "busy" | "idle" | null;
+  parentSessionId?: string | null;
+  childSessionCount?: number;
 } = {}): SessionDescriptor & { text: string } {
   const harness = over.harness ?? "claude-code";
   const sessionId = over.sessionId ?? "sess-1";
@@ -181,6 +183,8 @@ export function descriptor(over: {
     model: over.model === undefined ? "claude-opus-5" : over.model,
     ...(over.liveEndpoint !== undefined ? { live_endpoint: over.liveEndpoint } : {}),
     ...(over.liveStatus !== undefined ? { live_status: over.liveStatus } : {}),
+    ...(over.parentSessionId !== undefined ? { parent_session_id: over.parentSessionId } : {}),
+    ...(over.childSessionCount !== undefined ? { child_session_count: over.childSessionCount } : {}),
     text: over.text ?? "hello from another window",
     ...(over.messages ? { messages: [...over.messages] } : {}),
   };
@@ -216,7 +220,13 @@ export class FakeHarnessClient implements HarnessClientAdapter {
   /** Persisted sessions on this fake box — what `discover` returns and `session()` can load/follow. */
   sessions: Array<SessionDescriptor & { text?: string; messages?: string[] }>;
   /** Every discovery query seen, so a test can prove the GLOBAL scan carries no workspace. */
-  readonly discoverQueries: Array<{ workspace?: string; harnesses?: HarnessId[]; limit?: number }> = [];
+  readonly discoverQueries: Array<{
+    workspace?: string;
+    harnesses?: HarnessId[];
+    limit?: number;
+    include_child_sessions?: boolean;
+    root_session_id?: string;
+  }> = [];
   /** Followers currently streaming. The leak check: this must settle back to one attachment's worth. */
   activeFollows = 0;
   closeCalls = 0;
@@ -248,13 +258,23 @@ export class FakeHarnessClient implements HarnessClientAdapter {
   }
 
   /** Global when `workspace` is absent (the Sessions panel), workspace-scoped when a controller asks. */
-  async discover(query: { workspace?: string; harnesses?: HarnessId[]; limit?: number } = {}): Promise<{
+  async discover(query: {
+    workspace?: string;
+    harnesses?: HarnessId[];
+    limit?: number;
+    include_child_sessions?: boolean;
+    root_session_id?: string;
+  } = {}): Promise<{
     sessions: DiscoverableSessionDescriptor[];
   }> {
     this.discoverQueries.push(query);
     const scoped = this.sessions.filter((session) =>
       (query.workspace === undefined || session.cwd === query.workspace)
-      && (query.harnesses === undefined || query.harnesses.includes(session.locator.harness)));
+      && (query.harnesses === undefined || query.harnesses.includes(session.locator.harness))
+      && (query.include_child_sessions === true || session.parent_session_id == null)
+      && (query.root_session_id === undefined
+        || session.locator.session_id === query.root_session_id
+        || session.parent_session_id === query.root_session_id));
     return { sessions: scoped.slice(0, query.limit ?? scoped.length).map(({ text: _text, ...rest }) => rest) };
   }
 
@@ -443,8 +463,8 @@ class FakeManagedSession {
     return this.#record.locator;
   }
 
-  async load(options: { tailMessages?: number } = {}): Promise<NormalizedSession> {
-    return this.#session(options.tailMessages);
+  async load(options: { tailMessages?: number; view?: { tailMessages?: number } } = {}): Promise<NormalizedSession> {
+    return this.#session(options.view?.tailMessages ?? options.tailMessages);
   }
 
   async *follow(options: { signal?: AbortSignal; tailMessages?: number } = {}): AsyncGenerator<SessionWatchEvent> {
