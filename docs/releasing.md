@@ -20,4 +20,7 @@ publishes:
 
 GitHub generates release notes from the merged pull requests. Never publish an artifact
 built from an uncommitted tree. Browser-store signing is a separate release lane and is
-not implied by the GitHub ZIP.
+not implied by the GitHub ZIP. Public releases also receive GitHub/Sigstore build
+provenance, verifiable with `gh attestation verify <artifact> --repo volter-ai/vibewaiting`.
+The attestation step stays off while the repository is private because GitHub Free and
+Team plans expose private attestations only through Enterprise Cloud.
