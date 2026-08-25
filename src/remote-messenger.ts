@@ -14,6 +14,7 @@ const SESSION_MAX_AGE_MS = SESSION_MAX_AGE_SECONDS * 1_000;
 const LOGIN_WINDOW_MS = 60_000;
 const MAX_LOGIN_ATTEMPTS = 8;
 const SESSION_COOKIE = "vw_remote_session";
+const INSTALL_METADATA_MARKER = "<!-- VIBEWAITING_INSTALL_METADATA -->";
 
 type RemoteIntent = { id: string; payload: unknown };
 
@@ -40,6 +41,7 @@ export class RemoteMessengerServer {
   private readonly terminalOrigins = new Map<string, string>();
   private readonly webSockets = new WebSocketServer({ noServer: true });
   private server: ReturnType<typeof createServer> | null = null;
+  private installableHost: string | null = null;
   private sessionExpiryTimer: ReturnType<typeof setTimeout> | null = null;
   private deviceSnapshotHandler: ((snapshot: RemoteDeviceSnapshot) => void) | null = null;
   private intentHandler: ((intent: RemoteIntent) => void) | null = null;
@@ -47,6 +49,7 @@ export class RemoteMessengerServer {
   private assets: {
     css: Buffer;
     html: Buffer;
+    installableHtml: Buffer;
     icon192: Buffer;
     icon512: Buffer;
     javascript: Buffer;
@@ -59,8 +62,9 @@ export class RemoteMessengerServer {
   async start(): Promise<RemoteMessengerSnapshot> {
     if (this.server) return this.snapshot();
     const assetRoot = new URL("./mobile/", import.meta.url);
-    const [html, javascript, css, manifest, serviceWorker, icon192, icon512] = await Promise.all([
+    const [html, installMetadata, javascript, css, manifest, serviceWorker, icon192, icon512] = await Promise.all([
       readFile(fileURLToPath(new URL("index.html", assetRoot))),
+      readFile(fileURLToPath(new URL("install-metadata.html", assetRoot))),
       readFile(fileURLToPath(new URL("app.js", assetRoot))),
       readFile(fileURLToPath(new URL("app.css", assetRoot))),
       readFile(fileURLToPath(new URL("manifest.webmanifest", assetRoot))),
@@ -68,7 +72,23 @@ export class RemoteMessengerServer {
       readFile(fileURLToPath(new URL("icon-192.png", assetRoot))),
       readFile(fileURLToPath(new URL("icon-512.png", assetRoot))),
     ]);
-    this.assets = { css, html, icon192, icon512, javascript, manifest, serviceWorker };
+    const htmlSource = html.toString("utf8");
+    if (!htmlSource.includes(INSTALL_METADATA_MARKER))
+      throw new Error("Mobile messenger install metadata marker is missing");
+    this.assets = {
+      css,
+      html: Buffer.from(htmlSource.replace(INSTALL_METADATA_MARKER, "")),
+      installableHtml: Buffer.from(
+        htmlSource
+          .replace(INSTALL_METADATA_MARKER, installMetadata.toString("utf8"))
+          .replace("<html lang=\"en\">", "<html lang=\"en\" data-installable=\"true\">"),
+      ),
+      icon192,
+      icon512,
+      javascript,
+      manifest,
+      serviceWorker,
+    };
     const server = createServer((request, response) => void this.handleRequest(request, response));
     server.on("upgrade", (request, socket, head) => {
       const sessionId = this.authorizedSessionId(request);
@@ -99,6 +119,10 @@ export class RemoteMessengerServer {
     const address = this.server?.address();
     if (!address || typeof address === "string") throw new Error("Remote messenger is not running");
     return { localOrigin: `http://127.0.0.1:${address.port}`, passcode: this.passcode };
+  }
+
+  setInstallableOrigin(publicUrl: string | null): void {
+    this.installableHost = publicUrl ? new URL(publicUrl).host.toLowerCase() : null;
   }
 
   createPairingGrant(): PairingGrant {
@@ -358,17 +382,28 @@ export class RemoteMessengerServer {
       );
       return;
     }
-    if (this.assets && request.method === "GET" && url.pathname === "/manifest.webmanifest") {
+    const installable = this.isInstallableRequest(request);
+    if (
+      this.assets &&
+      installable &&
+      request.method === "GET" &&
+      url.pathname === "/manifest.webmanifest"
+    ) {
       respond(
         response,
         200,
         "application/manifest+json; charset=utf-8",
         this.assets.manifest,
-        securityHeaders(),
+        { ...securityHeaders(), "cache-control": "no-store" },
       );
       return;
     }
-    if (this.assets && request.method === "GET" && url.pathname === "/service-worker.js") {
+    if (
+      this.assets &&
+      installable &&
+      request.method === "GET" &&
+      url.pathname === "/service-worker.js"
+    ) {
       respond(
         response,
         200,
@@ -380,6 +415,16 @@ export class RemoteMessengerServer {
           "service-worker-allowed": "/",
         },
       );
+      return;
+    }
+    if (
+      request.method === "GET" &&
+      (url.pathname === "/manifest.webmanifest" || url.pathname === "/service-worker.js")
+    ) {
+      respond(response, 404, "text/plain; charset=utf-8", Buffer.from("Not found"), {
+        ...securityHeaders(),
+        "cache-control": "no-store",
+      });
       return;
     }
     if (
@@ -408,7 +453,13 @@ export class RemoteMessengerServer {
       return;
     }
     if (url.pathname === "/" || url.pathname === "/index.html") {
-      respond(response, 200, "text/html; charset=utf-8", this.assets.html, securityHeaders());
+      respond(
+        response,
+        200,
+        "text/html; charset=utf-8",
+        installable ? this.assets.installableHtml : this.assets.html,
+        { ...securityHeaders(), "cache-control": "no-store" },
+      );
       return;
     }
     if (url.pathname === "/app.js") {
@@ -420,6 +471,10 @@ export class RemoteMessengerServer {
       return;
     }
     respond(response, 404, "text/plain; charset=utf-8", Buffer.from("Not found"), securityHeaders());
+  }
+
+  private isInstallableRequest(request: IncomingMessage): boolean {
+    return this.installableHost !== null && requestHost(request) === this.installableHost;
   }
 
   private async login(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -487,7 +542,7 @@ export class RemoteMessengerServer {
 
   private sameOrigin(request: IncomingMessage): boolean {
     const origin = request.headers.origin;
-    const host = String(request.headers["x-forwarded-host"] ?? request.headers.host ?? "").split(",", 1)[0]?.trim();
+    const host = requestHost(request);
     if (!origin || !host) return false;
     try {
       return new URL(origin).host === host;
@@ -495,6 +550,15 @@ export class RemoteMessengerServer {
       return false;
     }
   }
+}
+
+function requestHost(request: IncomingMessage): string {
+  return (
+    String(request.headers["x-forwarded-host"] ?? request.headers.host ?? "")
+      .split(",", 1)[0]
+      ?.trim()
+      .toLowerCase() ?? ""
+  );
 }
 
 function isRemoteIntent(value: unknown): value is RemoteIntent {

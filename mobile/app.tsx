@@ -209,8 +209,15 @@ window.addEventListener("resize", syncViewport);
 window.visualViewport?.addEventListener("resize", syncViewport);
 window.visualViewport?.addEventListener("scroll", syncViewport);
 
-if ("serviceWorker" in navigator && window.isSecureContext)
-  void navigator.serviceWorker.register("/service-worker.js", { scope: "/" }).catch(() => undefined);
+if ("serviceWorker" in navigator) {
+  if (document.documentElement.dataset.installable === "true" && window.isSecureContext)
+    void navigator.serviceWorker.register("/service-worker.js", { scope: "/" }).catch(() => undefined);
+  else
+    void navigator.serviceWorker
+      .getRegistration("/")
+      .then((registration) => registration?.unregister())
+      .catch(() => undefined);
+}
 
 connect();
 mountMessenger(transport, {

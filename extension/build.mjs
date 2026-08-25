@@ -57,6 +57,7 @@ await writeFile(join(output, "app.css"), `${supercodeCss}\n${xtermCss}\n${termin
 const mobileCss = await readFile(join(root, "mobile/styles.css"), "utf8");
 await writeFile(join(mobileOutput, "app.css"), `${supercodeCss}\n${xtermCss}\n${terminalCss}\n${PANEL_CSS}\n${mobileCss}`, "utf8");
 await cp(join(root, "mobile/index.html"), join(mobileOutput, "index.html"));
+await cp(join(root, "mobile/install-metadata.html"), join(mobileOutput, "install-metadata.html"));
 await cp(join(root, "mobile/manifest.webmanifest"), join(mobileOutput, "manifest.webmanifest"));
 await cp(join(root, "mobile/service-worker.js"), join(mobileOutput, "service-worker.js"));
 await writeFile(join(mobileOutput, "icon-192.png"), createMobileIconPng(192));
@@ -71,6 +72,7 @@ const mobileAssetNames = [
   "app.js",
   "app.css",
   "index.html",
+  "install-metadata.html",
   "manifest.webmanifest",
   "service-worker.js",
   "icon-192.png",

@@ -213,8 +213,8 @@ function renderRemoteAccess(
       : "QR code for opening Vibewaiting remotely";
   }
   if (remoteStability) remoteStability.textContent = rawSnapshot.stability === "temporary"
-    ? "This link changes when the tunnel reconnects."
-    : "This link remains stable across restarts.";
+    ? "Temporary browser link. It is intentionally not installable."
+    : "Stable app link. Open it on your phone to install.";
   if (remoteDevices) remoteDevices.textContent = remoteDeviceSummary(devices);
   if (remoteDisconnect) {
     remoteDisconnect.hidden = devices.authorizedDevices === 0;
