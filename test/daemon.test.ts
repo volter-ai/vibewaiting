@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_ATTENTION_SETTLE_MS,
   DEFAULT_DISCOVER_INTERVAL_MS,
@@ -218,7 +218,7 @@ async function failingAttachRig(): Promise<Rig> {
     workspace: "/tmp/project",
     client,
     pushDebounceMs: 5,
-    attachTimeoutMs: 5,
+    attachTimeoutMs: 250,
     home: "/home/dev",
     now: () => 2_000_000,
     attachHost: async () => host,
@@ -928,7 +928,14 @@ describe("messenger session state machine", () => {
 
   it("turns a timed-out attach into row state, then clears it without leaking followers", async () => {
     const { daemon, client, lastPush } = await failingAttachRig();
-    await daemon.attach(sessionKey(ATLAS.locator));
+    vi.useFakeTimers();
+    try {
+      const timedOut = daemon.attach(sessionKey(ATLAS.locator));
+      await vi.advanceTimersByTimeAsync(250);
+      await timedOut;
+    } finally {
+      vi.useRealTimers();
+    }
     expect(lastPush().attachError).toMatchObject({ key: sessionKey(ATLAS.locator) });
 
     await Promise.all([
