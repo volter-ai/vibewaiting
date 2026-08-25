@@ -1,19 +1,58 @@
 import { mountMessenger } from "../widget/messenger.js";
 import { TerminalViewer } from "@volter-ai-dev/supercode-terminal/ui";
 import type { JSX } from "preact";
+import { useRef } from "preact/hooks";
 import type { MessengerTransport } from "../widget/transport.js";
 import type { TerminalPanelProps } from "../widget/messenger.js";
 
 function MobileTerminalPanel({ state, send }: TerminalPanelProps): JSX.Element {
   if (!state.attachment) throw new Error("Terminal mode requires an attachment.");
   const attachment = state.attachment;
+  const surface = useRef<HTMLElement>(null);
+  const terminalInput = (): HTMLTextAreaElement | null =>
+    surface.current?.querySelector<HTMLTextAreaElement>(".xterm-helper-textarea") ?? null;
+  const focusTerminal = (): void => terminalInput()?.focus({ preventScroll: true });
+  const pressTerminalKey = (
+    key: string,
+    code: string,
+    modifiers: Pick<KeyboardEventInit, "ctrlKey"> = {},
+  ): void => {
+    const input = terminalInput();
+    if (!input) return;
+    for (const type of ["keydown", "keyup"])
+      input.dispatchEvent(
+        new KeyboardEvent(type, {
+          ...modifiers,
+          key,
+          code,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+  };
   return (
-    <section class="vw-terminal-surface" aria-label="Terminal view">
+    <section ref={surface} class="vw-terminal-surface" aria-label="Terminal view">
       <TerminalViewer
         active
         attachment={attachment}
         onRetry={() => send({ action: "terminalAttach", mode: attachment.mode, sessionId: attachment.sessionId })}
       />
+      {attachment.mode === "control" ? (
+        <nav
+          class="vw-mobile-terminal-keys"
+          aria-label="Terminal keys"
+          onPointerDown={(event) => event.preventDefault()}
+        >
+          <button type="button" aria-label="Show keyboard" onClick={focusTerminal}>Keyboard</button>
+          <button type="button" onClick={() => pressTerminalKey("Escape", "Escape")}>Esc</button>
+          <button type="button" onClick={() => pressTerminalKey("Tab", "Tab")}>Tab</button>
+          <button type="button" aria-label="Arrow left" onClick={() => pressTerminalKey("ArrowLeft", "ArrowLeft")}>←</button>
+          <button type="button" aria-label="Arrow up" onClick={() => pressTerminalKey("ArrowUp", "ArrowUp")}>↑</button>
+          <button type="button" aria-label="Arrow down" onClick={() => pressTerminalKey("ArrowDown", "ArrowDown")}>↓</button>
+          <button type="button" aria-label="Arrow right" onClick={() => pressTerminalKey("ArrowRight", "ArrowRight")}>→</button>
+          <button type="button" aria-label="Control C" onClick={() => pressTerminalKey("c", "KeyC", { ctrlKey: true })}>^C</button>
+        </nav>
+      ) : null}
     </section>
   );
 }
@@ -24,14 +63,61 @@ const pending: string[] = [];
 let socket: WebSocket | null = null;
 let sequence = 0;
 let retry = 0;
+let retryTimer: number | undefined;
+let destroyed = false;
+let connectedOnce = false;
 const clientId = crypto.randomUUID();
+const connectionStatus = document.querySelector<HTMLElement>("#connection-status");
+
+function setConnectionStatus(state: "connected" | "offline" | "reconnecting"): void {
+  if (!connectionStatus) return;
+  connectionStatus.dataset.state = state;
+  connectionStatus.hidden = state === "connected" || (!connectedOnce && state === "reconnecting");
+  connectionStatus.textContent = state === "offline" ? "Waiting for network" : "Reconnecting…";
+}
+
+function clearRetry(): void {
+  if (retryTimer === undefined) return;
+  window.clearTimeout(retryTimer);
+  retryTimer = undefined;
+}
+
+function scheduleReconnect(): void {
+  clearRetry();
+  if (destroyed || document.visibilityState !== "visible") return;
+  if (!navigator.onLine) {
+    setConnectionStatus("offline");
+    return;
+  }
+  setConnectionStatus("reconnecting");
+  const delay = Math.min(10_000, 400 * 2 ** retry++);
+  retryTimer = window.setTimeout(() => {
+    retryTimer = undefined;
+    connect();
+  }, delay);
+}
 
 function connect(): void {
+  if (
+    destroyed ||
+    document.visibilityState !== "visible" ||
+    socket?.readyState === WebSocket.OPEN ||
+    socket?.readyState === WebSocket.CONNECTING
+  ) return;
+  clearRetry();
+  if (!navigator.onLine) {
+    setConnectionStatus("offline");
+    return;
+  }
+  if (connectedOnce) setConnectionStatus("reconnecting");
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
   const next = new WebSocket(`${protocol}//${location.host}/ws`);
   socket = next;
   next.addEventListener("open", () => {
+    if (socket !== next) return;
     retry = 0;
+    connectedOnce = true;
+    setConnectionStatus("connected");
     for (const message of pending.splice(0)) next.send(message);
   });
   next.addEventListener("message", (event) => {
@@ -52,8 +138,7 @@ function connect(): void {
       location.replace("/");
       return;
     }
-    const delay = Math.min(10_000, 400 * 2 ** retry++);
-    window.setTimeout(connect, delay);
+    scheduleReconnect();
   });
 }
 
@@ -84,6 +169,8 @@ const transport: MessengerTransport = {
   setLauncher() {},
   closeShell() {},
   destroy() {
+    destroyed = true;
+    clearRetry();
     socket?.close();
     socket = null;
     patchListeners.clear();
@@ -94,7 +181,36 @@ const transport: MessengerTransport = {
 document.addEventListener("visibilitychange", () => {
   const visible = document.visibilityState === "visible";
   for (const listener of visibilityListeners) listener(visible);
+  if (visible && socket?.readyState !== WebSocket.OPEN) connect();
+  else if (!visible) clearRetry();
 });
+
+window.addEventListener("online", () => {
+  if (socket?.readyState === WebSocket.OPEN) setConnectionStatus("connected");
+  else connect();
+});
+window.addEventListener("offline", () => setConnectionStatus("offline"));
+window.addEventListener("pageshow", () => connect());
+
+function syncViewport(): void {
+  const viewport = window.visualViewport;
+  document.documentElement.style.setProperty(
+    "--vw-mobile-height",
+    `${Math.round(viewport?.height ?? window.innerHeight)}px`,
+  );
+  document.documentElement.style.setProperty(
+    "--vw-mobile-offset",
+    `${Math.round(viewport?.offsetTop ?? 0)}px`,
+  );
+}
+
+syncViewport();
+window.addEventListener("resize", syncViewport);
+window.visualViewport?.addEventListener("resize", syncViewport);
+window.visualViewport?.addEventListener("scroll", syncViewport);
+
+if ("serviceWorker" in navigator && window.isSecureContext)
+  void navigator.serviceWorker.register("/service-worker.js", { scope: "/" }).catch(() => undefined);
 
 connect();
 mountMessenger(transport, {
