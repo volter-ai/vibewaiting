@@ -27,6 +27,7 @@ export class RemoteMessengerServer {
   private readonly passcode = String(randomInt(0, 1_000_000)).padStart(6, "0");
   private readonly sessionToken = randomBytes(32).toString("base64url");
   private readonly sockets = new Set<WebSocket>();
+  private readonly messengerSockets = new Set<WebSocket>();
   private readonly attempts = new Map<string, number[]>();
   private readonly terminalOrigins = new Map<string, string>();
   private readonly webSockets = new WebSocketServer({ noServer: true });
@@ -97,6 +98,7 @@ export class RemoteMessengerServer {
     this.intentHandler = null;
     for (const socket of this.sockets) socket.close(1001, "Vibewaiting stopped");
     this.sockets.clear();
+    this.messengerSockets.clear();
     const server = this.server;
     this.server = null;
     if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -105,6 +107,7 @@ export class RemoteMessengerServer {
 
   private attachSocket(socket: WebSocket): void {
     this.sockets.add(socket);
+    this.messengerSockets.add(socket);
     if (this.lastPatch !== undefined) this.send(socket, { type: "patch", patch: this.lastPatch });
     socket.on("message", (data, binary) => {
       const serialized = Array.isArray(data)
@@ -124,8 +127,12 @@ export class RemoteMessengerServer {
         socket.close(1007, "Invalid message");
       }
     });
-    socket.once("close", () => this.sockets.delete(socket));
-    socket.once("error", () => this.sockets.delete(socket));
+    const forget = (): void => {
+      this.sockets.delete(socket);
+      this.messengerSockets.delete(socket);
+    };
+    socket.once("close", forget);
+    socket.once("error", forget);
   }
 
   private attachTerminalSocket(socket: WebSocket, request: IncomingMessage, terminalId: string): void {
@@ -181,7 +188,7 @@ export class RemoteMessengerServer {
   }
 
   private broadcast(value: unknown): void {
-    for (const socket of this.sockets) this.send(socket, value);
+    for (const socket of this.messengerSockets) this.send(socket, value);
   }
 
   private send(socket: WebSocket, value: unknown): void {
@@ -202,7 +209,7 @@ export class RemoteMessengerServer {
     }
     if (!this.authorized(request)) {
       respond(response, 200, "text/html; charset=utf-8", Buffer.from(LOGIN_HTML), {
-        ...securityHeaders(true),
+        ...securityHeaders(),
         "cache-control": "no-store",
       });
       return;
@@ -321,9 +328,9 @@ async function readBody(request: IncomingMessage, limit: number): Promise<string
   return Buffer.concat(chunks).toString("utf8");
 }
 
-function securityHeaders(inlineStyle = false): Record<string, string> {
+function securityHeaders(): Record<string, string> {
   return {
-    "content-security-policy": `default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; style-src 'self'${inlineStyle ? " 'unsafe-inline'" : ""}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`,
+    "content-security-policy": "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
     "cross-origin-opener-policy": "same-origin",
     "referrer-policy": "no-referrer",
     "x-content-type-options": "nosniff",
