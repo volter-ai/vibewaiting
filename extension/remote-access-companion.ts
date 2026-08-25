@@ -311,8 +311,8 @@ export function createRemoteAccessCompanion(options: {
       remoteDetail.className = "vw-remote-detail";
       remoteDetail.textContent =
         snapshot.stability === "temporary"
-          ? "The address changes when this tunnel reconnects."
-          : "The address remains stable across reconnects.";
+          ? "Browser access only · this address stops working when remote access stops or reconnects."
+          : "Installable · open it once, then choose Install or Add to Home Screen on your phone.";
       const actions = document.createElement("div");
       actions.className = "vw-remote-actions";
       const copy = document.createElement("button");

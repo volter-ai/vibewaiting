@@ -214,6 +214,13 @@ export async function runNativeHost(extensionOrigin: string | undefined): Promis
   };
   remoteAccess.subscribe((snapshot) => {
     remoteAccessSnapshot = snapshot;
+    remoteServer.setInstallableOrigin(
+      snapshot.status === "connected" &&
+      snapshot.stability === "stable" &&
+      snapshot.publicUrl
+        ? snapshot.publicUrl
+        : null,
+    );
     void publishRemoteAccess(snapshot, snapshot.status === "connected");
   });
   remoteServer.setDeviceSnapshotHandler((devices) => {
