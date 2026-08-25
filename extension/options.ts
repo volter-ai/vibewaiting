@@ -14,6 +14,7 @@ import {
   activeRemotePairingUrl,
   parseRemotePairingHandoff,
 } from "../src/remote-pairing.js";
+import { parseRemoteDeviceSnapshot } from "../src/remote-devices.js";
 
 const SETTINGS_KEY = "vibewaiting:settings";
 const form = document.querySelector<HTMLFormElement>("form");
@@ -35,6 +36,9 @@ const remoteCode = document.querySelector<HTMLElement>("#remote-code");
 const remoteLink = document.querySelector<HTMLAnchorElement>("#remote-link");
 const remoteCopy = document.querySelector<HTMLButtonElement>("#remote-copy");
 const remoteStability = document.querySelector<HTMLElement>("#remote-stability");
+const remoteDevices = document.querySelector<HTMLElement>("#remote-devices");
+const remoteDisconnect =
+  document.querySelector<HTMLButtonElement>("#remote-disconnect");
 const remoteError = document.querySelector<HTMLElement>("#remote-error");
 let activeRemoteConfiguration: RemoteAccessConfiguration = { enabled: false, provider: "auto" };
 let pairingRefreshTimer: ReturnType<typeof setTimeout> | undefined;
@@ -76,7 +80,12 @@ port.onMessage.addListener((raw) => {
     return;
   const message = raw as Record<string, unknown>;
   if (message.type === "remote-access") {
-    renderRemoteAccess(message.snapshot, message.passcode, message.pairing);
+    renderRemoteAccess(
+      message.snapshot,
+      message.passcode,
+      message.pairing,
+      message.devices,
+    );
     return;
   }
   if (message.type !== "status" || typeof message.phase !== "string") return;
@@ -135,6 +144,7 @@ function renderRemoteAccess(
   rawSnapshot: unknown,
   rawPasscode: unknown,
   rawPairing: unknown,
+  rawDevices: unknown,
 ): void {
   if (!isRemoteSnapshot(rawSnapshot)) return;
   if (pairingRefreshTimer) clearTimeout(pairingRefreshTimer);
@@ -161,6 +171,8 @@ function renderRemoteAccess(
   if (!connected || !rawSnapshot.publicUrl) return;
   const pairingUrl = activeRemotePairingUrl(rawPairing, rawSnapshot.publicUrl);
   const handoff = parseRemotePairingHandoff(rawPairing);
+  const devices = parseRemoteDeviceSnapshot(rawDevices);
+  if (!devices) return;
   if (pairingUrl && handoff) {
     pairingRefreshTimer = setTimeout(
       () => {
@@ -203,7 +215,19 @@ function renderRemoteAccess(
   if (remoteStability) remoteStability.textContent = rawSnapshot.stability === "temporary"
     ? "This link changes when the tunnel reconnects."
     : "This link remains stable across restarts.";
+  if (remoteDevices) remoteDevices.textContent = remoteDeviceSummary(devices);
+  if (remoteDisconnect) {
+    remoteDisconnect.hidden = devices.authorizedDevices === 0;
+    remoteDisconnect.disabled = false;
+    remoteDisconnect.textContent = "Disconnect devices";
+  }
 }
+
+remoteDisconnect?.addEventListener("click", () => {
+  remoteDisconnect.disabled = true;
+  remoteDisconnect.textContent = "Disconnecting…";
+  port.postMessage({ type: "remote-access-revoke-request" });
+});
 
 remoteCopy?.addEventListener("click", () => {
   const value = remoteLink?.href;
@@ -228,6 +252,17 @@ function providerLabel(provider: RemoteAccessProvider): string {
   if (provider === "ngrok") return "ngrok";
   if (provider === "stable") return "Stable relay";
   return "Automatic";
+}
+
+function remoteDeviceSummary(devices: {
+  authorizedDevices: number;
+  connectedDevices: number;
+}): string {
+  if (devices.connectedDevices > 0)
+    return `${devices.connectedDevices} connected · ${devices.authorizedDevices} paired`;
+  if (devices.authorizedDevices > 0)
+    return `${devices.authorizedDevices} paired offline`;
+  return "No paired phones";
 }
 
 function remoteDescription(snapshot: RemoteSnapshot): string {

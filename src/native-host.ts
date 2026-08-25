@@ -26,6 +26,7 @@ import {
 import { FileMessengerPersistence } from "./persistence.js";
 import { LocalTerminalService } from "./terminal-service.js";
 import { RemoteMessengerServer } from "./remote-messenger.js";
+import type { RemoteDeviceSnapshot } from "./remote-devices.js";
 
 const HARNESS_IDS = new Set<HarnessId>([
   "claude-code",
@@ -192,6 +193,8 @@ export async function runNativeHost(extensionOrigin: string | undefined): Promis
     tunnelId: await persistentRemoteTunnelId(),
   });
   let remoteAccessSnapshot = remoteAccess.snapshot();
+  let remoteDevices: RemoteDeviceSnapshot = remoteServer.deviceSnapshot();
+  let suppressRemoteDeviceEvents = false;
   const publishRemoteAccess = async (
     snapshot: RemoteAccessSnapshot,
     includePairing: boolean,
@@ -203,6 +206,7 @@ export async function runNativeHost(extensionOrigin: string | undefined): Promis
     await writeEvent({
       protocol: VIBEWAITING_EXTENSION_PROTOCOL,
       type: "remote-access",
+      devices: remoteDevices,
       ...(pairing ? { pairing } : {}),
       passcode: remoteEndpoint.passcode,
       snapshot,
@@ -211,6 +215,11 @@ export async function runNativeHost(extensionOrigin: string | undefined): Promis
   remoteAccess.subscribe((snapshot) => {
     remoteAccessSnapshot = snapshot;
     void publishRemoteAccess(snapshot, snapshot.status === "connected");
+  });
+  remoteServer.setDeviceSnapshotHandler((devices) => {
+    remoteDevices = devices;
+    if (!suppressRemoteDeviceEvents)
+      void publishRemoteAccess(remoteAccessSnapshot, false);
   });
   let daemon: Daemon | null = null;
   let bridge: NativeWidgetBridge | null = null;
@@ -303,13 +312,39 @@ export async function runNativeHost(extensionOrigin: string | undefined): Promis
       return;
     }
     if (command.type === "remote-access") {
-      void remoteAccess.configure(command.configuration).catch((error: unknown) => {
+      if (!command.configuration.enabled) {
+        suppressRemoteDeviceEvents = true;
+        remoteServer.revokeRemoteSessions();
+        try {
+          await remoteAccess.configure(command.configuration);
+        } catch (error) {
+          process.stderr.write(`[vibewaiting] remote access failed: ${(error as Error)?.message ?? String(error)}\n`);
+        } finally {
+          suppressRemoteDeviceEvents = false;
+          await publishRemoteAccess(remoteAccessSnapshot, false);
+        }
+        return;
+      }
+      await remoteAccess.configure(command.configuration).catch((error: unknown) => {
         process.stderr.write(`[vibewaiting] remote access failed: ${(error as Error)?.message ?? String(error)}\n`);
       });
       return;
     }
     if (command.type === "remote-access-pairing") {
       await publishRemoteAccess(remoteAccessSnapshot, true);
+      return;
+    }
+    if (command.type === "remote-access-revoke") {
+      suppressRemoteDeviceEvents = true;
+      try {
+        remoteServer.revokeRemoteSessions();
+      } finally {
+        suppressRemoteDeviceEvents = false;
+      }
+      await publishRemoteAccess(
+        remoteAccessSnapshot,
+        remoteAccessSnapshot.status === "connected",
+      );
       return;
     }
     bridge?.receive(command.id, command.payload);
