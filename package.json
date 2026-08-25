@@ -88,7 +88,7 @@
     "esbuild": "0.28.2",
     "preact": "10.29.8",
     "qrcode-generator": "1.5.2",
-    "typescript": "^5.7.0",
+    "typescript": "^7.0.2",
     "vitest": "^3.2.7"
   }
 }
