@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and ideas
+    url: https://github.com/volter-ai/vibewaiting/discussions
+    about: Ask for setup help or explore an idea before filing an issue.
+  - name: Security vulnerability
+    url: https://github.com/volter-ai/vibewaiting/security/advisories/new
+    about: Report vulnerabilities privately. Do not open a public issue.

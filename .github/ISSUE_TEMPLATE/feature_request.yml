@@ -1,0 +1,57 @@
+name: Feature request
+description: Propose a browser-companion improvement around a concrete user problem
+title: "feat: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem
+      description: Who is blocked, in what workflow, and how often?
+    validations:
+      required: true
+
+  - type: textarea
+    id: current
+    attributes:
+      label: Current workaround
+      description: What do users do today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe the result, not only a proposed control or implementation.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: owner
+    attributes:
+      label: Likely ownership
+      description: Where should reusable functionality live?
+      options:
+        - Vibewaiting browser/mobile composition
+        - Supercode agent/session semantics or UI
+        - Widget Shell overlay runtime
+        - Lucarne browser attachment
+        - Unsure
+    validations:
+      required: true
+
+  - type: textarea
+    id: safety
+    attributes:
+      label: Privacy and security considerations
+      description: Note any page data, native state, terminal, credential, or remote-access impact.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: This keeps Vibewaiting a companion rather than a new coding harness, IDE, or hosted execution service.
+          required: true
