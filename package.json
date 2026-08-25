@@ -35,6 +35,7 @@
     "build": "tsc -p tsconfig.json && node widget/build.mjs && node extension/build.mjs",
     "build:widget": "node widget/build.mjs",
     "build:extension": "node extension/build.mjs",
+    "package:release": "node scripts/package-release.mjs",
     "dev:extension": "npm run build && node scripts/dev-extension.mjs",
     "dev:extension:local": "node scripts/sync-local-supercode.mjs && npm run build && node scripts/dev-extension.mjs",
     "sync:local": "node scripts/sync-local-supercode.mjs",

@@ -3,6 +3,12 @@
   "name": "Vibewaiting",
   "version": "0.1.0",
   "description": "Continue local coding-agent sessions from a messenger overlay on any page.",
+  "icons": {
+    "16": "icon-16.png",
+    "32": "icon-32.png",
+    "48": "icon-48.png",
+    "128": "icon-128.png"
+  },
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmjhLmjhkYM/7MfgyVzcSswjRTiTCtFPanDWK6gv6+P6mOKCO6VMYH45qVs9/7OzgThGnnAi+FsPzQH63aeLN5GF2qxRacTmQTJMLADqsb2FqT3GVtG1aSK5sIYLuckDTlE2V9tFuzU9pJGbQTl+HeQnbHd4VQ6xE+en4zyKHLJ+Ugaw0O+UCJrG66/umfelUm+3E48DFyMPIE01i+Q5Zmk2ExEcuW/2Xg7hyd4cACtmHKn3BLJsgzWKo2H5zo+cZZiSgXK11sZ3xZO8rYDAn28557l9aJ1ev+yedXcRvwgXq71EMhwuO44kdm3R/IwDDGPoEYBPcZgELkxGSgNfY2wIDAQAB",
   "browser_specific_settings": {
     "gecko": { "id": "vibewaiting@volter.ai" }
@@ -12,7 +18,13 @@
     "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' ws://127.0.0.1:*"
   },
   "background": { "service_worker": "background.js", "type": "module" },
-  "action": { "default_title": "Vibewaiting settings" },
+  "action": {
+    "default_title": "Vibewaiting settings",
+    "default_icon": {
+      "16": "icon-16.png",
+      "32": "icon-32.png"
+    }
+  },
   "commands": {
     "focus-composer": {
       "suggested_key": { "default": "Alt+Shift+V" },

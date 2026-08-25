@@ -61,6 +61,7 @@ export async function installNativeHost(
 ): Promise<{
   manifestPath: string;
   launcherPath: string;
+  extensionPath: string;
   extensionId: string;
 }> {
   const browser = options.browser ?? "chrome";
@@ -72,6 +73,7 @@ export async function installNativeHost(
   }
   const launcherPath = join(homedir(), ".local/share/vibewaiting/native-host");
   const cliPath = fileURLToPath(new URL("./cli.js", import.meta.url));
+  const extensionPath = fileURLToPath(new URL("./extension/", import.meta.url));
   await mkdir(dirname(launcherPath), { recursive: true });
   await writeFile(
     launcherPath,
@@ -104,5 +106,5 @@ export async function installNativeHost(
     `${JSON.stringify(manifest, null, 2)}\n`,
     "utf8",
   );
-  return { manifestPath, launcherPath, extensionId };
+  return { manifestPath, launcherPath, extensionPath, extensionId };
 }
