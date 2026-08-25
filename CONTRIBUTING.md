@@ -7,6 +7,10 @@ Read the [Code of Conduct](CODE_OF_CONDUCT.md), [architecture](docs/architecture
 and [roadmap](ROADMAP.md) before proposing a substantial change. Security-sensitive
 work should follow [SECURITY.md](SECURITY.md).
 
+Release and repository-administration work also follows the
+[public launch checklist](docs/public-launch-checklist.md) and
+[release procedure](docs/releasing.md).
+
 ## Development setup
 
 Requirements:

@@ -17,6 +17,17 @@ import {
 import { browserShortcutLabel } from "../src/browser-shortcuts.js";
 import { createRemoteAccessCompanion } from "./remote-access-companion.js";
 
+interface VibewaitingContentGlobal {
+  __vibewaitingContentMounted?: boolean;
+}
+
+const contentGlobal = globalThis as VibewaitingContentGlobal;
+if (!contentGlobal.__vibewaitingContentMounted) {
+  contentGlobal.__vibewaitingContentMounted = true;
+  mountVibewaitingContent();
+}
+
+function mountVibewaitingContent(): void {
 let port: ReturnType<typeof chrome.runtime.connect> | undefined;
 const remoteAccess = createRemoteAccessCompanion({
   configure(configuration) {
@@ -54,9 +65,23 @@ const unsubscribe = overlay.subscribe((state) => {
 });
 const contentPort = chrome.runtime.connect({ name: "vibewaiting:content" });
 port = contentPort;
+let destroyed = false;
+const destroy = (): void => {
+  if (destroyed) return;
+  destroyed = true;
+  contentGlobal.__vibewaitingContentMounted = false;
+  unsubscribe();
+  remoteAccess.destroy();
+  contentPort.disconnect();
+  overlay.destroy();
+};
 contentPort.onMessage.addListener((raw) => {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return;
   const message = raw as Record<string, unknown>;
+  if (message.type === "site-access-revoked") {
+    destroy();
+    return;
+  }
   if (message.type === "remote-access") {
     remoteAccess.update(
       message.snapshot,
@@ -163,11 +188,7 @@ contentPort.onMessage.addListener((raw) => {
 
 window.addEventListener(
   "pagehide",
-  () => {
-    unsubscribe();
-    remoteAccess.destroy();
-    contentPort.disconnect();
-    overlay.destroy();
-  },
+  destroy,
   { once: true },
 );
+}

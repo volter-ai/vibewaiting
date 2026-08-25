@@ -31,12 +31,6 @@ import type { RemoteDeviceSnapshot } from "./remote-devices.js";
 const HARNESS_IDS = new Set<HarnessId>([
   "claude-code",
   "codex",
-  "gemini",
-  "goose",
-  "opencode",
-  "pi",
-  "grok",
-  "supercode",
 ]);
 
 type HostEventWithoutChunk = Exclude<NativeHostEvent, { type: "chunk" }>;

@@ -14,12 +14,14 @@ local control over adding another standalone coding environment.
 - One-action page, selection, link, GitHub, and Hacker News context attachment
 - Authenticated phone access over temporary or stable tunnel providers
 - Installable mobile app behavior on stable origins only
+- Optional website access with an in-product disclosure, affirmative browser consent,
+  and immediate revocation
 
 ## Next
 
 - One-click provisioning and revocation of a durable remote origin
 - Signed browser-store packaging and automatic updates
-- Polished onboarding, diagnostics, and permission explanations
+- Setup diagnostics and guided recovery beyond the current permission onboarding
 - Verified Firefox and Windows support rather than configuration-only claims
 - Deeper mobile terminal input, selection, and session-switching parity
 

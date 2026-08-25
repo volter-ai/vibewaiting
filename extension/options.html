@@ -11,6 +11,12 @@
     <main>
       <h1>Vibewaiting</h1>
       <p>Connect the overlay to coding sessions on this machine.</p>
+      <section class="site-access" aria-labelledby="site-access-title">
+        <h2 id="site-access-title">Website access</h2>
+        <p>Vibewaiting needs access to ordinary HTTP and HTTPS pages to place the messenger there and attach page context. While enabled, it remembers the most recent link, image, or element you point at or focus on this device. Nothing from the page is sent to the local agent bridge until you choose Attach.</p>
+        <button id="site-access-toggle" type="button">Enable on websites</button>
+        <small id="site-access-status" aria-live="polite">Checking website access…</small>
+      </section>
       <form>
         <label>Workspace<input id="workspace" type="text" required autocomplete="off" placeholder="/Users/you/project" spellcheck="false"></label>
         <label>Preferred agent<select id="harness"><option value="">First available</option><option value="claude-code">Claude Code</option><option value="codex">Codex</option></select></label>

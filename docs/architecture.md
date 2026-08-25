@@ -39,6 +39,11 @@ to render the fob. The complete messenger renders inside an extension-origin ifr
 Page context crosses into the extension only after an explicit attach action and is
 normalized and bounded before native messaging.
 
+HTTP and HTTPS access is optional rather than an install-time host grant. Onboarding
+discloses the page-facing behavior before requesting access. The background worker
+registers the content script only after consent, injects it idempotently into existing
+ordinary tabs, and unregisters plus tears down mounted overlays when access is revoked.
+
 Native messages have an explicit protocol version, bounded frames, bounded
 reassembly, and parsed intent shapes. Unknown harness identities and unsupported
 actions are omitted; the UI never invents a fallback capability.

@@ -13,7 +13,11 @@ import { LucarneClient } from "lucarne";
 import type { Session } from "lucarne";
 import { startDaemon, type Daemon } from "./daemon.js";
 import { runNativeHost } from "./native-host.js";
-import { installNativeHost, type NativeBrowser } from "./native-install.js";
+import {
+  installNativeHost,
+  type NativeBrowser,
+  uninstallNativeHost,
+} from "./native-install.js";
 import { FileMessengerPersistence } from "./persistence.js";
 
 const DEFAULT_ENGINE_URL = "http://127.0.0.1:7800";
@@ -33,10 +37,11 @@ const USAGE = `vibewaiting — vibe code without leaving your browser
 Usage
   vibewaiting [options]
   vibewaiting native install [--browser brave|chrome|chromium|firefox] [--extension-id <id>]
+  vibewaiting native uninstall [--browser brave|chrome|chromium|firefox] [--purge-state]
 
 Options
   --workspace <dir>   project directory the coding agent runs in (default: cwd)
-  --harness <name>    claude-code | codex | gemini | goose | opencode | pi | grok
+  --harness <name>    claude-code | codex
                       (default: first one ready)
   --session <id>      attach to an existing lucarne session instead of creating one
   --policy <name>     execution policy for the agent: default | yolo (default: the controller's)
@@ -62,6 +67,21 @@ Options
 
 Native host installation currently supports macOS and Linux. Chrome, Chromium, and
 Brave are the verified extension lane; Firefox packaging remains experimental.
+`;
+
+const NATIVE_UNINSTALL_USAGE = `Remove the Vibewaiting native-messaging host
+
+Usage
+  vibewaiting native uninstall [--browser brave|chrome|chromium|firefox] [--purge-state]
+
+Options
+  --browser <name>  browser manifest to remove (default: chrome)
+  --purge-state     also remove local drafts, unread state, presentation memory,
+                    and the stable remote-tunnel identity
+  -h, --help        print this
+
+The shared launcher is retained while another registered browser still uses it.
+A modified launcher or manifest is never removed automatically.
 `;
 
 async function runNativeInstall(argv: readonly string[]): Promise<void> {
@@ -103,6 +123,44 @@ async function runNativeInstall(argv: readonly string[]): Promise<void> {
   );
 }
 
+async function runNativeUninstall(argv: readonly string[]): Promise<void> {
+  if (argv.includes("--help") || argv.includes("-h")) {
+    process.stdout.write(NATIVE_UNINSTALL_USAGE);
+    return;
+  }
+  let browser: NativeBrowser | undefined;
+  let purgeState = false;
+  for (let index = 0; index < argv.length; index += 1) {
+    const flag = argv[index];
+    if (flag === "--purge-state") {
+      purgeState = true;
+      continue;
+    }
+    const value = argv[index + 1];
+    if (!value) throw new Error(`vibewaiting: ${flag} needs a value`);
+    index += 1;
+    if (flag !== "--browser")
+      throw new Error(`vibewaiting: unknown native uninstall option ${flag}`);
+    if (
+      value !== "brave" &&
+      value !== "chrome" &&
+      value !== "chromium" &&
+      value !== "firefox"
+    )
+      throw new Error(
+        "vibewaiting: --browser must be brave, chrome, chromium, or firefox",
+      );
+    browser = value;
+  }
+  const removed = await uninstallNativeHost({
+    ...(browser ? { browser } : {}),
+    ...(purgeState ? { purgeState: true } : {}),
+  });
+  process.stdout.write(
+    `Vibewaiting native host removed\n  manifest → ${removed.removedManifest ? "removed" : "not found"}\n  shared launcher → ${removed.removedLauncher ? "removed" : "retained or not found"}\n  local state → ${removed.removedState ? "removed" : "retained"}\n`,
+  );
+}
+
 /** Parse argv (already sliced past node + script). Throws on an unknown or value-less flag. */
 export function parseArgs(argv: readonly string[]): CliArgs {
   const args: CliArgs = { workspace: process.cwd(), help: false };
@@ -125,6 +183,10 @@ export function parseArgs(argv: readonly string[]): CliArgs {
         break;
       case "--harness":
         args.harness = value();
+        if (args.harness !== "claude-code" && args.harness !== "codex")
+          throw new Error(
+            "vibewaiting: --harness must be 'claude-code' or 'codex'",
+          );
         break;
       case "--session":
         args.session = value();
@@ -172,6 +234,10 @@ async function main(): Promise<void> {
   }
   if (argv[0] === "native" && argv[1] === "install") {
     await runNativeInstall(argv.slice(2));
+    return;
+  }
+  if (argv[0] === "native" && argv[1] === "uninstall") {
+    await runNativeUninstall(argv.slice(2));
     return;
   }
   const args = parseArgs(argv);

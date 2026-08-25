@@ -39,8 +39,9 @@ vibewaiting native install --browser chrome
 ```
 
 The command prints the extension folder to load once from the browser's extensions
-page. Choose a workspace in Vibewaiting settings; the launcher then appears on ordinary
-HTTP and HTTPS pages. Brave and Chromium use `--browser brave` and
+page. In Vibewaiting settings, review the website-access disclosure, choose **Enable on
+websites**, accept the browser prompt, and select a workspace; the launcher then appears
+on ordinary HTTP and HTTPS pages. Brave and Chromium use `--browser brave` and
 `--browser chromium`.
 
 No release yet? The project is being prepared for its first public alpha. The same flow
@@ -70,6 +71,10 @@ Remote access is off until you enable it.
 
 Read the plain-language [privacy policy](PRIVACY.md), [security model](SECURITY.md),
 and [architecture](docs/architecture.md) before granting access.
+
+Website access is optional. Vibewaiting onboarding explains what the page-facing script
+does before the browser asks for HTTP/HTTPS access; disabling that access removes the
+messenger and page-context listener from ordinary sites.
 
 ## Support matrix
 

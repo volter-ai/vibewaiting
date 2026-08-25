@@ -23,6 +23,11 @@ const harness = document.querySelector<HTMLSelectElement>("#harness");
 const policy = document.querySelector<HTMLSelectElement>("#policy");
 const statusOutput = document.querySelector<HTMLOutputElement>("output");
 const extensionId = document.querySelector<HTMLElement>("#extension-id");
+const siteAccess = document.querySelector<HTMLElement>(".site-access");
+const siteAccessToggle =
+  document.querySelector<HTMLButtonElement>("#site-access-toggle");
+const siteAccessStatus =
+  document.querySelector<HTMLElement>("#site-access-status");
 const nativeInstallHint = document.querySelector<HTMLElement>(
   "#native-install-hint",
 );
@@ -45,6 +50,7 @@ const remoteDisconnect =
 const remoteError = document.querySelector<HTMLElement>("#remote-error");
 let activeRemoteConfiguration: RemoteAccessConfiguration = { enabled: false, provider: "auto" };
 let pairingRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+const SITE_ORIGINS = ["http://*/*", "https://*/*"];
 
 type Capability = { detail: string; provider: Exclude<RemoteAccessProvider, "auto">; status: "needs-setup" | "ready" | "unavailable" };
 type RemoteSnapshot = {
@@ -71,6 +77,59 @@ document
     });
   });
 if (extensionId) extensionId.textContent = chrome.runtime.id;
+
+async function renderSiteAccess(): Promise<void> {
+  const enabled = await chrome.permissions.contains({ origins: SITE_ORIGINS });
+  if (siteAccess) siteAccess.dataset.enabled = String(enabled);
+  if (siteAccessToggle) {
+    siteAccessToggle.dataset.enabled = String(enabled);
+    siteAccessToggle.textContent = enabled
+      ? "Disable website access"
+      : "Enable on websites";
+  }
+  if (siteAccessStatus)
+    siteAccessStatus.textContent = enabled
+      ? "Enabled. Vibewaiting can appear on ordinary browser pages."
+      : "Disabled. No Vibewaiting code runs on ordinary browser pages.";
+}
+
+siteAccessToggle?.addEventListener("click", async () => {
+  siteAccessToggle.disabled = true;
+  try {
+    const enabled = siteAccessToggle.dataset.enabled === "true";
+    const changed = enabled
+      ? await chrome.permissions.remove({ origins: SITE_ORIGINS })
+      : await chrome.permissions.request({ origins: SITE_ORIGINS });
+    if (changed) {
+      const response = await chrome.runtime.sendMessage({
+        type: "site-access-changed",
+        enabled: !enabled,
+      });
+      if (
+        typeof response === "object" &&
+        response !== null &&
+        "ok" in response &&
+        response.ok === false
+      )
+        throw new Error(
+          "error" in response && typeof response.error === "string"
+            ? response.error
+            : "website access sync failed",
+        );
+    }
+    await renderSiteAccess();
+  } catch (error) {
+    await renderSiteAccess().catch(() => undefined);
+    if (siteAccessStatus)
+      siteAccessStatus.textContent = `Website access could not be applied: ${error instanceof Error ? error.message : "browser request failed"}`;
+  } finally {
+    siteAccessToggle.disabled = false;
+  }
+});
+chrome.permissions.onAdded.addListener(() => void renderSiteAccess());
+chrome.permissions.onRemoved.addListener(() => void renderSiteAccess());
+await renderSiteAccess();
+
 const port = chrome.runtime.connect({ name: "vibewaiting:options" });
 
 port.onMessage.addListener((raw) => {
