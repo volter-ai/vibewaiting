@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { NATIVE_HOST_NAME } from "./extension-protocol.js";
 
-export const DEVELOPMENT_EXTENSION_ID = "dbcbmeiocgelabifljkclkacecapalgj";
+export const DEVELOPMENT_EXTENSION_ID = "mpmpjbiopkncpnaihljcldljbpmaiiaj";
 export const FIREFOX_EXTENSION_ID = "vibewaiting@volter.ai";
 
 export type NativeBrowser = "brave" | "chrome" | "chromium" | "firefox";

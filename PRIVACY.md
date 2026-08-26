@@ -54,4 +54,4 @@ copy after the local bridge stops. See [SECURITY.md](SECURITY.md) for the trust 
 ## Questions
 
 For privacy questions, open a GitHub Discussion without including session content or
-email `yueranyuan@gmail.com`. Report vulnerabilities through [SECURITY.md](SECURITY.md).
+email `aaron@volter.ai`. Report vulnerabilities through [SECURITY.md](SECURITY.md).
