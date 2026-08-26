@@ -1,6 +1,12 @@
-import type { RemoteDeviceSnapshot } from "./remote-devices.js";
+import type {
+  RemoteDeviceSnapshot,
+  RemotePairingHandoff,
+} from "@volter-ai-dev/supercode-remote-access/client";
 
-export type { RemoteDeviceSnapshot } from "./remote-devices.js";
+export type {
+  RemoteDeviceSnapshot,
+  RemotePairingHandoff,
+} from "@volter-ai-dev/supercode-remote-access/client";
 
 export const VIBEWAITING_EXTENSION_PROTOCOL =
   "vibewaiting/extension-v1" as const;
@@ -11,11 +17,6 @@ export type RemoteAccessProvider = "auto" | "cloudflare" | "ngrok" | "stable";
 export interface RemoteAccessConfiguration {
   enabled: boolean;
   provider: RemoteAccessProvider;
-}
-
-export interface RemotePairingHandoff {
-  expiresAt: number;
-  url: string;
 }
 
 export interface ExtensionSettings {

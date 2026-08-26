@@ -26,7 +26,7 @@ import {
 } from "./native-messaging.js";
 import { FileMessengerPersistence } from "./persistence.js";
 import { RemoteMessengerServer } from "./remote-messenger.js";
-import type { RemoteDeviceSnapshot } from "./remote-devices.js";
+import type { RemoteDeviceSnapshot } from "@volter-ai-dev/supercode-remote-access/client";
 import { shortCwd } from "./sessions.js";
 
 const HARNESS_IDS = new Set<HarnessId>([

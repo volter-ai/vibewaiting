@@ -13,7 +13,7 @@ import { launcherBadgeFromState, type LauncherBadgeTone } from "../src/launcher.
 import {
   parseRemoteDeviceSnapshot,
   type RemoteDeviceSnapshot,
-} from "../src/remote-devices.js";
+} from "@volter-ai-dev/supercode-remote-access/client";
 
 const SETTINGS_KEY = "vibewaiting:settings";
 const ATTACH_LINK_MENU = "vibewaiting:attach-link";

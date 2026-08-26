@@ -12,9 +12,9 @@ import {
 } from "../src/extension-protocol.js";
 import {
   activeRemotePairingUrl,
+  parseRemoteDeviceSnapshot,
   parseRemotePairingHandoff,
-} from "../src/remote-pairing.js";
-import { parseRemoteDeviceSnapshot } from "../src/remote-devices.js";
+} from "@volter-ai-dev/supercode-remote-access/client";
 
 const SETTINGS_KEY = "vibewaiting:settings";
 const form = document.querySelector<HTMLFormElement>("form");
