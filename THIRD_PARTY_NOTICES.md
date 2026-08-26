@@ -8,11 +8,11 @@ CLI tarball.
 | Package | Version | License |
 | --- | --- | --- |
 | `@termfleet/terminal` | 0.1.9 | Apache-2.0 |
-| `@volter-ai-dev/supercode-client` | 0.3.24 | MIT OR Apache-2.0 |
-| `@volter-ai-dev/supercode-harness-sdk` | 0.3.17 | MIT OR Apache-2.0 |
-| `@volter-ai-dev/supercode-remote-access` | 0.1.0 | MIT OR Apache-2.0 |
-| `@volter-ai-dev/supercode-terminal` | 0.2.11 | MIT OR Apache-2.0 |
-| `@volter-ai-dev/supercode-ui` | 0.1.58 | MIT OR Apache-2.0 |
+| `@volter-ai-dev/supercode-client` | 0.3.41 | MIT OR Apache-2.0 |
+| `@volter-ai-dev/supercode-harness-sdk` | 0.3.18 | MIT OR Apache-2.0 |
+| `@volter-ai-dev/supercode-remote-access` | 0.2.0 | MIT OR Apache-2.0 |
+| `@volter-ai-dev/supercode-terminal` | 0.2.13 | MIT OR Apache-2.0 |
+| `@volter-ai-dev/supercode-ui` | 0.1.66 | MIT OR Apache-2.0 |
 | `@volter-ai-dev/widget-shell` | 0.4.0 | MIT |
 | `@volter/tunnel` | 2.0.5 | Apache-2.0 |
 | `@volter/tunnel-core` | 0.1.3 | Apache-2.0 |

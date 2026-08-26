@@ -36,13 +36,55 @@ const HARNESS_IDS = new Set<HarnessId>([
 
 type HostEventWithoutChunk = Exclude<NativeHostEvent, { type: "chunk" }>;
 
-async function writeFrame(value: unknown): Promise<void> {
-  if (!process.stdout.write(encodeNativeMessage(value)))
-    await once(process.stdout, "drain");
+function isClosedNativeChannel(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return (
+    code === "EPIPE" ||
+    code === "ERR_STREAM_DESTROYED" ||
+    code === "ERR_STREAM_WRITE_AFTER_END"
+  );
 }
 
-async function writeEvent(event: HostEventWithoutChunk): Promise<void> {
-  for (const part of chunkNativeEvent(event)) await writeFrame(part);
+class NativeMessageWriter {
+  private closed = false;
+  private failure: unknown;
+
+  constructor(private readonly output: typeof process.stdout) {
+    // Closing a browser tab tears down the native pipe before every producer has necessarily
+    // observed stdin ending. A broken pipe is normal lifecycle, not an uncaught host failure.
+    output.on("error", (error: unknown) => {
+      if (isClosedNativeChannel(error)) this.closed = true;
+      else this.failure = error;
+    });
+  }
+
+  async write(event: HostEventWithoutChunk): Promise<void> {
+    for (const part of chunkNativeEvent(event)) {
+      if (!(await this.writeFrame(part))) return;
+    }
+  }
+
+  close(): void {
+    this.closed = true;
+  }
+
+  private async writeFrame(value: unknown): Promise<boolean> {
+    if (this.failure) throw this.failure;
+    if (this.closed || this.output.destroyed || this.output.writableEnded)
+      return false;
+    try {
+      if (!this.output.write(encodeNativeMessage(value)))
+        await once(this.output, "drain");
+      if (this.failure) throw this.failure;
+      return !this.closed;
+    } catch (error) {
+      if (isClosedNativeChannel(error)) {
+        this.closed = true;
+        return false;
+      }
+      throw error;
+    }
+  }
 }
 
 class NativeWidgetBridge implements WidgetBridge {
@@ -53,14 +95,17 @@ class NativeWidgetBridge implements WidgetBridge {
   private readonly timers = new Set<ReturnType<typeof setInterval>>();
   private removed = false;
 
-  constructor(private readonly remote: RemoteMessengerServer) {
+  constructor(
+    private readonly remote: RemoteMessengerServer,
+    private readonly writer: NativeMessageWriter,
+  ) {
     remote.setIntentHandler((intent) => this.receive(intent.id, intent.payload, "remote"));
   }
 
   async push(patch: unknown): Promise<void> {
     if (this.removed) return;
     this.remote.push(patch);
-    await writeEvent({
+    await this.writer.write({
       protocol: VIBEWAITING_EXTENSION_PROTOCOL,
       type: "patch",
       patch,
@@ -180,6 +225,7 @@ export async function runNativeHost(extensionOrigin: string | undefined): Promis
   if (!extensionOrigin)
     throw new Error("native host did not receive its browser extension origin");
   const decoder = new NativeMessageDecoder();
+  const writer = new NativeMessageWriter(process.stdout);
   const terminalService = new SupercodeTerminalController({
     allowedOrigins: extensionOrigin,
     formatCwd: (cwd) => formatWorkspacePath(cwd, homedir()) || null,
@@ -203,7 +249,7 @@ export async function runNativeHost(extensionOrigin: string | undefined): Promis
       includePairing && snapshot.status === "connected" && snapshot.publicUrl
         ? remotePairingHandoff(snapshot.publicUrl, remoteServer.createPairingGrant())
         : undefined;
-    await writeEvent({
+    await writer.write({
       protocol: VIBEWAITING_EXTENSION_PROTOCOL,
       type: "remote-access",
       devices: remoteDevices,
@@ -221,12 +267,24 @@ export async function runNativeHost(extensionOrigin: string | undefined): Promis
         ? snapshot.publicUrl
         : null,
     );
-    void publishRemoteAccess(snapshot, snapshot.status === "connected");
+    void publishRemoteAccess(snapshot, snapshot.status === "connected").catch(
+      (error: unknown) => {
+        process.stderr.write(
+          `[vibewaiting] remote access update failed: ${(error as Error)?.message ?? String(error)}\n`,
+        );
+      },
+    );
   });
   remoteServer.setDeviceSnapshotHandler((devices) => {
     remoteDevices = devices;
     if (!suppressRemoteDeviceEvents)
-      void publishRemoteAccess(remoteAccessSnapshot, false);
+      void publishRemoteAccess(remoteAccessSnapshot, false).catch(
+        (error: unknown) => {
+          process.stderr.write(
+            `[vibewaiting] remote device update failed: ${(error as Error)?.message ?? String(error)}\n`,
+          );
+        },
+      );
   });
   let daemon: Daemon | null = null;
   let bridge: NativeWidgetBridge | null = null;
@@ -249,7 +307,7 @@ export async function runNativeHost(extensionOrigin: string | undefined): Promis
     const nextFingerprint = JSON.stringify(settings);
     if (daemon && nextFingerprint === fingerprint) {
       await daemon.flush();
-      await writeEvent({
+      await writer.write({
         protocol: VIBEWAITING_EXTENSION_PROTOCOL,
         type: "status",
         phase: "ready",
@@ -257,7 +315,7 @@ export async function runNativeHost(extensionOrigin: string | undefined): Promis
       return;
     }
     await stopDaemon();
-    await writeEvent({
+    await writer.write({
       protocol: VIBEWAITING_EXTENSION_PROTOCOL,
       type: "status",
       phase: "starting",
@@ -273,7 +331,7 @@ export async function runNativeHost(extensionOrigin: string | undefined): Promis
       requestTimeoutMs: 5_000,
       ...(command ? { command } : {}),
     });
-    const nextBridge = new NativeWidgetBridge(remoteServer);
+    const nextBridge = new NativeWidgetBridge(remoteServer, writer);
     try {
       const nextDaemon = await startDaemon({
         sessionId: "web-extension",
@@ -293,7 +351,7 @@ export async function runNativeHost(extensionOrigin: string | undefined): Promis
       daemon = nextDaemon;
       activeDiscoveryClient = discoveryClient;
       fingerprint = nextFingerprint;
-      await writeEvent({
+      await writer.write({
         protocol: VIBEWAITING_EXTENSION_PROTOCOL,
         type: "status",
         phase: "ready",
@@ -363,7 +421,7 @@ export async function runNativeHost(extensionOrigin: string | undefined): Promis
         commandQueue = commandQueue
           .then(() => handle(value))
           .catch(async (error: unknown) => {
-            await writeEvent({
+            await writer.write({
               protocol: VIBEWAITING_EXTENSION_PROTOCOL,
               type: "status",
               phase: "error",
@@ -373,7 +431,7 @@ export async function runNativeHost(extensionOrigin: string | undefined): Promis
       }
     } catch (error) {
       commandQueue = commandQueue.then(async () => {
-        await writeEvent({
+        await writer.write({
           protocol: VIBEWAITING_EXTENSION_PROTOCOL,
           type: "status",
           phase: "error",
@@ -388,6 +446,7 @@ export async function runNativeHost(extensionOrigin: string | undefined): Promis
     await commandQueue;
     decoder.finish();
   } finally {
+    writer.close();
     remoteAccess.close();
     await remoteServer.stop();
     await stopDaemon();

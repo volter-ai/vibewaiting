@@ -21,8 +21,19 @@ const form = document.querySelector<HTMLFormElement>("form");
 const workspace = document.querySelector<HTMLInputElement>("#workspace");
 const harness = document.querySelector<HTMLSelectElement>("#harness");
 const policy = document.querySelector<HTMLSelectElement>("#policy");
-const statusOutput = document.querySelector<HTMLOutputElement>("output");
+const statusOutput =
+  document.querySelector<HTMLOutputElement>("#companion-status");
+const workspaceStatus =
+  document.querySelector<HTMLOutputElement>("#workspace-status");
 const extensionId = document.querySelector<HTMLElement>("#extension-id");
+const companionCard = document.querySelector<HTMLElement>("#companion-card");
+const workspaceCard = document.querySelector<HTMLElement>("#workspace-card");
+const siteAccessCard = document.querySelector<HTMLElement>("#site-access-card");
+const readyCard = document.querySelector<HTMLElement>("#ready-card");
+const moreSettings = document.querySelector<HTMLDetailsElement>("#more-settings");
+const progressCompanion = document.querySelector<HTMLElement>("#progress-companion");
+const progressWorkspace = document.querySelector<HTMLElement>("#progress-workspace");
+const progressAccess = document.querySelector<HTMLElement>("#progress-access");
 const siteAccess = document.querySelector<HTMLElement>(".site-access");
 const siteAccessToggle =
   document.querySelector<HTMLButtonElement>("#site-access-toggle");
@@ -31,6 +42,11 @@ const siteAccessStatus =
 const nativeInstallHint = document.querySelector<HTMLElement>(
   "#native-install-hint",
 );
+const retryNative = document.querySelector<HTMLButtonElement>("#retry-native");
+const installBrowser = document.querySelector<HTMLSelectElement>("#install-browser");
+const nativeCommand = document.querySelector<HTMLElement>("#native-command");
+const copyNativeCommand =
+  document.querySelector<HTMLButtonElement>("#copy-native-command");
 const remoteEnabled = document.querySelector<HTMLInputElement>("#remote-enabled");
 const remoteProvider = document.querySelector<HTMLSelectElement>("#remote-provider");
 const remoteDetail = document.querySelector<HTMLElement>("#remote-detail");
@@ -50,6 +66,10 @@ const remoteDisconnect =
 const remoteError = document.querySelector<HTMLElement>("#remote-error");
 let activeRemoteConfiguration: RemoteAccessConfiguration = { enabled: false, provider: "auto" };
 let pairingRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+let setupPhase = "stopped";
+let setupScope = "";
+let hasStoredWorkspace = false;
+let websiteAccessEnabled = false;
 const SITE_ORIGINS = ["http://*/*", "https://*/*"];
 
 type Capability = { detail: string; provider: Exclude<RemoteAccessProvider, "auto">; status: "needs-setup" | "ready" | "unavailable" };
@@ -78,8 +98,88 @@ document
   });
 if (extensionId) extensionId.textContent = chrome.runtime.id;
 
+function installCommand(): string {
+  return `vibewaiting native install --browser ${installBrowser?.value || "chrome"}`;
+}
+
+function renderInstallCommand(): void {
+  if (nativeCommand) nativeCommand.textContent = installCommand();
+}
+
+installBrowser?.addEventListener("change", renderInstallCommand);
+copyNativeCommand?.addEventListener("click", () => {
+  void navigator.clipboard.writeText(installCommand()).then(() => {
+    if (!copyNativeCommand) return;
+    copyNativeCommand.textContent = "Copied";
+    window.setTimeout(() => {
+      if (copyNativeCommand) copyNativeCommand.textContent = "Copy";
+    }, 1_500);
+  });
+});
+renderInstallCommand();
+
+function state(node: HTMLElement | null, value: string): void {
+  if (node) node.dataset.state = value;
+}
+
+function renderOnboarding(): void {
+  const companionAvailable =
+    setupPhase === "setup" ||
+    setupPhase === "ready" ||
+    setupScope === "runtime";
+  const companionState =
+    setupPhase === "error" && setupScope === "companion"
+      ? "error"
+      : companionAvailable
+        ? "complete"
+        : "active";
+  const workspaceUsable =
+    hasStoredWorkspace &&
+    !(setupPhase === "error" && setupScope === "runtime");
+  const workspaceState = workspaceUsable
+    ? "complete"
+    : companionAvailable
+      ? "active"
+      : "future";
+  const accessState = websiteAccessEnabled
+    ? "complete"
+    : workspaceUsable
+      ? "active"
+      : "future";
+  state(companionCard, companionState);
+  state(workspaceCard, workspaceState);
+  state(siteAccessCard, accessState);
+  state(progressCompanion, companionAvailable ? "complete" : "active");
+  state(progressWorkspace, workspaceState);
+  state(progressAccess, accessState);
+  const formControls = form?.querySelectorAll<
+    HTMLInputElement | HTMLSelectElement | HTMLButtonElement
+  >("input, select, button");
+  for (const control of formControls ?? []) control.disabled = !companionAvailable;
+  if (siteAccessToggle)
+    siteAccessToggle.disabled =
+      (!workspaceUsable || !companionAvailable) && !websiteAccessEnabled;
+  const ready = setupPhase === "ready" && websiteAccessEnabled;
+  if (readyCard) readyCard.hidden = !ready;
+  if (moreSettings) moreSettings.hidden = setupPhase !== "ready";
+  if (nativeInstallHint)
+    nativeInstallHint.hidden =
+      setupPhase !== "error" || setupScope !== "companion";
+  if (retryNative)
+    retryNative.hidden =
+      setupPhase !== "error" || setupScope !== "companion";
+  const runtimeStatus =
+    setupScope === "runtime" &&
+    (setupPhase === "starting" || setupPhase === "error");
+  if (workspaceStatus) {
+    workspaceStatus.hidden = !runtimeStatus;
+    workspaceStatus.dataset.phase = runtimeStatus ? setupPhase : "";
+  }
+}
+
 async function renderSiteAccess(): Promise<void> {
   const enabled = await chrome.permissions.contains({ origins: SITE_ORIGINS });
+  websiteAccessEnabled = enabled;
   if (siteAccess) siteAccess.dataset.enabled = String(enabled);
   if (siteAccessToggle) {
     siteAccessToggle.dataset.enabled = String(enabled);
@@ -91,6 +191,7 @@ async function renderSiteAccess(): Promise<void> {
     siteAccessStatus.textContent = enabled
       ? "Enabled. Vibewaiting can appear on ordinary browser pages."
       : "Disabled. No Vibewaiting code runs on ordinary browser pages.";
+  renderOnboarding();
 }
 
 siteAccessToggle?.addEventListener("click", async () => {
@@ -132,6 +233,21 @@ await renderSiteAccess();
 
 const port = chrome.runtime.connect({ name: "vibewaiting:options" });
 
+retryNative?.addEventListener("click", () => {
+  setupPhase = "starting";
+  setupScope = hasStoredWorkspace ? "runtime" : "setup";
+  if (statusOutput) {
+    statusOutput.dataset.phase = "starting";
+    statusOutput.value = hasStoredWorkspace
+      ? "Local companion connected."
+      : "Checking the local companion…";
+  }
+  if (workspaceStatus && hasStoredWorkspace)
+    workspaceStatus.value = "Checking the workspace…";
+  renderOnboarding();
+  port.postMessage({ type: "retry-native" });
+});
+
 port.onMessage.addListener((raw) => {
   if (
     !statusOutput ||
@@ -151,27 +267,43 @@ port.onMessage.addListener((raw) => {
     return;
   }
   if (message.type !== "status" || typeof message.phase !== "string") return;
-  statusOutput.dataset.phase = message.phase;
-  if (nativeInstallHint)
-    nativeInstallHint.hidden = message.phase !== "error";
-  statusOutput.value =
-    message.phase === "ready"
-      ? "Connected. Open any regular browser tab."
+  setupPhase = message.phase;
+  setupScope = typeof message.scope === "string" ? message.scope : "";
+  const runtimeStatus =
+    setupScope === "runtime" &&
+    (message.phase === "starting" || message.phase === "error");
+  statusOutput.dataset.phase = runtimeStatus ? "setup" : message.phase;
+  statusOutput.value = runtimeStatus
+    ? "Local companion connected."
+    : message.phase === "ready"
+      ? "Connected to local coding sessions."
+      : message.phase === "setup"
+        ? "Local companion connected."
       : message.phase === "starting"
-        ? "Connecting to local coding sessions…"
+        ? typeof message.message === "string"
+          ? message.message
+          : "Connecting to local coding sessions…"
         : typeof message.message === "string"
           ? message.message
-          : message.phase === "setup"
-            ? "Choose a workspace to connect."
-            : "Not connected.";
+          : "Not connected.";
+  if (workspaceStatus)
+    workspaceStatus.value =
+      runtimeStatus && typeof message.message === "string"
+        ? message.message
+        : runtimeStatus
+          ? "Connecting to local coding sessions…"
+        : "";
+  renderOnboarding();
 });
 port.postMessage({ type: "remote-access-pairing-request" });
 
 const stored = (await chrome.storage.local.get(SETTINGS_KEY))[SETTINGS_KEY];
 if (typeof stored === "object" && stored !== null && !Array.isArray(stored)) {
   const settings = stored as Record<string, unknown>;
-  if (workspace && typeof settings.workspace === "string")
+  if (workspace && typeof settings.workspace === "string") {
     workspace.value = settings.workspace;
+    hasStoredWorkspace = Boolean(settings.workspace.trim());
+  }
   if (harness && typeof settings.harness === "string")
     harness.value = settings.harness;
   if (policy && typeof settings.policy === "string")
@@ -183,6 +315,7 @@ if (typeof stored === "object" && stored !== null && !Array.isArray(stored)) {
     if (remoteProvider) remoteProvider.value = configuration.provider;
   }
 }
+renderOnboarding();
 
 async function configureRemoteAccess(configuration: RemoteAccessConfiguration): Promise<void> {
   activeRemoteConfiguration = configuration;
@@ -351,10 +484,14 @@ form?.addEventListener("submit", async (event) => {
       remoteAccess: activeRemoteConfiguration,
     },
   });
+  hasStoredWorkspace = true;
+  setupPhase = "starting";
+  setupScope = "runtime";
+  if (statusOutput) statusOutput.value = "Local companion connected.";
+  if (workspaceStatus)
+    workspaceStatus.value = "Saved. Connecting to local coding sessions…";
+  renderOnboarding();
   await chrome.runtime.sendMessage({ type: "settings-changed" });
-  if (statusOutput)
-    statusOutput.value =
-      "Saved. Vibewaiting is connecting to the local agent bridge.";
 });
 
 window.addEventListener(

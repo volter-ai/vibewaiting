@@ -22,12 +22,13 @@ until signed store distribution is available.
 The separately published extension ZIP is the same browser payload for inspection and
 packaging; the native package already contains the durable extension folder you need.
 
-Open Vibewaiting's extension settings and review the website-access disclosure. Choose
-**Enable on websites** and accept the browser-owned prompt, then choose the workspace
-whose sessions you want to follow and select **Save and connect**. A launcher appears
-on ordinary HTTP and HTTPS pages. The default agent choice discovers Claude Code or
-Codex automatically. You can revoke website access from the same settings section at
-any time; revocation removes the launcher and page-context listener from open tabs.
+Open Vibewaiting's extension settings. The three-step setup verifies the local
+companion, asks for the folder where new chats should run, and then explains website
+access before the browser-owned permission prompt. Existing Claude Code and Codex
+sessions are discovered automatically; the folder is not a filter on existing chats.
+When all three steps are complete, a launcher appears on ordinary HTTP and HTTPS pages.
+You can revoke website access from the same screen at any time; revocation removes the
+launcher and page-context listener from open tabs.
 
 ## Update
 

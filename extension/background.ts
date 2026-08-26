@@ -37,7 +37,11 @@ let nativePort: ExtensionPort | null = null;
 let nativeReady = false;
 let nativeConnecting: Promise<void> | null = null;
 let lastPatch: unknown;
-let lastStatus: { phase: string; message?: string } = { phase: "stopped" };
+let lastStatus: {
+  phase: string;
+  message?: string;
+  scope?: "companion" | "runtime" | "setup";
+} = { phase: "stopped" };
 let lastRemoteAccess: {
   devices: RemoteDeviceSnapshot;
   pairing?: unknown;
@@ -357,6 +361,7 @@ function handleNativeMessage(raw: unknown): void {
     nativeReady = message.phase === "ready";
     lastStatus = {
       phase: message.phase,
+      ...(message.phase === "error" ? { scope: "runtime" as const } : {}),
       ...(message.message ? { message: message.message } : {}),
     };
     broadcastStatus();
@@ -398,14 +403,14 @@ async function ensureNative(): Promise<void> {
     return await (nativeConnecting ?? Promise.resolve());
   nativeConnecting = (async () => {
     const configured = await settings();
-    if (!configured) {
-      lastStatus = {
-        phase: "setup",
-        message: "Choose a workspace in Vibewaiting extension settings.",
-      };
-      broadcastStatus();
-      return;
-    }
+    lastStatus = {
+      phase: "starting",
+      scope: configured ? "runtime" : "setup",
+      message: configured
+        ? "Connecting to local coding sessions…"
+        : "Checking the local companion…",
+    };
+    broadcastStatus();
     try {
       const port = chrome.runtime.connectNative(NATIVE_HOST_NAME);
       nativePort = port;
@@ -418,21 +423,40 @@ async function ensureNative(): Promise<void> {
         nativeReady = false;
         lastStatus = {
           phase: "error",
+          scope: "companion",
           message:
             detail ||
             `Run vibewaiting native install --extension-id ${chrome.runtime.id}`,
         };
         broadcastStatus();
       });
-      port.postMessage({
-        protocol: VIBEWAITING_EXTENSION_PROTOCOL,
-        type: "start",
-        settings: configured,
-      });
+      if (configured) {
+        port.postMessage({
+          protocol: VIBEWAITING_EXTENSION_PROTOCOL,
+          type: "start",
+          settings: configured,
+        });
+      } else {
+        // Presence is inferred from the native channel instead of a new protocol command so a
+        // freshly updated extension can still onboard against the previous companion. This probe
+        // is deliberately short-lived; the real host starts only after the workspace is saved.
+        globalThis.setTimeout(() => {
+          if (nativePort !== port) return;
+          nativePort = null;
+          port.disconnect();
+          lastStatus = {
+            phase: "setup",
+            scope: "setup",
+            message: "Local companion ready. Choose a folder for new chats.",
+          };
+          broadcastStatus();
+        }, 150);
+      }
     } catch (error) {
       nativePort = null;
       lastStatus = {
         phase: "error",
+        scope: "companion",
         message:
           error instanceof Error ? error.message : "Native host unavailable",
       };
@@ -568,6 +592,11 @@ chrome.runtime.onConnect.addListener((port) => {
     if (lastRemoteAccess) post(port, { type: "remote-access", ...lastRemoteAccess });
     port.onMessage.addListener((raw) => {
       const message = record(raw);
+      if (message?.type === "retry-native") {
+        disconnectNative();
+        void ensureNative();
+        return;
+      }
       if (message?.type === "remote-access-configure") {
         void configureRemoteAccess(message.configuration);
         return;

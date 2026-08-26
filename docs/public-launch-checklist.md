@@ -24,6 +24,9 @@ and contribute—not merely that GitHub visibility changed.
   same extension manifest as the ZIP.
 - README, support matrix, privacy policy, security policy, notices, screenshots, and
   release notes describe the same version and supported surfaces.
+- The Chrome Web Store item reports extension ID
+  `dbcbmeiocgelabifljkclkacecapalgj`, and the repository variable
+  `CHROME_WEB_STORE_EXTENSION_ID` contains that exact value.
 
 ## Visibility and first release
 

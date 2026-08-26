@@ -18,6 +18,11 @@ if (manifest.version !== packageJson.version)
   );
 if (process.env.GITHUB_REF_TYPE === "tag" && process.env.GITHUB_REF_NAME !== expectedTag)
   throw new Error(`release tag must be ${expectedTag}, not ${process.env.GITHUB_REF_NAME}`);
+if (process.env.GITHUB_REF_TYPE === "tag") {
+  const changelog = await readFile(join(root, "CHANGELOG.md"), "utf8");
+  if (!new RegExp(`^## \\[${packageJson.version.replaceAll(".", "\\.")}\\] - \\d{4}-\\d{2}-\\d{2}$`, "m").test(changelog))
+    throw new Error(`CHANGELOG.md must contain a dated ${packageJson.version} release before tagging`);
+}
 
 await rm(output, { recursive: true, force: true });
 await mkdir(output, { recursive: true });
@@ -38,6 +43,7 @@ let sbom;
 try {
   execFileSync("tar", ["-xzf", packageArchive, "-C", sbomStage]);
   const stagedRoot = join(sbomStage, "package");
+  await verifyThirdPartyNotices(stagedRoot);
   const stagedManifestPath = join(stagedRoot, "package.json");
   const stagedManifest = JSON.parse(await readFile(stagedManifestPath, "utf8"));
   delete stagedManifest.devDependencies;
@@ -65,3 +71,56 @@ for (const name of files) {
 await writeFile(join(output, "SHA256SUMS"), `${sums.join("\n")}\n`, "utf8");
 
 process.stdout.write(`release artifacts → ${output}\n  ${files.join("\n  ")}\n  SHA256SUMS\n`);
+
+async function verifyThirdPartyNotices(stagedRoot) {
+  const notices = await readFile(join(stagedRoot, "THIRD_PARTY_NOTICES.md"), "utf8");
+  const declared = new Map();
+  for (const line of notices.split("\n")) {
+    const match = line.match(/^\| `([^`]+)` \| ([^| ]+) \|/);
+    if (match) declared.set(match[1], match[2]);
+  }
+  const bundled = new Map();
+  await visitNodeModules(join(stagedRoot, "node_modules"), bundled);
+  const problems = [];
+  for (const [name, version] of bundled) {
+    if (!declared.has(name)) problems.push(`missing notice for ${name}@${version}`);
+    else if (declared.get(name) !== version)
+      problems.push(`notice says ${name}@${declared.get(name)}; bundle contains ${version}`);
+  }
+  for (const [name, version] of declared)
+    if (!bundled.has(name)) problems.push(`notice lists unbundled ${name}@${version}`);
+  if (problems.length)
+    throw new Error(`THIRD_PARTY_NOTICES.md does not match the packed runtime:\n${problems.join("\n")}`);
+}
+
+async function visitNodeModules(directory, packages) {
+  let entries;
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    throw error;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    if (entry.name.startsWith("@")) {
+      const scope = join(directory, entry.name);
+      for (const child of await readdir(scope, { withFileTypes: true }))
+        if (child.isDirectory()) await recordPackage(join(scope, child.name), packages);
+      continue;
+    }
+    await recordPackage(join(directory, entry.name), packages);
+  }
+}
+
+async function recordPackage(directory, packages) {
+  let manifest;
+  try {
+    manifest = JSON.parse(await readFile(join(directory, "package.json"), "utf8"));
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  if (typeof manifest?.name === "string" && typeof manifest.version === "string")
+    packages.set(manifest.name, manifest.version);
+  await visitNodeModules(join(directory, "node_modules"), packages);
+}
