@@ -17,7 +17,6 @@
 // one harness transport (`ownsClient: false`). Attaching therefore never touches the session the
 // daemon started, and detaching is just closing the second controller.
 import {
-  conversationPreviewText,
   HarnessAuthenticationController,
   SessionWindowCache,
   SupercodeSessionCatalog,
@@ -45,8 +44,8 @@ import {
   projectSubagentTranscript,
   sessionDescriptorRuntimeStatus as sessionRuntimeStatus,
   type ActiveSessionRef,
-  type ProjectedSessionRowModel as SessionRow,
 } from "@volter-ai-dev/supercode-ui/controller";
+import { createNativeSessionAttentionTracker } from "@volter-ai-dev/supercode-ui/host";
 import { createLucarneInjector } from "@volter-ai-dev/widget-shell/lucarne";
 import { WidgetHost } from "lucarne/widget/host";
 import {
@@ -55,8 +54,6 @@ import {
   toAttachError,
   type AttachError,
   type ProjectionOptions,
-  type SessionAttention,
-  type SessionAttentionKind,
   type StartupPhase,
   type WidgetState,
 } from "./projection.js";
@@ -646,37 +643,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const materializeArtifact = options.materializeArtifact
     ?? ((artifact: SessionArtifact): Promise<ExportReceipt> => writeSessionArtifact(artifact, join(options.workspace, ".supercode", "exports")));
 
-  // Messenger attention belongs to the daemon so it remains consistent across every injected page.
-  // Native message cursors distinguish a new human-visible message from a growing preview, tool
-  // record, or heartbeat. The persisted ledger also reconciles messages written while the daemon
-  // was stopped without replaying imported history on the next launch.
-  interface ConversationObservation {
-    cursor: string | null;
-    candidates: Array<{ cursor: string; role: "user" | "assistant"; preview: string }>;
-  }
-  const observeConversation = (descriptor: SessionDescriptor | undefined): ConversationObservation => {
-    const candidates = (descriptor?.latest_message_candidates ?? []).flatMap((candidate) => {
-      if (typeof candidate.cursor !== "string" || candidate.cursor === "") return [];
-      const preview = conversationPreviewText([candidate]);
-      return preview
-        ? [{ cursor: candidate.cursor, role: candidate.role, preview }]
-        : [];
-    });
-    return { cursor: candidates[0]?.cursor ?? null, candidates };
+  let nativeAttentionState = {
+    version: 1 as const,
+    attention: persisted.attention,
+    observedCursors: persisted.observedCursors,
   };
-  const newAssistantMessages = (current: ConversationObservation, priorCursor: string | null): number => {
-    if (current.cursor === null || current.cursor === priorCursor) return 0;
-    const priorIndex = priorCursor === null
-      ? -1
-      : current.candidates.findIndex((candidate) => candidate.cursor === priorCursor);
-    const newlyObserved = priorIndex >= 0
-      ? current.candidates.slice(0, priorIndex)
-      : current.candidates;
-    return newlyObserved.filter((candidate) => candidate.role === "assistant").length;
-  };
-  const observedUpdates = new Map<string, Pick<SessionRow, "messages" | "runtimeStatus"> & { cursor: string | null }>();
-  const observedCursors = new Map<string, string>(Object.entries(persisted.observedCursors));
-  const attention = new Map<string, SessionAttention>(persisted.attention.map((item) => [item.key, item]));
   const drafts = new Map<string, string>(Object.entries(persisted.drafts));
   const preferredLaunchModes = new Map<string, ContinuationMode>(Object.entries(persisted.preferredLaunchModes));
   let persistenceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -685,7 +656,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     if (!persistence) return Promise.resolve();
     if (persistenceTimer) clearTimeout(persistenceTimer);
     persistenceTimer = null;
-    const state = { attention: [...attention.values()], observedCursors: Object.fromEntries(observedCursors), drafts: Object.fromEntries(drafts), preferredLaunchModes: Object.fromEntries(preferredLaunchModes) };
+    const state = { attention: nativeAttentionState.attention, observedCursors: nativeAttentionState.observedCursors, drafts: Object.fromEntries(drafts), preferredLaunchModes: Object.fromEntries(preferredLaunchModes) };
     persistenceInFlight = persistenceInFlight
       .catch(() => undefined)
       .then(() => persistence.save(state))
@@ -697,38 +668,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     persistenceTimer = setTimeout(() => { void flushPersistence(); }, 300);
     persistenceTimer.unref?.();
   };
-  const markAttention = (
-    key: string,
-    kind: SessionAttentionKind,
-    preview?: string,
-    unreadDelta = 1,
-    afterMessages?: number | null,
-  ): void => {
-    const prior = attention.get(key);
-    const boundedPreview = preview?.slice(0, 240);
-    const sameEvent = boundedPreview
-      ? prior?.preview === boundedPreview
-      : prior?.kind === kind && prior.preview === undefined;
-    const unreadCount = sameEvent
-      ? (prior?.unreadCount ?? Math.max(1, unreadDelta))
-      : Math.min((prior?.unreadCount ?? 0) + Math.max(1, unreadDelta), 999);
-    const next: SessionAttention = {
-      key,
-      kind: prior?.kind === "failed" && kind !== "failed" ? "failed" : kind,
-      unreadCount,
-      ...(prior?.afterMessages !== undefined
-        ? { afterMessages: prior.afterMessages }
-        : Number.isSafeInteger(afterMessages) && (afterMessages as number) >= 0
-          ? { afterMessages: afterMessages as number }
-          : {}),
-      ...(boundedPreview ? { preview: boundedPreview } : {}),
-    };
-    if (JSON.stringify(attention.get(key)) === JSON.stringify(next)) return;
-    attention.set(key, next);
-    schedulePersistence();
-  };
-  let priorRuntimeActive = false;
-  let priorRuntimeKey: string | null = null;
+  const attentionTracker = createNativeSessionAttentionTracker({
+    state: nativeAttentionState,
+    onChange: (state) => {
+      nativeAttentionState = state;
+      schedulePersistence();
+    },
+  });
   let panelVisible = false;
   let attentionTimer: ReturnType<typeof setTimeout> | null = null;
   let attentionDueAt = Number.POSITIVE_INFINITY;
@@ -773,67 +719,21 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     sessions: ReturnType<typeof projectSessions>,
     attached: ReturnType<typeof attachmentFor>,
     observedAt: number,
-  ): SessionAttention[] => {
-    for (const row of sessions) {
-      const descriptor = descriptors.find((candidate) => sessionKey(candidate.locator) === row.key);
-      const current = observeConversation(descriptor);
-      let prior = observedUpdates.get(row.key);
-      if (prior === undefined) {
-        const persistedCursor = observedCursors.get(row.key) ?? null;
-        prior = { cursor: persistedCursor, messages: row.messages, runtimeStatus: row.runtimeStatus };
-        if (persistedCursor === null) {
-          observedUpdates.set(row.key, { cursor: current.cursor, messages: row.messages, runtimeStatus: row.runtimeStatus });
-          if (current.cursor !== null) {
-            observedCursors.set(row.key, current.cursor);
-            schedulePersistence();
-          }
-          continue;
-        }
-      }
-
-      const rewritten = row.messages !== null && prior.messages !== null && row.messages < prior.messages;
-      const cursorChanged = current.cursor !== null && current.cursor !== prior.cursor;
-      const settledAt = row.previewUpdatedAt ?? row.updatedAt;
-      const settled = settledAt !== null && observedAt - settledAt >= DEFAULT_ATTENTION_SETTLE_MS;
-      const completed = prior.runtimeStatus === "busy" && row.runtimeStatus === "idle";
-
-      if (rewritten) {
-        // Compaction/rewrite is a new native baseline, never negative unread.
-        prior.cursor = current.cursor;
-      } else if (cursorChanged && row.runtimeStatus !== "busy" && (completed || settled)) {
-        const delta = newAssistantMessages(current, prior.cursor);
-        if (delta > 0) {
-          markAttention(row.key, completed ? "finished" : "unseen", row.preview, delta, prior.messages);
-        }
-        prior.cursor = current.cursor;
-      } else if (cursorChanged && row.runtimeStatus !== "busy" && settledAt !== null) {
-        scheduleAttentionSettlement(DEFAULT_ATTENTION_SETTLE_MS - (observedAt - settledAt));
-      }
-
-      if (prior.cursor !== null && observedCursors.get(row.key) !== prior.cursor) {
-        observedCursors.set(row.key, prior.cursor);
-        schedulePersistence();
-      }
-      observedUpdates.set(row.key, { cursor: prior.cursor, messages: row.messages, runtimeStatus: row.runtimeStatus });
+  ): ReturnType<typeof attentionTracker.observe>["attention"] => {
+    const observation = attentionTracker.observe({
+      sessions,
+      descriptors,
+      keyForDescriptor: (descriptor) => sessionKey(descriptor.locator),
+      controller: snapshot,
+      attachedKey: attached?.key ?? null,
+      panelVisible,
+      now: observedAt,
+      settleMs: DEFAULT_ATTENTION_SETTLE_MS,
+    });
+    if (observation.settleAfterMs !== null) {
+      scheduleAttentionSettlement(observation.settleAfterMs);
     }
-
-    const runtimeActive =
-      snapshot.turn.state !== "idle" || snapshot.requests.some((request) => request.status === "pending");
-    const runtimeKey = attached?.key || priorRuntimeKey;
-    if (priorRuntimeActive && !runtimeActive && priorRuntimeKey && !(panelVisible && attached?.key === priorRuntimeKey)) {
-      const lastAssistant = [...snapshot.conversation].reverse().find(
-        (entry) => entry.kind === "message" && entry.role === "assistant" && entry.text.trim() !== "",
-      );
-      const preview = lastAssistant?.kind === "message"
-        ? lastAssistant.text.replace(/\s+/g, " ").trim()
-        : undefined;
-      markAttention(priorRuntimeKey, snapshot.error ? "failed" : "finished", preview);
-    }
-    priorRuntimeActive = runtimeActive;
-    priorRuntimeKey = runtimeActive ? runtimeKey : null;
-
-    const visible = new Set(sessions.map((row) => row.key));
-    return [...attention.values()].filter((item) => visible.has(item.key));
+    return observation.attention;
   };
 
   const pushNow = (force = false, scope: "full" | "inventory" = "full"): Promise<void> => {
@@ -1844,8 +1744,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       return;
     }
     if (uiIntent?.action === "ack") {
-      if (attention.delete(uiIntent.key)) {
-        schedulePersistence();
+      if (attentionTracker.acknowledge(uiIntent.key)) {
         await pushNow();
       }
       return;
