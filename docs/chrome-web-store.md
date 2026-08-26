@@ -65,7 +65,7 @@ downloads, or file-URL access.
 ## Required assets and proof
 
 The final Chrome Web Store item ID must be
-`dbcbmeiocgelabifljkclkacecapalgj`. It is derived from the public key in the packaged
+`mpmpjbiopkncpnaihljcldljbpmaiiaj`. It is derived from the public key in the packaged
 manifest and is also the origin authorized by the native installer. Configure the
 repository variable `CHROME_WEB_STORE_EXTENSION_ID` to this value before tagging; the
 release workflow rejects a missing or different store identity.

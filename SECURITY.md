@@ -34,7 +34,7 @@ Do **not** open a public issue or paste secrets, session data, terminal output, 
 reproduction containing credentials into an issue.
 
 Use GitHub's private vulnerability reporting from the repository's Security tab. If
-that surface is unavailable, email `yueranyuan@gmail.com` with
+that surface is unavailable, email `aaron@volter.ai` with
 `[vibewaiting security]` in the subject. Include the affected version, impact, and the
 smallest safe reproduction. Reports are acknowledged on a best-effort basis, normally
 within five business days. Confirmed fixes credit the reporter unless anonymity is

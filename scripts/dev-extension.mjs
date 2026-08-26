@@ -26,7 +26,7 @@ let profileDirectory = resolve(
 );
 const startUrl = process.env.VIBEWAITING_DEV_URL || "https://example.com";
 const devWorkspace = resolve(process.env.VIBEWAITING_DEV_WORKSPACE || root);
-const extensionId = "dbcbmeiocgelabifljkclkacecapalgj";
+const extensionId = "mpmpjbiopkncpnaihljcldljbpmaiiaj";
 
 function useCdpPort(port) {
   cdpPort = port;
