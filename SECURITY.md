@@ -26,7 +26,7 @@ boundaries.
 ## Supported versions
 
 Until the first stable release, security fixes target the latest commit on `main` and
-the newest published prerelease. Older prereleases may not receive backports.
+the newest published `0.x` release. Older alpha releases may not receive backports.
 
 ## Reporting a vulnerability
 

@@ -39,8 +39,11 @@ jobs:
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >-
-          gh release create "$GITHUB_REF_NAME" release/*
-          --verify-tag
-          --generate-notes
-          --title "Vibewaiting $GITHUB_REF_NAME"
+        run: |
+          node scripts/release-notes.mjs "$GITHUB_REF_NAME" > /tmp/vibewaiting-release-notes.md
+          gh release create "$GITHUB_REF_NAME" release/* \
+            --draft \
+            --notes-file /tmp/vibewaiting-release-notes.md \
+            --title "Vibewaiting $GITHUB_REF_NAME" \
+            --verify-tag
+          gh release edit "$GITHUB_REF_NAME" --draft=false

@@ -44,8 +44,9 @@ websites**, accept the browser prompt, and select a workspace; the launcher then
 on ordinary HTTP and HTTPS pages. Brave and Chromium use `--browser brave` and
 `--browser chromium`.
 
-No release yet? The project is being prepared for its first public alpha. The same flow
-can be exercised [from source](docs/install.md#install-from-source).
+The signed `v0.1.0` artifacts, checksums, SBOM, and provenance are available from the
+[latest GitHub Release](https://github.com/volter-ai/vibewaiting/releases/latest). The
+same flow can also be exercised [from source](docs/install.md#install-from-source).
 
 ## What using it feels like
 
@@ -128,8 +129,9 @@ The browser/native boundary and complete ownership map live in
 
 Start with [CONTRIBUTING.md](CONTRIBUTING.md) and the [roadmap](ROADMAP.md). Bugs use
 the issue form; setup and design questions belong in
-[Discussions](https://github.com/volter-ai/vibewaiting/discussions); vulnerabilities
-follow [SECURITY.md](SECURITY.md). The merge gate is intentionally under one minute;
+[Discussions](https://github.com/volter-ai/vibewaiting/discussions); the complete routing
+guide is in [SUPPORT.md](SUPPORT.md), and vulnerabilities follow [SECURITY.md](SECURITY.md).
+The merge gate is intentionally under one minute;
 Chromium runs only in the nightly workflow.
 
 Vibewaiting is available under the [MIT License](LICENSE).

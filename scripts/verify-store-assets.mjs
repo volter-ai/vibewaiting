@@ -27,9 +27,13 @@ for (const [name, [expectedWidth, expectedHeight]] of expected) {
   );
   const width = png && bytes.length >= 24 ? bytes.readUInt32BE(16) : 0;
   const height = png && bytes.length >= 24 ? bytes.readUInt32BE(20) : 0;
+  const bitDepth = png && bytes.length >= 26 ? bytes[24] : 0;
+  const colorType = png && bytes.length >= 26 ? bytes[25] : -1;
   if (!png) problems.push(`${name} is not a PNG`);
   else if (width !== expectedWidth || height !== expectedHeight)
     problems.push(`${name} is ${width}×${height}, expected ${expectedWidth}×${expectedHeight}`);
+  else if (bitDepth !== 8 || colorType !== 2)
+    problems.push(`${name} must be a 24-bit RGB PNG without an alpha channel`);
 }
 
 if (problems.length)

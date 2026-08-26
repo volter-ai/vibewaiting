@@ -24,9 +24,11 @@ The CLI tarball pins and bundles its production dependency tree. Build-only pack
 stay outside the artifact, and the SBOM omits them, so the reviewed tarball installs the
 same runtime tree represented by its SBOM without resolving newer registry packages.
 
-GitHub generates release notes from the merged pull requests. Never publish an artifact
-built from an uncommitted tree. Browser-store signing is a separate release lane and is
-not implied by the GitHub ZIP. Public releases also receive GitHub/Sigstore build
+The workflow derives concise release notes from the matching `CHANGELOG.md` section,
+creates a draft, attaches every artifact, and only then publishes it. This ordering is
+required once GitHub release immutability is enabled. Never publish an artifact built
+from an uncommitted tree. Browser-store signing is a separate release lane and is not
+implied by the GitHub ZIP. Public releases also receive GitHub/Sigstore build
 provenance, verifiable with `gh attestation verify <artifact> --repo volter-ai/vibewaiting`.
 The attestation step stays off while the repository is private because GitHub Free and
 Team plans expose private attestations only through Enterprise Cloud.
