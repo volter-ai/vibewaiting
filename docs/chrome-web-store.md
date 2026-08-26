@@ -9,17 +9,22 @@ consistent with the extension, [PRIVACY.md](../PRIVACY.md), and the current rele
 isolated browser messenger, with user-invoked page-context attachment and a terminal
 view of the same conversation.
 
-**Short description:** Follow local coding agents, reply from any browser tab, and
-switch the same conversation into a terminal.
+**Short description:** Follow local Claude Code and Codex sessions, reply from any tab,
+and switch the same conversation into a terminal.
 
 **Category:** Developer Tools
 
 **Detailed description:**
 
-> Vibewaiting keeps your local Claude Code and Codex sessions within reach while you
-> work in the browser. Open a compact messenger on ordinary tabs, see what each agent is
-> doing, reply, attach the page you are looking at, or switch the same conversation into
-> a familiar terminal.
+> Vibewaiting is a browser companion for developers who run Claude Code or Codex
+> locally. It keeps those sessions within reach while you work in the browser: see what
+> each agent is doing, reply from an ordinary tab, attach the page you are looking at,
+> or switch the same conversation into a familiar terminal.
+>
+> Why is a local companion needed? Claude Code and Codex keep their transcripts,
+> process state, and tmux-backed terminals on the developer's computer, where Chrome's
+> extension sandbox cannot read them. The Vibewaiting companion stays on that computer
+> and bridges the extension to the sessions the developer already runs there.
 >
 > By default, session content stays on your computer. Vibewaiting has no hosted agent
 > account, analytics, advertising, or cloud transcript service. Claude Code and Codex
@@ -37,7 +42,7 @@ switch the same conversation into a terminal.
 > a stable HTTPS relay to an authenticated device you pair. Insecure relay URLs are
 > rejected and stopping remote access closes the route.
 >
-> Requires macOS or Linux, the Vibewaiting native companion, and a local Claude Code or
+> Requires macOS or Linux, the Vibewaiting local companion, and a local Claude Code or
 > Codex installation signed in with that provider. Chrome, Chromium, and Brave are
 > supported in this alpha. Windows, Firefox, and other coding harnesses are not yet
 > supported.
@@ -45,7 +50,7 @@ switch the same conversation into a terminal.
 **Reviewer instructions (500-character dashboard limit):**
 
 > Requires macOS/Linux, Node 22.12+ or 24+, and a signed-in Claude Code or Codex CLI; no
-> Vibewaiting account. Run `npm i -g https://github.com/volter-ai/vibewaiting/releases/download/v0.1.1/vibewaiting-0.1.1.tgz`
+> Vibewaiting account. Run `npm i -g https://github.com/volter-ai/vibewaiting/releases/download/v0.1.2/vibewaiting-0.1.2.tgz`
 > and `vibewaiting native install --browser chrome`. Open Options, save an existing
 > folder, read/allow optional website access, and keep one agent session running. On an
 > HTTP(S) page press Alt+Shift+V; open it, reply, Attach a selection, switch Terminal.
@@ -59,7 +64,7 @@ lanes are verified.
 | Permission | Dashboard justification |
 | --- | --- |
 | Optional HTTP/HTTPS host access | Granted from Vibewaiting onboarding after a prominent disclosure. It places the messenger on ordinary pages and remembers the latest pointed or focused page target locally so the user can explicitly attach it. No extension code runs on websites before consent. |
-| Native messaging | Connects the extension-owned messenger to the local Vibewaiting companion that reads and continues local coding-agent sessions. |
+| Native messaging | Chrome's sandbox cannot read the local transcripts, process state, or terminals created by Claude Code and Codex. This permission connects the extension-owned messenger to the on-device Vibewaiting companion that bridges those existing sessions. |
 | Scripting | Registers the content script only after optional website access is granted and unregisters it when access is revoked. |
 | Storage | Keeps workspace selection, browser-local UI preferences, and overlay geometry. |
 | Context menus | Provides a user-invoked fallback for attaching a selected link. |

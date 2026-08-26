@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Vibewaiting",
-  "version": "0.1.1",
-  "description": "Continue local coding-agent sessions from a messenger overlay on any page.",
+  "version": "0.1.2",
+  "description": "Follow and continue local Claude Code and Codex sessions from any browser tab.",
   "icons": {
     "16": "icon-16.png",
     "32": "icon-32.png",

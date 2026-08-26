@@ -12,7 +12,7 @@ While the first store release is under review, download the native package and
 then install it:
 
 ```sh
-npm install --global ./vibewaiting-0.1.1.tgz
+npm install --global ./vibewaiting-0.1.2.tgz
 vibewaiting native install --browser chrome
 ```
 

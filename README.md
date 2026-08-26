@@ -30,11 +30,13 @@ switch the same conversation into a familiar terminal.
 ## Try the alpha
 
 The release path is documented in [Install, update, and remove](docs/install.md). In
-short: download the native package from the latest GitHub Release, verify it against
-`SHA256SUMS`, then run:
+short: Chrome cannot directly read the transcripts, process state, or terminals owned
+by local coding agents, so Vibewaiting uses a small on-device companion to bridge the
+extension to them. Download that package from the latest GitHub Release, verify it
+against `SHA256SUMS`, then run:
 
 ```sh
-npm install --global ./vibewaiting-0.1.1.tgz
+npm install --global ./vibewaiting-0.1.2.tgz
 vibewaiting native install --browser chrome
 ```
 
@@ -44,7 +46,7 @@ website access**, accept the browser prompt, and select a workspace; the launche
 on ordinary HTTP and HTTPS pages. Brave and Chromium use `--browser brave` and
 `--browser chromium`.
 
-The signed `v0.1.1` artifacts, checksums, SBOM, and provenance are available from the
+The signed `v0.1.2` artifacts, checksums, SBOM, and provenance are available from the
 [latest GitHub Release](https://github.com/volter-ai/vibewaiting/releases/latest). The
 same flow can also be exercised [from source](docs/install.md#install-from-source).
 

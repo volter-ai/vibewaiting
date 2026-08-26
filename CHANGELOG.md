@@ -5,6 +5,16 @@ the complete generated notes and downloadable artifacts for each version.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-08-26
+
+### Changed
+
+- Store and onboarding copy now lead with the developer need for the local companion:
+  Claude Code and Codex keep transcripts, process state, and terminals outside Chrome's
+  extension sandbox, so an on-device bridge is required to reach those existing sessions.
+- The package summary and native-messaging justification now name the supported developer
+  tools and the exact local surfaces being bridged.
+
 ## [0.1.1] - 2026-08-26
 
 ### Changed
@@ -46,6 +56,7 @@ the complete generated notes and downloadable artifacts for each version.
 - Agent and remote-access defaults now stay outside the first-run critical path, and the
   unsafe confirmation override is labeled explicitly instead of as “Yolo.”
 
-[Unreleased]: https://github.com/volter-ai/vibewaiting/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/volter-ai/vibewaiting/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/volter-ai/vibewaiting/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/volter-ai/vibewaiting/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/volter-ai/vibewaiting/releases/tag/v0.1.0

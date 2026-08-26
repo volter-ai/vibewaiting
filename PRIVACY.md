@@ -1,6 +1,6 @@
 # Privacy
 
-Vibewaiting is local-first. It has no analytics, advertising SDK, hosted account,
+Vibewaiting is local-first developer tooling. It has no analytics, advertising SDK, hosted account,
 telemetry endpoint, or Volter-operated transcript service. By default, your
 coding-agent sessions stay on the computer where their harness stores them. If you
 deliberately enable remote access, selected chat and terminal traffic travels through
@@ -21,7 +21,7 @@ the tunnel provider you choose to a paired device.
 | Permission | Why it is needed |
 | --- | --- |
 | Optional access to websites | Place the isolated messenger overlay on ordinary pages and capture context you explicitly attach. You grant or revoke HTTP/HTTPS access from Vibewaiting settings. |
-| Native messaging | Connect the extension-owned messenger to the local Vibewaiting companion. |
+| Native messaging | Chrome cannot read local coding-agent transcripts, process state, or terminals. This connects the extension-owned messenger to the on-device Vibewaiting companion that can bridge those existing Claude Code and Codex sessions. |
 | Storage | Remember the selected workspace and local UI preferences. |
 | Context menus | Offer a precise fallback for attaching a link. |
 

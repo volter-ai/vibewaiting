@@ -1,6 +1,6 @@
 {
   "name": "vibewaiting",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "Vibe code without leaving your browser: a messenger overlay wired to local coding-agent sessions through Supercode.",
   "repository": {
