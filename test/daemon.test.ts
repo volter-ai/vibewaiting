@@ -99,6 +99,7 @@ async function sessionRig(
 class RecordingTerminalService implements TerminalService {
   readonly launched: Array<{
     conversationKey: string | null;
+    options?: Parameters<TerminalService["launchSession"]>[4];
     harness: string;
     initialInput?: string;
     launch: Parameters<TerminalService["launchSession"]>[1];
@@ -130,8 +131,15 @@ class RecordingTerminalService implements TerminalService {
     launch: Parameters<TerminalService["launchSession"]>[1],
     conversationKey: Parameters<TerminalService["launchSession"]>[2] = null,
     initialInput?: Parameters<TerminalService["launchSession"]>[3],
+    options?: Parameters<TerminalService["launchSession"]>[4],
   ): Promise<TerminalServiceSnapshot> {
-    this.launched.push({ conversationKey, harness, launch, ...(initialInput === undefined ? {} : { initialInput }) });
+    this.launched.push({
+      conversationKey,
+      harness,
+      launch,
+      ...(initialInput === undefined ? {} : { initialInput }),
+      ...(options === undefined ? {} : { options }),
+    });
     this.state = {
       ...this.state,
       attachment: {
@@ -157,17 +165,8 @@ class RecordingTerminalService implements TerminalService {
     };
     return this.state;
   }
-  async bindContext(sessionId: string, conversationKey: string): Promise<TerminalServiceSnapshot> {
-    this.state = {
-      ...this.state,
-      attachment: this.state.attachment?.sessionId === sessionId
-        ? { ...this.state.attachment, conversationKey }
-        : this.state.attachment,
-      bindings: [{ conversationKey, sessionId }],
-      sessions: this.state.sessions.map((session) =>
-        session.id === sessionId ? { ...session, contextKey: conversationKey } : session),
-    };
-    return this.state;
+  async reconcileConversationBindings(): Promise<Awaited<ReturnType<TerminalService["reconcileConversationBindings"]>>> {
+    return { bindings: [], snapshot: this.state };
   }
   async moveSession(
     harness: Parameters<TerminalService["moveSession"]>[0],
@@ -905,6 +904,15 @@ describe("messenger session state machine", () => {
         ],
         cwd: "/tmp/project",
         env: {},
+      },
+      options: {
+        conversationDiscovery: {
+          knownConversationKeys: expect.arrayContaining(
+            [OWN, ATLAS, BRIDGE].map((descriptor) => sessionKey(descriptor.locator)),
+          ),
+          prompt: "inspect the current build",
+          startedAtMs: 2_000_000,
+        },
       },
     }]);
     expect(lastPush().harnesses.find((item) => item.id === "codex")?.preferredLaunchMode)
