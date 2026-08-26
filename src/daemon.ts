@@ -72,7 +72,7 @@ import {
   VIBEWAITING_PRESENTATION,
   VIBEWAITING_PRESENTATIONS,
 } from "./presentations.js";
-import type { TerminalServiceSnapshot } from "./terminal-service.js";
+import type { SupercodeTerminalSnapshot as TerminalServiceSnapshot } from "@volter-ai-dev/supercode-terminal";
 
 /** Namespaces every page global / element id / sticky-injection id the widget mints (see `lucarne/widget/ns`). */
 export const WIDGET_NS = "vibewaiting";
