@@ -11,6 +11,9 @@ import type {
 } from "@volter-ai-dev/supercode-client";
 import type { StructuredLaunch } from "@volter-ai-dev/supercode-harness-sdk";
 import type {
+  HarnessAuthenticationEnvironment,
+  HarnessAuthenticationPlan,
+  HarnessAuthenticationReport,
   HarnessId,
   HarnessSettingChange,
   HarnessSettingsReport,
@@ -232,6 +235,8 @@ export class FakeHarnessClient implements HarnessClientAdapter {
   closeCalls = 0;
   readonly messages: Array<{ locator: SessionLocator; text: string }> = [];
   readonly configuredHarnesses: Array<{ harness: HarnessId; changes: HarnessSettingChange[]; expectedRevision?: string }> = [];
+  readonly authenticationBegins: Array<{ harness: HarnessId; environment: HarnessAuthenticationEnvironment; cwd?: string }> = [];
+  readonly authenticationVerifications: HarnessId[] = [];
   #failStart: string | undefined;
 
   constructor(options: FakeHarnessClientOptions = {}) {
@@ -253,6 +258,8 @@ export class FakeHarnessClient implements HarnessClientAdapter {
         "harness.v1.sessions.export",
         "harness.v1.harnesses.settings",
         "harness.v1.harnesses.configure",
+        "harness.v1.harnesses.auth.begin",
+        "harness.v1.harnesses.auth.verify",
       ],
     };
   }
@@ -310,6 +317,44 @@ export class FakeHarnessClient implements HarnessClientAdapter {
   async configureHarness(harness: HarnessId, changes: HarnessSettingChange[], expectedRevision?: string): Promise<HarnessSettingsReport> {
     this.configuredHarnesses.push({ harness, changes, ...(expectedRevision ? { expectedRevision } : {}) });
     return this.#settingsReport(harness, changes[0]?.value ?? null);
+  }
+
+  async beginHarnessAuthentication(
+    harness: HarnessId,
+    request: { environment?: HarnessAuthenticationEnvironment; cwd?: string } = {},
+  ): Promise<HarnessAuthenticationPlan> {
+    const environment = request.environment ?? "local_browser";
+    this.authenticationBegins.push({ harness, environment, ...(request.cwd ? { cwd: request.cwd } : {}) });
+    return {
+      schema: "supercode.harness-authentication.v1",
+      harness,
+      method: environment === "headless" ? "device_code" : "browser",
+      interaction: environment === "headless" ? "device_code" : "browser",
+      browser_behavior: environment === "headless" ? "none" : "native_auto",
+      headless: environment === "headless",
+      launch: {
+        cwd: request.cwd ?? "/tmp/project",
+        program: harness === "claude-code" ? "claude" : "codex",
+        arguments: environment === "headless" ? ["login", "--device-auth"] : ["login"],
+        env: {},
+      },
+      instructions: "Use the native harness sign-in flow.",
+    };
+  }
+
+  async verifyHarnessAuthentication(harness: HarnessId): Promise<HarnessAuthenticationReport> {
+    this.authenticationVerifications.push(harness);
+    const local = this.harnesses.find((item) => item.id === harness);
+    if (local) local.auth = "ready";
+    return {
+      schema: "supercode.harness-authentication.v1",
+      harness,
+      installed: true,
+      executable: `/usr/local/bin/${harness}`,
+      state: "authenticated",
+      methods: [],
+      reason: "The native harness reports an active sign-in.",
+    };
   }
 
   #settingsReport(harness: HarnessId, value: string | null): HarnessSettingsReport {
@@ -509,7 +554,7 @@ class FakeManagedSession {
 /** A `WidgetBridge` that records pushes and lets the test fire intents the way the host's drain would. */
 export class FakeWidgetHost implements WidgetBridge {
   readonly pushes: unknown[] = [];
-  readonly handlers = new Map<string, (i: { id: string | number; payload: unknown }) => void | Promise<void>>();
+  readonly handlers = new Map<string, (i: { id: string | number; payload: unknown; source?: "local" | "remote" }) => void | Promise<void>>();
   removed = 0;
   #intentId = 0;
 
@@ -517,7 +562,7 @@ export class FakeWidgetHost implements WidgetBridge {
     this.pushes.push(patch);
   }
 
-  onIntent(name: string, cb: (i: { id: string | number; payload: unknown }) => void | Promise<void>): void {
+  onIntent(name: string, cb: (i: { id: string | number; payload: unknown; source?: "local" | "remote" }) => void | Promise<void>): void {
     this.handlers.set(name, cb);
   }
 
@@ -537,11 +582,11 @@ export class FakeWidgetHost implements WidgetBridge {
   }
 
   /** Deliver one queued intent, exactly as `WidgetHost`'s drain tick does. */
-  async fireIntent(name: string, payload: unknown): Promise<void> {
+  async fireIntent(name: string, payload: unknown, source?: "local" | "remote"): Promise<void> {
     const handler = this.handlers.get(name);
     if (!handler) throw new Error(`no handler for intent queue '${name}'`);
     this.#intentId += 1;
-    await handler({ id: this.#intentId, payload });
+    await handler({ id: this.#intentId, payload, ...(source ? { source } : {}) });
   }
 }
 

@@ -57,6 +57,13 @@ and nested subagents. Opening a conversation gives you two header-selected views
 - **Terminal** attaches the existing owned tmux session or resumes the same native
   session into one, then reshapes the overlay for terminal dimensions.
 
+If an installed agent needs authentication, **Sign in** opens that agent's own CLI in
+the terminal surface. A local extension click lets the native CLI open its browser;
+a paired remote Codex click uses device code instead. Claude Code currently exposes no
+verified browserless flag, so remote Claude sign-in fails clearly rather than pretending
+the local browser flow is portable. Credentials remain owned by Claude Code or Codex and
+never pass through Vibewaiting or Supercode.
+
 Keyboard shortcuts open and focus the composer (`⌥⇧V` / `Alt+Shift+V`), attach the
 current browser context (`⌥⇧A`), and move between conversations (`⌥⇧←` / `⌥⇧→`). All
 four can be remapped from the browser's extension-shortcuts page.

@@ -109,10 +109,17 @@ export const TRANSCRIPT_PAGE_SIZE = DEFAULT_MAX_ENTRIES;
 export const MAX_HISTORICAL_IMAGE_BYTES = 16 * 1024 * 1024;
 export const MAX_HISTORICAL_IMAGE_URL_CHARS = 22_400_000;
 
+export interface WidgetIntent {
+  id: string | number;
+  payload: unknown;
+  /** Whether this click came from the local extension or a paired remote browser. */
+  source?: "local" | "remote";
+}
+
 /** The slice of `WidgetHost` this daemon uses — the seam a test replaces with a recorder. */
 export interface WidgetBridge {
   push(patch: unknown): Promise<void>;
-  onIntent(name: string, cb: (intent: { id: string | number; payload: unknown }) => void | Promise<void>): void;
+  onIntent(name: string, cb: (intent: WidgetIntent) => void | Promise<void>): void;
   /**
    * Lucarne's context-aware queue primitive. Newer hosts expose this so a latency-sensitive app
    * can choose its own drain cadence instead of waiting for the conservative shared 1.2s pump.
@@ -376,11 +383,11 @@ function parseTerminalHostIntent(payload: unknown): TerminalIntent | null {
 export function bindIntentQueue(
   host: WidgetBridge,
   name: string,
-  handler: (intent: { id: string | number; payload: unknown }) => void | Promise<void>,
+  handler: (intent: WidgetIntent) => void | Promise<void>,
   pollMs = DEFAULT_INTENT_POLL_MS,
-  onSettled?: (intent: { id: string | number; payload: unknown }) => void | Promise<void>,
+  onSettled?: (intent: WidgetIntent) => void | Promise<void>,
 ): () => void {
-  const handle = async (intent: { id: string | number; payload: unknown }): Promise<void> => {
+  const handle = async (intent: WidgetIntent): Promise<void> => {
     try {
       await handler(intent);
     } finally {
@@ -600,6 +607,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   let actionError: string | null = null;
   let exportReceipt: ExportReceipt | null = null;
   let terminalHost = options.terminalService ? await options.terminalService.snapshot() : null;
+  const pendingHarnessAuthentication = new Map<string, {
+    harness: HarnessId;
+    startedAtMs: number;
+  }>();
+  let authenticationMonitorTimer: ReturnType<typeof setTimeout> | null = null;
   const pendingTerminalStarts = new Map<string, {
     cwd: string;
     harness: "claude-code" | "codex";
@@ -633,6 +645,72 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         });
     }
     return nativeRefreshInFlight;
+  };
+  const monitorHarnessAuthentication = async (): Promise<void> => {
+    authenticationMonitorTimer = null;
+    const terminalService = options.terminalService;
+    const client = options.client;
+    if (stopped || !terminalService || !client?.verifyHarnessAuthentication) return;
+    let refreshNeeded = false;
+    let completed = false;
+    try {
+      terminalHost = await terminalService.snapshot();
+      for (const [sessionId, pending] of pendingHarnessAuthentication) {
+        const session = terminalHost.sessions.find((item) => item.id === sessionId);
+        if (session?.activeCommand && now() - pending.startedAtMs <= 10 * 60_000) continue;
+        if (session?.activeCommand) {
+          terminalHost = await terminalService.close(sessionId);
+          pendingHarnessAuthentication.delete(sessionId);
+          completed = true;
+          actionError = `${pending.harness} sign-in timed out; try again.`;
+          continue;
+        }
+        const report = await client.verifyHarnessAuthentication(pending.harness);
+        terminalHost = await terminalService.close(sessionId);
+        pendingHarnessAuthentication.delete(sessionId);
+        completed = true;
+        if (report.state === "authenticated") {
+          refreshNeeded = true;
+          log(`verified ${pending.harness} sign-in through its native CLI`);
+        } else {
+          actionError = report.reason ?? `${pending.harness} did not verify its sign-in`;
+          log(`${pending.harness} sign-in was not verified`);
+        }
+      }
+      if (refreshNeeded) {
+        await controller.dispatch({ type: "refresh", autoObserve: false, silent: true });
+        await refreshSessions();
+      } else if (completed) {
+        await pushNow(true);
+      }
+    } catch (error) {
+      for (const sessionId of pendingHarnessAuthentication.keys()) {
+        try {
+          terminalHost = await terminalService.close(sessionId);
+        } catch {
+          // The terminal service may already have discarded a failed native process.
+        }
+      }
+      pendingHarnessAuthentication.clear();
+      actionError = message(error);
+      log(`harness sign-in verification failed: ${actionError}`);
+      await pushNow(true);
+    }
+    if (!stopped && pendingHarnessAuthentication.size > 0) {
+      authenticationMonitorTimer = setTimeout(
+        () => void monitorHarnessAuthentication(),
+        1_000,
+      );
+      authenticationMonitorTimer.unref?.();
+    }
+  };
+  const scheduleHarnessAuthenticationMonitor = (): void => {
+    if (authenticationMonitorTimer || stopped) return;
+    authenticationMonitorTimer = setTimeout(
+      () => void monitorHarnessAuthentication(),
+      1_000,
+    );
+    authenticationMonitorTimer.unref?.();
   };
   const movableNativeDescriptors = (): SessionDescriptor[] => options.terminalService
     ? descriptors.filter((descriptor) =>
@@ -967,6 +1045,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     const activeMoveStatus = draftKey ? terminalMoves.get(draftKey) ?? null : null;
     const movableNativeSessionCount = movableNativeDescriptors().length;
     const state: WidgetState & {
+      authenticationTerminalSessionId?: string | null;
       canMoveToTerminal?: boolean;
       movableNativeSessionCount?: number;
       terminalHost?: TerminalServiceSnapshot;
@@ -985,6 +1064,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       attached,
       owned: attachmentFor(ownRef, ownRows, ownSnapshot.workspace, home),
       attachError,
+      authenticationTerminalSessionId:
+        pendingHarnessAuthentication.keys().next().value ?? null,
       error: actionError ?? projected.error,
       // The shared UI's Retry control means "refresh controller state". Host intents such as
       // resume/send/export already retain their own action, so labelling a refresh as a retry is
@@ -1044,6 +1125,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     };
     lastPushed = state;
     const inventoryPatch: Partial<WidgetState> & {
+      authenticationTerminalSessionId?: string | null;
       canMoveToTerminal?: boolean;
       movableNativeSessionCount?: number;
       terminalMoveQueuedCount?: number;
@@ -1057,6 +1139,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       attached: state.attached,
       owned: state.owned,
       attachError: state.attachError,
+      authenticationTerminalSessionId: state.authenticationTerminalSessionId ?? null,
       attention: state.attention,
       history: state.history,
       error: state.error,
@@ -2089,6 +2172,42 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       await pushNow();
       return;
     }
+    if (uiIntent?.action === "authenticateHarness") {
+      actionError = null;
+      try {
+        const client = options.client;
+        if (!client?.beginHarnessAuthentication || !client.verifyHarnessAuthentication) {
+          throw new Error("This Supercode service does not support native harness sign-in.");
+        }
+        if (!options.terminalService || !terminalHost?.available) {
+          throw new Error("Harness sign-in needs the local terminal companion.");
+        }
+        if (pendingHarnessAuthentication.size > 0) {
+          throw new Error("Finish or close the sign-in already open in the terminal.");
+        }
+        const plan = await client.beginHarnessAuthentication(uiIntent.harness, {
+          environment: intent.source === "remote" ? "headless" : "local_browser",
+          cwd: options.workspace,
+        });
+        terminalHost = await options.terminalService.launchSession(
+          uiIntent.harness,
+          plan.launch,
+        );
+        const sessionId = terminalHost.attachment?.sessionId;
+        if (!sessionId) throw new Error("The terminal host did not expose the native sign-in session.");
+        pendingHarnessAuthentication.set(sessionId, {
+          harness: uiIntent.harness,
+          startedAtMs: now(),
+        });
+        scheduleHarnessAuthenticationMonitor();
+        log(`opened ${uiIntent.harness} native sign-in in the terminal surface`);
+      } catch (error) {
+        actionError = message(error);
+        log(`harness sign-in failed: ${actionError}`);
+      }
+      await pushNow(true);
+      return;
+    }
     if (uiIntent?.action === "configureHarness") {
       actionError = null;
       try {
@@ -2542,6 +2661,17 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       attentionTimer = null;
       if (terminalMoveRetryTimer) clearTimeout(terminalMoveRetryTimer);
       terminalMoveRetryTimer = null;
+      if (authenticationMonitorTimer) clearTimeout(authenticationMonitorTimer);
+      authenticationMonitorTimer = null;
+      const authenticationSessions = [...pendingHarnessAuthentication.keys()];
+      pendingHarnessAuthentication.clear();
+      for (const sessionId of authenticationSessions) {
+        try {
+          await options.terminalService?.close(sessionId);
+        } catch (error) {
+          log(`native sign-in cleanup failed: ${message(error)}`);
+        }
+      }
       await flushPersistence();
       stopRepush();
       stopDiscovery();
