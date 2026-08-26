@@ -3,11 +3,12 @@ import type {
   RemoteAccessConfiguration,
   RemoteAccessProvider,
 } from "../src/extension-protocol.js";
-import { activeRemotePairingUrl, parseRemotePairingHandoff } from "../src/remote-pairing.js";
 import {
+  activeRemotePairingUrl,
   parseRemoteDeviceSnapshot,
+  parseRemotePairingHandoff,
   type RemoteDeviceSnapshot,
-} from "../src/remote-devices.js";
+} from "@volter-ai-dev/supercode-remote-access/client";
 
 type RemoteAccessStatus =
   | "connected"

@@ -3,9 +3,12 @@ import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
 import { WebSocket as WebSocketClient, WebSocketServer, type WebSocket } from "ws";
-import { type PairingGrant, SingleUsePairingGrants } from "./pairing-grants.js";
-import type { RemoteDeviceSnapshot } from "./remote-devices.js";
-import { RemoteSessionTokens } from "./remote-sessions.js";
+import {
+  type PairingGrant,
+  RemoteSessionTokens,
+  SingleUsePairingGrants,
+} from "@volter-ai-dev/supercode-remote-access";
+import type { RemoteDeviceSnapshot } from "@volter-ai-dev/supercode-remote-access/client";
 
 const MAX_LOGIN_BYTES = 2_048;
 const MAX_SOCKET_MESSAGE_BYTES = 1_048_576;
@@ -234,7 +237,7 @@ export class RemoteMessengerServer {
     socket.once("error", forget);
   }
 
-  private closeSessionSockets(sessionIds: string[], reason: string): void {
+  private closeSessionSockets(sessionIds: readonly string[], reason: string): void {
     for (const sessionId of sessionIds) {
       const sockets = this.sessionSockets.get(sessionId);
       this.sessionSockets.delete(sessionId);
