@@ -5,6 +5,25 @@ the complete generated notes and downloadable artifacts for each version.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-26
+
+### Changed
+
+- The website-access screen now names the page data and pointer/focus activity used by
+  one-action Attach before Chrome asks for permission, including retention, exclusions,
+  transmission boundaries, and revocation.
+- The public privacy policy and Chrome Web Store copy now distinguish local agent
+  credentials from Vibewaiting pairing credentials and state every external prerequisite
+  a reviewer needs to exercise the core feature.
+
+### Security
+
+- Stable remote access now rejects non-HTTPS relay URLs before any chat or terminal
+  traffic can leave the computer.
+- Page-facing content scripts now receive only redacted remote-access status; pairing
+  URLs, passcodes, and device details render solely inside the extension-origin iframe.
+- Extension iframe assets use Chrome's per-session dynamic web-accessible-resource ID.
+
 ## [0.1.0] - 2026-08-26
 
 ### Added
@@ -27,5 +46,6 @@ the complete generated notes and downloadable artifacts for each version.
 - Agent and remote-access defaults now stay outside the first-run critical path, and the
   unsafe confirmation override is labeled explicitly instead of as “Yolo.”
 
-[Unreleased]: https://github.com/volter-ai/vibewaiting/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/volter-ai/vibewaiting/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/volter-ai/vibewaiting/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/volter-ai/vibewaiting/releases/tag/v0.1.0

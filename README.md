@@ -12,8 +12,8 @@ switch the same conversation into a familiar terminal.
 ![Vibewaiting messenger showing local coding-agent sessions on a browser page](docs/assets/store/messenger-1280x800.png)
 
 > **Alpha.** The supported lane is macOS or Linux, Chrome/Chromium/Brave, and local
-> Claude Code or Codex sessions. Installation uses a downloadable native package plus
-> an unpacked extension until signed browser-store releases are available.
+> Claude Code or Codex sessions. Installation uses a downloadable native companion;
+> Chrome Web Store review of the signed extension is currently pending.
 
 ## Why Vibewaiting
 
@@ -34,17 +34,17 @@ short: download the native package from the latest GitHub Release, verify it aga
 `SHA256SUMS`, then run:
 
 ```sh
-npm install --global ./vibewaiting-0.1.0.tgz
+npm install --global ./vibewaiting-0.1.1.tgz
 vibewaiting native install --browser chrome
 ```
 
 The command prints the extension folder to load once from the browser's extensions
-page. In Vibewaiting settings, review the website-access disclosure, choose **Enable on
-websites**, accept the browser prompt, and select a workspace; the launcher then appears
+page. In Vibewaiting settings, review the website-access disclosure, choose **Allow
+website access**, accept the browser prompt, and select a workspace; the launcher then appears
 on ordinary HTTP and HTTPS pages. Brave and Chromium use `--browser brave` and
 `--browser chromium`.
 
-The signed `v0.1.0` artifacts, checksums, SBOM, and provenance are available from the
+The signed `v0.1.1` artifacts, checksums, SBOM, and provenance are available from the
 [latest GitHub Release](https://github.com/volter-ai/vibewaiting/releases/latest). The
 same flow can also be exercised [from source](docs/install.md#install-from-source).
 

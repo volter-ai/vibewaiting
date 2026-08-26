@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Vibewaiting",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Continue local coding-agent sessions from a messenger overlay on any page.",
   "icons": {
     "16": "icon-16.png",
@@ -48,7 +48,8 @@
   "web_accessible_resources": [
     {
       "resources": ["app.html", "app.js", "app.css"],
-      "matches": ["http://*/*", "https://*/*"]
+      "matches": ["http://*/*", "https://*/*"],
+      "use_dynamic_url": true
     }
   ]
 }

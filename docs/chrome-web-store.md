@@ -6,8 +6,8 @@ consistent with the extension, [PRIVACY.md](../PRIVACY.md), and the current rele
 ## Listing
 
 **Single purpose:** Follow and continue local Claude Code and Codex sessions from an
-isolated messenger on ordinary browser pages, with explicit one-action attachment of
-page context.
+isolated browser messenger, with user-invoked page-context attachment and a terminal
+view of the same conversation.
 
 **Short description:** Follow local coding agents, reply from any browser tab, and
 switch the same conversation into a terminal.
@@ -21,15 +21,35 @@ switch the same conversation into a terminal.
 > doing, reply, attach the page you are looking at, or switch the same conversation into
 > a familiar terminal.
 >
-> Sessions and credentials remain on your computer. Vibewaiting has no hosted agent
-> account, analytics, advertising, or cloud transcript service. Website access is
-> optional and is requested only after a plain-language disclosure. Page context enters
-> the local companion only when you explicitly choose Attach. Optional remote access is
-> off until enabled and uses a paired, authenticated device.
+> By default, session content stays on your computer. Vibewaiting has no hosted agent
+> account, analytics, advertising, or cloud transcript service. Claude Code and Codex
+> keep their own credentials; Vibewaiting never receives provider passwords, API keys,
+> or login cookies.
+>
+> Website access is optional. If you enable it, Vibewaiting temporarily remembers the
+> page URL and title, your selection, and the latest link, image, or visible control you
+> point at or focus so the user-invoked Attach action works in one step. Password fields
+> are excluded. Nothing enters a coding-agent session or paired device until you choose
+> Attach, and you can revoke website access at any time.
+>
+> Optional remote access is off by default. When enabled, selected chat and terminal
+> traffic travels over HTTPS/WSS through Cloudflare, your configured ngrok account, or
+> a stable HTTPS relay to an authenticated device you pair. Insecure relay URLs are
+> rejected and stopping remote access closes the route.
 >
 > Requires macOS or Linux, the Vibewaiting native companion, and a local Claude Code or
-> Codex installation. Chrome, Chromium, and Brave are supported in this alpha. Windows,
-> Firefox, and other coding harnesses are not yet supported.
+> Codex installation signed in with that provider. Chrome, Chromium, and Brave are
+> supported in this alpha. Windows, Firefox, and other coding harnesses are not yet
+> supported.
+
+**Reviewer instructions (500-character dashboard limit):**
+
+> Requires macOS/Linux, Node 22.12+ or 24+, and a signed-in Claude Code or Codex CLI; no
+> Vibewaiting account. Run `npm i -g https://github.com/volter-ai/vibewaiting/releases/download/v0.1.1/vibewaiting-0.1.1.tgz`
+> and `vibewaiting native install --browser chrome`. Open Options, save an existing
+> folder, read/allow optional website access, and keep one agent session running. On an
+> HTTP(S) page press Alt+Shift+V; open it, reply, Attach a selection, switch Terminal.
+> Remote access is optional/off.
 
 Do not advertise Windows, Firefox, or other harnesses until their complete release
 lanes are verified.
@@ -49,14 +69,15 @@ downloads, or file-URL access.
 
 ## User-data declarations
 
-- Website content and browsing activity are handled locally only for the disclosed
-  overlay and explicit attachment features.
+- Website content, browsing activity, and the latest pointer/focus target are handled
+  in temporary browser memory only for the disclosed overlay and explicit attachment
+  features.
 - Page context does not enter the native companion until the user chooses Attach.
 - Local agent session content is read from the user's computer and rendered only in an
   extension-owned iframe or an authenticated paired device.
 - Remote access is optional. When enabled, selected Cloudflare, ngrok, or configured
-  stable-relay infrastructure processes chat and terminal transport to the paired
-  device.
+  stable-HTTPS-relay infrastructure processes encrypted chat and terminal transport to
+  the paired device.
 - No data is sold, used for advertising or credit decisions, or exposed for human
   review.
 - The public privacy-policy URL is

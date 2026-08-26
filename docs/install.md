@@ -5,19 +5,21 @@ Claude Code or Codex installation. Windows and Firefox are not yet release-suppo
 
 ## Install a release
 
-Download the native package and `SHA256SUMS` from the newest
+Install the signed extension from the Chrome Web Store when its listing is available.
+While the first store release is under review, download the native package and
+`SHA256SUMS` from the newest
 [GitHub Release](https://github.com/volter-ai/vibewaiting/releases). Verify the package,
 then install it:
 
 ```sh
-npm install --global ./vibewaiting-0.1.0.tgz
+npm install --global ./vibewaiting-0.1.1.tgz
 vibewaiting native install --browser chrome
 ```
 
 Use `--browser brave` or `--browser chromium` when appropriate. The command prints the
-durable extension folder. Open the browser's extensions page, enable developer mode,
-choose **Load unpacked**, and select that folder. This one browser step remains necessary
-until signed store distribution is available.
+durable extension folder used for source or pre-store testing. For that path, open the
+browser's extensions page, enable developer mode, choose **Load unpacked**, and select
+the folder. Store-installed users do not load the extension folder manually.
 
 The separately published extension ZIP is the same browser payload for inspection and
 packaging; the native package already contains the durable extension folder you need.

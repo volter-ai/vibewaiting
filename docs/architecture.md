@@ -35,7 +35,8 @@ Vibewaiting's browser-companion workflow, it likely belongs upstream.
 ## Browser isolation
 
 The content script runs in ordinary pages but receives only the launcher state needed
-to render the fob. The complete messenger renders inside an extension-origin iframe.
+to render the fob and a redacted remote-access status. The complete messenger and all
+pairing URLs, passcodes, and device details render inside an extension-origin iframe.
 Page context crosses into the extension only after an explicit attach action and is
 normalized and bounded before native messaging.
 

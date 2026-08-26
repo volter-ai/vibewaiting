@@ -8,7 +8,9 @@ import { SupercodeHarnessClient } from "@volter-ai-dev/supercode-harness-sdk";
 import type { HarnessId } from "@volter-ai-dev/supercode-harness-sdk";
 import {
   createRemoteAccessController,
+  inspectRemoteAccessCapabilities,
   type RemoteAccessController,
+  type RemoteAccessCapability,
   type RemoteAccessSnapshot,
 } from "@volter-ai-dev/supercode-remote-access";
 import { SupercodeTerminalController } from "@volter-ai-dev/supercode-terminal";
@@ -29,12 +31,44 @@ import { RemoteMessengerServer } from "./remote-messenger.js";
 import type { RemoteDeviceSnapshot } from "@volter-ai-dev/supercode-remote-access/client";
 import { formatWorkspacePath } from "@volter-ai-dev/supercode-ui/controller";
 
-const HARNESS_IDS = new Set<HarnessId>([
-  "claude-code",
-  "codex",
-]);
+const HARNESS_IDS = new Set<HarnessId>(["claude-code", "codex"]);
+const STABLE_RELAY_ENV_KEYS = [
+  "SUPERCODE_TUNNEL_SERVER_URL",
+  "TUNNEL_SERVER_URL",
+  "TERMFLEET_TUNNEL_SERVER_URL",
+] as const;
 
 type HostEventWithoutChunk = Exclude<NativeHostEvent, { type: "chunk" }>;
+
+function secureRemoteAccessRuntime(source: NodeJS.ProcessEnv = process.env): {
+  capabilities: readonly RemoteAccessCapability[];
+  env: NodeJS.ProcessEnv;
+} {
+  const env = { ...source };
+  const configured = STABLE_RELAY_ENV_KEYS.map((key) =>
+    source[key]?.trim(),
+  ).find((value): value is string => Boolean(value));
+  let rejectedStableRelay = false;
+  if (configured) {
+    try {
+      rejectedStableRelay = new URL(configured).protocol !== "https:";
+    } catch {
+      rejectedStableRelay = true;
+    }
+  }
+  if (rejectedStableRelay)
+    for (const key of STABLE_RELAY_ENV_KEYS) delete env[key];
+  const capabilities = inspectRemoteAccessCapabilities(env).map((capability) =>
+    rejectedStableRelay && capability.provider === "stable"
+      ? {
+          detail: "Stable remote access requires an HTTPS relay URL",
+          provider: "stable" as const,
+          status: "needs-setup" as const,
+        }
+      : capability,
+  );
+  return { capabilities, env };
+}
 
 function isClosedNativeChannel(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException | undefined)?.code;
@@ -90,7 +124,11 @@ class NativeMessageWriter {
 class NativeWidgetBridge implements WidgetBridge {
   private readonly intentHandlers = new Map<
     string,
-    (intent: { id: string; payload: unknown; source?: "local" | "remote" }) => void | Promise<void>
+    (intent: {
+      id: string;
+      payload: unknown;
+      source?: "local" | "remote";
+    }) => void | Promise<void>
   >();
   private readonly timers = new Set<ReturnType<typeof setInterval>>();
   private removed = false;
@@ -99,7 +137,9 @@ class NativeWidgetBridge implements WidgetBridge {
     private readonly remote: RemoteMessengerServer,
     private readonly writer: NativeMessageWriter,
   ) {
-    remote.setIntentHandler((intent) => this.receive(intent.id, intent.payload, "remote"));
+    remote.setIntentHandler((intent) =>
+      this.receive(intent.id, intent.payload, "remote"),
+    );
   }
 
   async push(patch: unknown): Promise<void> {
@@ -133,11 +173,13 @@ class NativeWidgetBridge implements WidgetBridge {
   receive(id: string, payload: unknown, source: "local" | "remote"): void {
     const handler = this.intentHandlers.get("agent");
     if (handler)
-      void Promise.resolve(handler({ id, payload, source })).catch((error: unknown) => {
-        process.stderr.write(
-          `[vibewaiting] intent failed: ${(error as Error)?.message ?? String(error)}\n`,
-        );
-      });
+      void Promise.resolve(handler({ id, payload, source })).catch(
+        (error: unknown) => {
+          process.stderr.write(
+            `[vibewaiting] intent failed: ${(error as Error)?.message ?? String(error)}\n`,
+          );
+        },
+      );
   }
 
   every(ms: number, fn: () => unknown): () => void {
@@ -167,9 +209,7 @@ class NativeWidgetBridge implements WidgetBridge {
   }
 }
 
-async function validateSettings(
-  settings: ExtensionSettings,
-): Promise<{
+async function validateSettings(settings: ExtensionSettings): Promise<{
   workspace: string;
   harness?: HarnessId;
   policy?: "default" | "yolo";
@@ -221,7 +261,9 @@ async function localSupercodeCommand(): Promise<string | undefined> {
   return undefined;
 }
 
-export async function runNativeHost(extensionOrigin: string | undefined): Promise<void> {
+export async function runNativeHost(
+  extensionOrigin: string | undefined,
+): Promise<void> {
   if (!extensionOrigin)
     throw new Error("native host did not receive its browser extension origin");
   const decoder = new NativeMessageDecoder();
@@ -233,7 +275,10 @@ export async function runNativeHost(extensionOrigin: string | undefined): Promis
   await terminalService.start();
   const remoteServer = new RemoteMessengerServer(extensionOrigin);
   const remoteEndpoint = await remoteServer.start();
+  const remoteRuntime = secureRemoteAccessRuntime();
   const remoteAccess: RemoteAccessController = createRemoteAccessController({
+    capabilities: remoteRuntime.capabilities,
+    env: remoteRuntime.env,
     localOrigin: remoteEndpoint.localOrigin,
     publicPath: "/",
     tunnelId: await persistentRemoteTunnelId(),
@@ -247,7 +292,10 @@ export async function runNativeHost(extensionOrigin: string | undefined): Promis
   ): Promise<void> => {
     const pairing =
       includePairing && snapshot.status === "connected" && snapshot.publicUrl
-        ? remotePairingHandoff(snapshot.publicUrl, remoteServer.createPairingGrant())
+        ? remotePairingHandoff(
+            snapshot.publicUrl,
+            remoteServer.createPairingGrant(),
+          )
         : undefined;
     await writer.write({
       protocol: VIBEWAITING_EXTENSION_PROTOCOL,
@@ -262,8 +310,8 @@ export async function runNativeHost(extensionOrigin: string | undefined): Promis
     remoteAccessSnapshot = snapshot;
     remoteServer.setInstallableOrigin(
       snapshot.status === "connected" &&
-      snapshot.stability === "stable" &&
-      snapshot.publicUrl
+        snapshot.stability === "stable" &&
+        snapshot.publicUrl
         ? snapshot.publicUrl
         : null,
     );
@@ -357,9 +405,13 @@ export async function runNativeHost(extensionOrigin: string | undefined): Promis
         phase: "ready",
       });
       if (requested.remoteAccess) {
-        void remoteAccess.configure(requested.remoteAccess).catch((error: unknown) => {
-          process.stderr.write(`[vibewaiting] remote access failed: ${(error as Error)?.message ?? String(error)}\n`);
-        });
+        void remoteAccess
+          .configure(requested.remoteAccess)
+          .catch((error: unknown) => {
+            process.stderr.write(
+              `[vibewaiting] remote access failed: ${(error as Error)?.message ?? String(error)}\n`,
+            );
+          });
       }
     } catch (error) {
       await client.close().catch(() => undefined);
@@ -383,16 +435,22 @@ export async function runNativeHost(extensionOrigin: string | undefined): Promis
         try {
           await remoteAccess.configure(command.configuration);
         } catch (error) {
-          process.stderr.write(`[vibewaiting] remote access failed: ${(error as Error)?.message ?? String(error)}\n`);
+          process.stderr.write(
+            `[vibewaiting] remote access failed: ${(error as Error)?.message ?? String(error)}\n`,
+          );
         } finally {
           suppressRemoteDeviceEvents = false;
           await publishRemoteAccess(remoteAccessSnapshot, false);
         }
         return;
       }
-      await remoteAccess.configure(command.configuration).catch((error: unknown) => {
-        process.stderr.write(`[vibewaiting] remote access failed: ${(error as Error)?.message ?? String(error)}\n`);
-      });
+      await remoteAccess
+        .configure(command.configuration)
+        .catch((error: unknown) => {
+          process.stderr.write(
+            `[vibewaiting] remote access failed: ${(error as Error)?.message ?? String(error)}\n`,
+          );
+        });
       return;
     }
     if (command.type === "remote-access-pairing") {
@@ -466,7 +524,9 @@ function remotePairingHandoff(
 async function persistentRemoteTunnelId(): Promise<string> {
   const directory = join(homedir(), ".vibewaiting");
   const path = join(directory, "remote-tunnel-id");
-  const existing = await readFile(path, "utf8").then((value) => value.trim()).catch(() => "");
+  const existing = await readFile(path, "utf8")
+    .then((value) => value.trim())
+    .catch(() => "");
   if (/^vw-[a-f0-9-]{36}$/i.test(existing)) return existing;
   const created = `vw-${randomUUID()}`;
   await mkdir(directory, { recursive: true, mode: 0o700 });

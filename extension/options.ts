@@ -185,7 +185,7 @@ async function renderSiteAccess(): Promise<void> {
     siteAccessToggle.dataset.enabled = String(enabled);
     siteAccessToggle.textContent = enabled
       ? "Disable website access"
-      : "Enable on websites";
+      : "Allow website access";
   }
   if (siteAccessStatus)
     siteAccessStatus.textContent = enabled
