@@ -39,6 +39,8 @@
     "build": "tsc -p tsconfig.json && node widget/build.mjs && node extension/build.mjs",
     "build:widget": "node widget/build.mjs",
     "build:extension": "node extension/build.mjs",
+    "verify:store-identity": "node scripts/verify-extension-identity.mjs",
+    "verify:store-assets": "node scripts/verify-store-assets.mjs",
     "package:release": "node scripts/package-release.mjs",
     "dev:extension": "npm run build && node scripts/dev-extension.mjs",
     "dev:extension:local": "node scripts/sync-local-supercode.mjs && npm run build && node scripts/dev-extension.mjs",
@@ -47,7 +49,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.widget.json && tsc -p tsconfig.extension.json && tsc -p tsconfig.test.json",
     "test": "vitest run",
     "test:widget": "npm run build:widget && playwright test",
-    "check": "npm run typecheck && npm test && npm run build",
+    "check": "npm run verify:store-identity && npm run verify:store-assets && npm run typecheck && npm test && npm run build",
     "check:browser": "npm run check && npm run test:widget",
     "smoke": "node scripts/smoke-harness.mjs",
     "smoke:sessions": "npm run build && node scripts/smoke-sessions.mjs"

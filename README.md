@@ -9,7 +9,7 @@
 on your phone.** Follow what agents are doing, reply without changing windows, or
 switch the same conversation into a familiar terminal.
 
-![Illustrated Vibewaiting product tour: a browser page with a compact coding-agent messenger and phone companion](docs/assets/product-overview.svg)
+![Vibewaiting messenger showing local coding-agent sessions on a browser page](docs/assets/store/messenger-1280x800.png)
 
 > **Alpha.** The supported lane is macOS or Linux, Chrome/Chromium/Brave, and local
 > Claude Code or Codex sessions. Installation uses a downloadable native package plus
@@ -82,6 +82,16 @@ and [architecture](docs/architecture.md) before granting access.
 Website access is optional. Vibewaiting onboarding explains what the page-facing script
 does before the browser asks for HTTP/HTTPS access; disabling that access removes the
 messenger and page-context listener from ordinary sites.
+
+## Open-source boundary
+
+Vibewaiting itself is MIT-licensed. Release archives include exact third-party notices,
+a CycloneDX SBOM, checksums, and public provenance. Its shared agent semantics and
+messenger components arrive as versioned, source-readable Supercode packages under MIT
+or Apache-2.0; their upstream repository is not yet public. That means this checkout is
+fully buildable and auditable as shipped, but changes inside those shared packages must
+currently be coordinated upstream. See [Dependency transparency](docs/dependency-transparency.md)
+for the exact boundary rather than assuming every dependency lives in this repository.
 
 ## Support matrix
 

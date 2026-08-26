@@ -14,10 +14,25 @@ switch the same conversation into a terminal.
 
 **Category:** Developer Tools
 
-The detailed description should lead with the same user outcomes and support matrix as
-the README. It must say that the native companion, macOS or Linux, and a local Claude
-Code or Codex installation are required. Do not advertise Windows, Firefox, or other
-harnesses until their complete release lanes are verified.
+**Detailed description:**
+
+> Vibewaiting keeps your local Claude Code and Codex sessions within reach while you
+> work in the browser. Open a compact messenger on ordinary tabs, see what each agent is
+> doing, reply, attach the page you are looking at, or switch the same conversation into
+> a familiar terminal.
+>
+> Sessions and credentials remain on your computer. Vibewaiting has no hosted agent
+> account, analytics, advertising, or cloud transcript service. Website access is
+> optional and is requested only after a plain-language disclosure. Page context enters
+> the local companion only when you explicitly choose Attach. Optional remote access is
+> off until enabled and uses a paired, authenticated device.
+>
+> Requires macOS or Linux, the Vibewaiting native companion, and a local Claude Code or
+> Codex installation. Chrome, Chromium, and Brave are supported in this alpha. Windows,
+> Firefox, and other coding harnesses are not yet supported.
+
+Do not advertise Windows, Firefox, or other harnesses until their complete release
+lanes are verified.
 
 ## Permission justifications
 
@@ -49,6 +64,12 @@ downloads, or file-URL access.
 
 ## Required assets and proof
 
+The final Chrome Web Store item ID must be
+`dbcbmeiocgelabifljkclkacecapalgj`. It is derived from the public key in the packaged
+manifest and is also the origin authorized by the native installer. Configure the
+repository variable `CHROME_WEB_STORE_EXTENSION_ID` to this value before tagging; the
+release workflow rejects a missing or different store identity.
+
 Do not submit until the release candidate has:
 
 - a 128×128 store icon from the packaged Vibewaiting icon;
@@ -61,6 +82,10 @@ Do not submit until the release candidate has:
 - a clean install proof on a profile with no prior Vibewaiting permissions;
 - enable, deny, revoke, extension-update, native-companion-update, and uninstall proofs;
 - confirmation that packaged code contains no remote executable code.
+
+Reviewable store artwork belongs in `docs/assets/store/`. Screenshots must be captured
+from the release candidate with deliberate demo data, never from a maintainer's real
+sessions. `npm run verify:store-assets` validates the required filenames and dimensions.
 
 Chrome's permission prompt is browser-owned and cannot be accepted by unattended page
 automation. The release checklist therefore requires a recorded manual grant and

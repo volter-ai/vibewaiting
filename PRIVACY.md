@@ -43,11 +43,13 @@ Remote access is off until you turn it on. When enabled, chat state, messages, a
 terminal traffic you use remotely travel through the selected transport provider to
 your paired device. Automatic mode may select Cloudflare; you can instead choose an
 installed ngrok client or a stable relay you configure. Those providers process the
-transport under their own terms and privacy policies. Temporary URLs are not durable
-app identities. Pairing is short-lived, authenticated devices can be revoked, and
-stopping access closes the public route. Vibewaiting does not intentionally retain a
-remote transcript copy after the local bridge stops. See [SECURITY.md](SECURITY.md) for
-the trust model.
+transport under their own terms and privacy policies: see
+[Cloudflare's privacy policy](https://www.cloudflare.com/privacypolicy/) and
+[ngrok's privacy policy](https://ngrok.com/legal/privacy). A stable relay is infrastructure
+chosen and configured by the user. Temporary URLs are not durable app identities.
+Pairing is short-lived, authenticated devices can be revoked, and stopping access
+closes the public route. Vibewaiting does not intentionally retain a remote transcript
+copy after the local bridge stops. See [SECURITY.md](SECURITY.md) for the trust model.
 
 ## Questions
 

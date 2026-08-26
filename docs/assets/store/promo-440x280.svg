@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="440" height="280" viewBox="0 0 440 280">
+  <rect width="440" height="280" fill="#f1f2f4"/>
+  <rect x="24" y="28" width="266" height="202" rx="12" fill="#fff" stroke="#d8dade"/>
+  <rect x="24" y="28" width="266" height="30" rx="12" fill="#f7f7f8"/>
+  <path d="M24 49h266" stroke="#e4e5e8"/>
+  <circle cx="42" cy="43" r="3" fill="#c8cbd0"/><circle cx="53" cy="43" r="3" fill="#c8cbd0"/><circle cx="64" cy="43" r="3" fill="#c8cbd0"/>
+  <rect x="84" y="36" width="150" height="13" rx="7" fill="#e9eaec"/>
+  <rect x="48" y="82" width="116" height="12" rx="5" fill="#dfe1e4"/>
+  <rect x="48" y="108" width="166" height="7" rx="4" fill="#ececef"/>
+  <rect x="48" y="124" width="144" height="7" rx="4" fill="#ececef"/>
+  <g>
+    <rect x="186" y="69" width="220" height="180" rx="13" fill="#fff" stroke="#d8dade"/>
+    <rect x="186" y="69" width="220" height="34" rx="13" fill="#17191e"/>
+    <rect x="186" y="90" width="220" height="13" fill="#17191e"/>
+    <text x="201" y="91" font-family="system-ui,sans-serif" font-size="10" font-weight="700" fill="#fff">Agent chats</text>
+    <circle cx="205" cy="126" r="9" fill="#17191e"/><circle cx="205" cy="126" r="3" fill="#f4f4f1"/>
+    <text x="220" y="124" font-family="system-ui,sans-serif" font-size="9" font-weight="700" fill="#202227">Review the release</text>
+    <text x="220" y="138" font-family="system-ui,sans-serif" font-size="7" fill="#686d76">Codex is checking the package…</text>
+    <circle cx="388" cy="120" r="3" fill="#20a05a"/>
+    <path d="M196 150h200" stroke="#e4e5e8"/>
+    <circle cx="205" cy="170" r="9" fill="#eeeef0"/>
+    <text x="220" y="168" font-family="system-ui,sans-serif" font-size="9" font-weight="700" fill="#202227">Fix the onboarding</text>
+    <text x="220" y="182" font-family="system-ui,sans-serif" font-size="7" fill="#686d76">Claude Code · Waiting for input</text>
+    <rect x="196" y="207" width="200" height="27" rx="8" fill="#fff" stroke="#cfd1d5"/>
+    <text x="207" y="224" font-family="system-ui,sans-serif" font-size="8" fill="#686d76">Message this agent…</text>
+  </g>
+  <text x="30" y="260" font-family="system-ui,sans-serif" font-size="16" font-weight="750" fill="#202227">Vibewaiting</text>
+  <text x="126" y="260" font-family="system-ui,sans-serif" font-size="10" font-weight="550" fill="#686d76">Your coding agents, without leaving the browser.</text>
+</svg>
