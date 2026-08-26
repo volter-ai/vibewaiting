@@ -7,6 +7,7 @@ import {
 import type { HarnessId, StructuredLaunch } from "@volter-ai-dev/supercode-harness-sdk";
 import {
   TerminalWebSocketBridge,
+  TerminalHostError,
   TmuxTerminalHost,
   type EmbeddedTerminalAttachmentGrant,
   type TerminalSession,
@@ -262,7 +263,14 @@ export class LocalTerminalService {
   async close(sessionId: string): Promise<TerminalServiceSnapshot> {
     this.pendingInitialInputs.get(sessionId)?.abort.abort();
     this.pendingInitialInputs.delete(sessionId);
-    this.host.closeSession(sessionId);
+    const live = await this.host.listSessions();
+    if (live.some((session) => session.id === sessionId)) {
+      try {
+        this.host.closeSession(sessionId);
+      } catch (error) {
+        if (!(error instanceof TerminalHostError) || error.code !== "session_not_found") throw error;
+      }
+    }
     this.conversationBySession.delete(sessionId);
     if (this.attachment?.sessionId === sessionId) this.attachment = null;
     return await this.snapshot();

@@ -521,6 +521,10 @@ export function mountMessenger(
       ? Math.max(0, Math.floor(state.terminalMoveWaitingCount))
       : 0;
     const terminals = options.TerminalPanel ? terminalHostState(state) : null;
+    const authenticationTerminalSessionId = isRecord(state) &&
+      typeof state.authenticationTerminalSessionId === "string"
+      ? state.authenticationTerminalSessionId
+      : null;
     const TerminalPanel = options.TerminalPanel;
     const message =
       "Vibewaiting is no longer connected to its local agent bridge.";
@@ -607,11 +611,14 @@ export function mountMessenger(
       const requestedKey = requestedTerminalConversation.current;
       const requestedAttachment = requestedKey !== null && requestedKey === conversationKey;
       const unboundNewTerminal = conversationKey === null && requestedKey === null;
-      if (!requestedAttachment && !unboundNewTerminal) return;
+      const requestedAuthentication = conversationKey === null &&
+        terminals.attachment?.sessionId === authenticationTerminalSessionId;
+      if (!requestedAttachment && !unboundNewTerminal && !requestedAuthentication) return;
       requestedTerminalConversation.current = null;
       void requestTerminalPresentation(VIBEWAITING_PRESENTATION.terminal);
     }, [
       terminals?.attachment?.id,
+      authenticationTerminalSessionId,
       terminalsOpen,
       presentationPending,
     ]);
@@ -624,7 +631,8 @@ export function mountMessenger(
       : null;
     const visibleAttachment = terminals?.attachment && (
       terminals.attachment.conversationKey === activeConversationKey ||
-      (activeConversationKey === null && terminals.attachment.conversationKey === null)
+      (activeConversationKey === null && terminals.attachment.conversationKey === null) ||
+      terminals.attachment.sessionId === authenticationTerminalSessionId
     )
       ? terminals.attachment
       : null;

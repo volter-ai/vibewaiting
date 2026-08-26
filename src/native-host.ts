@@ -47,13 +47,13 @@ async function writeEvent(event: HostEventWithoutChunk): Promise<void> {
 class NativeWidgetBridge implements WidgetBridge {
   private readonly intentHandlers = new Map<
     string,
-    (intent: { id: string; payload: unknown }) => void | Promise<void>
+    (intent: { id: string; payload: unknown; source?: "local" | "remote" }) => void | Promise<void>
   >();
   private readonly timers = new Set<ReturnType<typeof setInterval>>();
   private removed = false;
 
   constructor(private readonly remote: RemoteMessengerServer) {
-    remote.setIntentHandler((intent) => this.receive(intent.id, intent.payload));
+    remote.setIntentHandler((intent) => this.receive(intent.id, intent.payload, "remote"));
   }
 
   async push(patch: unknown): Promise<void> {
@@ -71,6 +71,7 @@ class NativeWidgetBridge implements WidgetBridge {
     handler: (intent: {
       id: string | number;
       payload: unknown;
+      source?: "local" | "remote";
     }) => void | Promise<void>,
   ): void {
     this.intentHandlers.set(
@@ -78,14 +79,15 @@ class NativeWidgetBridge implements WidgetBridge {
       handler as (intent: {
         id: string;
         payload: unknown;
+        source?: "local" | "remote";
       }) => void | Promise<void>,
     );
   }
 
-  receive(id: string, payload: unknown): void {
+  receive(id: string, payload: unknown, source: "local" | "remote"): void {
     const handler = this.intentHandlers.get("agent");
     if (handler)
-      void Promise.resolve(handler({ id, payload })).catch((error: unknown) => {
+      void Promise.resolve(handler({ id, payload, source })).catch((error: unknown) => {
         process.stderr.write(
           `[vibewaiting] intent failed: ${(error as Error)?.message ?? String(error)}\n`,
         );
@@ -348,7 +350,7 @@ export async function runNativeHost(extensionOrigin: string | undefined): Promis
       );
       return;
     }
-    bridge?.receive(command.id, command.payload);
+    bridge?.receive(command.id, command.payload, "local");
   };
 
   process.stdin.on("data", (chunk: Buffer) => {
