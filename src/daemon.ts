@@ -20,17 +20,20 @@ import {
   conversationPreviewText,
   HarnessAuthenticationController,
   SessionWindowCache,
+  SupercodeSessionCatalog,
   SupercodeController,
 } from "@volter-ai-dev/supercode-client";
 import { sessionReconnectIdentitySync as sessionKey } from "@volter-ai-dev/supercode-client/node";
 import type {
   FrontendHarness,
   HarnessClientAdapter,
+  SupercodeSessionCatalogClient,
+  SupercodeSessionCatalogSnapshot,
   SupercodeClientAction,
   SupercodeClientSnapshot,
 } from "@volter-ai-dev/supercode-client";
 import { createNativeInteractiveStart } from "@volter-ai-dev/supercode-harness-sdk";
-import type { DiscoveryQuery, HarnessId, SessionArtifact, SessionDescriptor, SessionFormat, SessionLocator, StructuredLaunch } from "@volter-ai-dev/supercode-harness-sdk";
+import type { HarnessId, SessionArtifact, SessionDescriptor, SessionFormat, StructuredLaunch } from "@volter-ai-dev/supercode-harness-sdk";
 import type { ContinuationMode } from "@volter-ai-dev/supercode-ui";
 import { normalizeUiState, parseSupercodeUiIntent } from "@volter-ai-dev/supercode-ui/core";
 import {
@@ -40,7 +43,6 @@ import {
   projectSessionInventory as projectSessions,
   projectSubagentInventory,
   projectSubagentTranscript,
-  sessionConversationUpdatedAt as conversationUpdatedAt,
   sessionDescriptorRuntimeStatus as sessionRuntimeStatus,
   type ActiveSessionRef,
   type ProjectedSessionRowModel as SessionRow,
@@ -89,8 +91,6 @@ export const DEFAULT_REPUSH_INTERVAL_MS = 0;
 export const DEFAULT_DISCOVER_INTERVAL_MS = 60_000;
 /** Each explicit inventory page adds the same bounded number of rows. */
 export const MAX_SESSION_ROWS = 30;
-/** Re-check a still-untitled new Claude/Codex session without rescanning topic history every tick. */
-const TOPIC_RETRY_MS = 30_000;
 /** Tool-stream churn is not unread. A no-status peer must be quiet this long before it asks for attention. */
 export const DEFAULT_ATTENTION_SETTLE_MS = 15_000;
 /** A broken harness attach must become a visible row error, never an eternal local spinner. */
@@ -146,62 +146,7 @@ export interface AgentController {
   close(): Promise<void>;
 }
 
-/**
- * The discovery slice of the harness transport, widened where the controller's adapter narrows it.
- *
- * `HarnessClientAdapter.discover` demands a `workspace` because the controller is workspace-scoped;
- * the SDK's own `discover` does not, and calling it with no workspace is exactly the GLOBAL scan
- * this panel exists to show. A real `SupercodeHarnessClient` satisfies both shapes.
- */
-export interface SessionDiscoveryClient {
-  discover(query: DiscoveryQuery): Promise<{ sessions: SessionDescriptor[] }>;
-  subscribeSessionActivity?(
-    locators: SessionLocator[],
-  ): Promise<{ subscription: string; initial: SessionActivityObservation[] }>;
-  unsubscribeSessionActivity?(subscription: string): Promise<{ removed: boolean }>;
-  subscribeSessionIndex?(
-    query: DiscoveryQuery,
-  ): Promise<{ subscription: string; revision: number; initial: SessionDescriptor[] }>;
-  unsubscribeSessionIndex?(subscription: string): Promise<{ removed: boolean }>;
-}
-
-interface SessionActivityObservation {
-  harness: HarnessId;
-  session_id: string;
-  presence: "persisted" | "running" | "shutting_down";
-  turn: "unknown" | "idle" | "working" | "needs_input";
-  evidence: {
-    source: string;
-    native_state: string | null;
-    observed_at_ms: number;
-    harness_version: string | null;
-  };
-}
-
-interface SessionActivityEvent {
-  subscription: string;
-  activities: SessionActivityObservation[];
-}
-
-interface SessionActivityEventSource {
-  on(event: "sessionActivityEvent", listener: (event: SessionActivityEvent) => void): unknown;
-  off(event: "sessionActivityEvent", listener: (event: SessionActivityEvent) => void): unknown;
-}
-
-interface SessionIndexEvent {
-  subscription: string;
-  revision?: number;
-  changes?: Array<
-    | { kind: "added" | "updated"; descriptor: SessionDescriptor }
-    | { kind: "removed"; key: { harness: HarnessId; session_id: string } }
-  >;
-  error?: { recoverable: true; message: string };
-}
-
-interface SessionIndexEventSource {
-  on(event: "sessionIndexEvent", listener: (event: SessionIndexEvent) => void): unknown;
-  off(event: "sessionIndexEvent", listener: (event: SessionIndexEvent) => void): unknown;
-}
+export type SessionDiscoveryClient = SupercodeSessionCatalogClient;
 
 /**
  * Native stores are independent inbox sources. Asking for them separately lets the messenger paint
@@ -594,15 +539,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   let subagentDescriptors: readonly SessionDescriptor[] = [];
   let subagentInspector: WidgetState["subagentInspector"] = null;
   let subagentLoadGeneration = 0;
-  const activityBySession = new Map<string, SessionActivityObservation>();
-  let activitySubscription: string | null = null;
-  let activityLocatorFingerprint = "";
-  let activitySubscriptionGeneration = 0;
-  let indexSubscription: string | null = null;
-  let indexRevision = 0;
-  let indexLimitFingerprint = "";
-  let indexSubscriptionGeneration = 0;
-  let indexRecoveryInFlight: Promise<void> | null = null;
+  let catalogActivities = new Map<string, SupercodeSessionCatalogSnapshot["activities"][number]>();
   let sessionLimit = MAX_SESSION_ROWS;
   let hasMoreSessions = false;
   const initialTranscriptLimit = options.projection?.maxEntries ?? DEFAULT_MAX_ENTRIES;
@@ -951,7 +888,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       ...subagentInspector,
       items: projectSubagentInventory(
         subagentDescriptors.map((descriptor) => {
-          const activity = activityBySession.get(
+          const activity = catalogActivities.get(
             `${descriptor.locator.harness}\0${descriptor.locator.session_id}`,
           );
           return activity ? { ...descriptor, activity } : descriptor;
@@ -1191,43 +1128,32 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const repushMs = options.repushIntervalMs ?? DEFAULT_REPUSH_INTERVAL_MS;
   const stopRepush = repushMs > 0 ? host.every(repushMs, () => pushNow()) : (): void => undefined;
 
-  /** Re-scan each native store, publishing completed inbox slices as they arrive. */
-  let refreshInFlight: Promise<void> | null = null;
+  // Supercode owns discovery, topic retention, index-gap recovery, lifecycle subscriptions, and
+  // pagination. Vibewaiting keeps only the messenger-specific rule that rows do not move under the
+  // pointer while the list is open.
   let initialInventorySettled = false;
-  const sessionsByHarness = new Map<HarnessId, SessionDescriptor[]>();
-  // Polling returns a bounded slice per harness. Remember every key that has crossed that boundary
-  // so an older off-screen row is not mistaken for a newly-created conversation on every refresh.
+  let catalog: SupercodeSessionCatalog | null = null;
   const knownDescriptorKeys = new Set<string>();
-  const topicCandidatesBySession = new Map<string, SessionDescriptor["preview_candidates"]>();
-  const topicAttemptedAtBySession = new Map<string, number>();
-  const retainTopic = (descriptor: SessionDescriptor): SessionDescriptor => {
-    const activity = (descriptor as SessionDescriptor & { activity?: SessionActivityObservation | null }).activity;
-    if (activity) activityBySession.set(`${activity.harness}\0${activity.session_id}`, activity);
-    const key = sessionKey(descriptor.locator);
-    if (descriptor.preview_candidates?.length) {
-      topicCandidatesBySession.set(key, descriptor.preview_candidates);
-      return descriptor;
+  const rebuildDescriptors = (
+    snapshot: SupercodeSessionCatalogSnapshot | null = catalog?.getSnapshot() ?? null,
+    preserveVisibleOrder = panelVisible && initialInventorySettled,
+  ): void => {
+    if (!snapshot) {
+      descriptors = [];
+      hasMoreSessions = false;
+      return;
     }
-    const retained = topicCandidatesBySession.get(key);
-    return retained?.length ? { ...descriptor, preview_candidates: retained } : descriptor;
-  };
-  const rebuildDescriptors = (preserveVisibleOrder = panelVisible && initialInventorySettled): void => {
-    const all = [...sessionsByHarness.values()].flat().map((descriptor) => {
-      const activity = activityBySession.get(
-        `${descriptor.locator.harness}\0${descriptor.locator.session_id}`,
-      );
-      return activity ? { ...descriptor, activity } : descriptor;
-    });
-    all.sort((left, right) =>
-      (conversationUpdatedAt(right) ?? Number.MIN_SAFE_INTEGER) - (conversationUpdatedAt(left) ?? Number.MIN_SAFE_INTEGER)
-      || left.locator.harness.localeCompare(right.locator.harness)
-      || left.locator.session_id.localeCompare(right.locator.session_id));
-    hasMoreSessions = all.length > sessionLimit
-      || [...sessionsByHarness.values()].some((sessions) => sessions.length > sessionLimit);
+    sessionLimit = snapshot.limit;
+    hasMoreSessions = snapshot.hasMore;
+    catalogActivities = new Map(snapshot.activities.map((activity) => [
+      `${activity.harness}\0${activity.session_id}`,
+      activity,
+    ]));
+    const all = [...snapshot.sessions];
     const unseen = all.filter((descriptor) => !knownDescriptorKeys.has(sessionKey(descriptor.locator)));
     for (const descriptor of all) knownDescriptorKeys.add(sessionKey(descriptor.locator));
     if (!preserveVisibleOrder || descriptors.length === 0) {
-      descriptors = all.slice(0, sessionLimit);
+      descriptors = all;
       return;
     }
     const updatedByKey = new Map(all.map((descriptor) => [sessionKey(descriptor.locator), descriptor]));
@@ -1242,9 +1168,6 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       updatedByKey.delete(key);
       return [updated];
     });
-    // New conversations append while the panel is open instead of reordering the row under the
-    // pointer. At a full page they replace only the oldest visible rows; appending after all 30 and
-    // then truncating used to make every newly-created conversation invisible until panel close.
     const additions = unseen.filter((descriptor) => updatedByKey.has(sessionKey(descriptor.locator)));
     const pinnedCount = stable.filter((descriptor) => pinnedKeys.has(sessionKey(descriptor.locator))).length;
     const selectedAdditions = additions.slice(0, Math.max(0, sessionLimit - pinnedCount));
@@ -1258,194 +1181,29 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     });
     descriptors = [...selectedStable, ...selectedAdditions].slice(0, sessionLimit);
   };
-  const activityCandidate = discovery as (SessionDiscoveryClient & Partial<SessionActivityEventSource>) | undefined;
-  const activityTransport = activityCandidate?.subscribeSessionActivity
-    && activityCandidate.unsubscribeSessionActivity
-    && activityCandidate.on
-    && activityCandidate.off
-    ? {
-        subscribe: activityCandidate.subscribeSessionActivity.bind(activityCandidate),
-        unsubscribe: activityCandidate.unsubscribeSessionActivity.bind(activityCandidate),
-        on: activityCandidate.on.bind(activityCandidate),
-        off: activityCandidate.off.bind(activityCandidate),
-      }
+  catalog = discovery
+    ? new SupercodeSessionCatalog({
+        client: discovery,
+        harnesses: DISCOVERY_HARNESSES,
+        limit: sessionLimit,
+        includeTopicCandidates: true,
+      })
     : null;
-  const indexCandidate = discovery as (SessionDiscoveryClient & Partial<SessionIndexEventSource>) | undefined;
-  const indexTransport = indexCandidate?.subscribeSessionIndex
-    && indexCandidate.unsubscribeSessionIndex
-    && indexCandidate.on
-    && indexCandidate.off
-    ? {
-        subscribe: indexCandidate.subscribeSessionIndex.bind(indexCandidate),
-        unsubscribe: indexCandidate.unsubscribeSessionIndex.bind(indexCandidate),
-        on: indexCandidate.on.bind(indexCandidate),
-        off: indexCandidate.off.bind(indexCandidate),
-      }
-    : null;
-  const applyActivities = (activities: readonly SessionActivityObservation[]): boolean => {
-    let changed = false;
-    for (const activity of activities) {
-      const key = `${activity.harness}\0${activity.session_id}`;
-      const previous = activityBySession.get(key);
-      const before = previous
-        ? `${previous.presence}:${previous.turn}:${previous.evidence.source}:${previous.evidence.native_state ?? ""}:${previous.evidence.harness_version ?? ""}`
-        : "";
-      const after = `${activity.presence}:${activity.turn}:${activity.evidence.source}:${activity.evidence.native_state ?? ""}:${activity.evidence.harness_version ?? ""}`;
-      activityBySession.set(key, activity);
-      if (before !== after) changed = true;
-    }
-    if (changed) rebuildDescriptors();
-    return changed;
-  };
-  const onSessionActivity = (event: SessionActivityEvent): void => {
-    if (stopped || event.subscription !== activitySubscription) return;
-    if (applyActivities(event.activities)) void pushNow(false, "inventory");
+  const unsubscribeCatalog = catalog?.subscribe((snapshot) => {
+    if (stopped) return;
+    rebuildDescriptors(snapshot);
+    void bindPendingTerminalStarts();
+    void pushNow(false, "inventory");
     void processTerminalMove();
-  };
-  activityTransport?.on("sessionActivityEvent", onSessionActivity);
-
-  const syncActivitySubscription = async (): Promise<void> => {
-    if (!activityTransport || stopped) return;
-    const locators = [...descriptors, ...subagentDescriptors].map((descriptor) => descriptor.locator);
-    const fingerprint = locators.map(sessionKey).sort().join("\n");
-    if (fingerprint === activityLocatorFingerprint) return;
-    activityLocatorFingerprint = fingerprint;
-    const generation = ++activitySubscriptionGeneration;
-    if (locators.length === 0) return;
-    try {
-      const opened = await activityTransport.subscribe(locators);
-      if (stopped || generation !== activitySubscriptionGeneration) {
-        await activityTransport.unsubscribe(opened.subscription).catch(() => undefined);
-        return;
-      }
-      const previous = activitySubscription;
-      activitySubscription = opened.subscription;
-      if (applyActivities(opened.initial)) await pushNow(false, "inventory");
-      if (previous) await activityTransport.unsubscribe(previous).catch((error: unknown) => {
-        log(`old activity subscription cleanup failed (continuing): ${message(error)}`);
-      });
-    } catch (error) {
-      if (!stopped && generation === activitySubscriptionGeneration) {
-        activityLocatorFingerprint = "";
-        log(`session activity subscription failed (continuing): ${message(error)}`);
-      }
-    }
-  };
-  const syncIndexSubscription = async (): Promise<void> => {
-    if (!indexTransport || stopped) return;
-    const fingerprint = String(sessionLimit);
-    if (fingerprint === indexLimitFingerprint) return;
-    indexLimitFingerprint = fingerprint;
-    const generation = ++indexSubscriptionGeneration;
-    try {
-      const opened = await indexTransport.subscribe({
-        harnesses: ["claude-code", "codex"],
-        limit: sessionLimit + 1,
-        include_topic_candidates: true,
-      });
-      if (stopped || generation !== indexSubscriptionGeneration) {
-        await indexTransport.unsubscribe(opened.subscription).catch(() => undefined);
-        return;
-      }
-      const previous = indexSubscription;
-      indexSubscription = opened.subscription;
-      indexRevision = opened.revision;
-      for (const harness of ["claude-code", "codex"] as const) {
-        sessionsByHarness.set(
-          harness,
-          opened.initial.filter((descriptor) => descriptor.locator.harness === harness).map(retainTopic),
-        );
-      }
-      rebuildDescriptors();
-      await syncActivitySubscription();
+  }) ?? (() => undefined);
+  const refreshSessions = async (): Promise<void> => {
+    if (stopped || !catalog) return;
+    await catalog.refresh();
+    if (!initialInventorySettled) {
+      initialInventorySettled = true;
+      rebuildDescriptors(catalog.getSnapshot(), false);
       await pushNow(false, "inventory");
-      if (previous) await indexTransport.unsubscribe(previous).catch((error: unknown) => {
-        log(`old session index cleanup failed (continuing): ${message(error)}`);
-      });
-    } catch (error) {
-      if (!stopped && generation === indexSubscriptionGeneration) {
-        indexLimitFingerprint = "";
-        log(`session index subscription failed; retaining slow recovery scan: ${message(error)}`);
-      }
     }
-  };
-  const refreshSessions = (harnesses: readonly HarnessId[] = DISCOVERY_HARNESSES): Promise<void> => {
-    if (stopped || !discovery) return Promise.resolve();
-    // A slow native store must not let the recovery inventory tick pile up identical RPCs. Apart
-    // from wasting work, those queued calls used to extend one timeout into minutes of repeated
-    // "loading" failures.
-    if (refreshInFlight) return refreshInFlight;
-    const reportTimings = sessionsByHarness.size === 0;
-    refreshInFlight = Promise.all(harnesses.map(async (harness) => {
-      const startedAt = performance.now();
-      try {
-        const result = await discovery.discover({ harnesses: [harness], limit: sessionLimit + 1 });
-        if (stopped) return;
-        const sessions = result.sessions.map(retainTopic);
-        sessionsByHarness.set(harness, sessions);
-        rebuildDescriptors();
-        void bindPendingTerminalStarts();
-        if (reportTimings) {
-          log(`discovered ${sessions.length} ${harness} sessions in ${Math.round(performance.now() - startedAt)}ms`);
-        }
-        await pushNow(false, "inventory");
-      } catch (e) {
-        if (!stopped) {
-          log(`session discovery failed for ${harness} after ${Math.round(performance.now() - startedAt)}ms (continuing): ${message(e)}`);
-        }
-      }
-    })).then(async () => {
-      if (stopped) return;
-      await syncActivitySubscription();
-      await syncIndexSubscription();
-      // The index snapshot and every targeted replacement already carry
-      // topic candidates. Retrying a second full Claude/Codex scan would
-      // quietly reintroduce the hot path this subscription removes.
-      if (indexSubscription) return;
-      const now = performance.now();
-      const pendingTopicKeys = descriptors
-        .filter((descriptor) => descriptor.locator.harness === "claude-code" || descriptor.locator.harness === "codex")
-        .map((descriptor) => sessionKey(descriptor.locator))
-        .filter((key) => !topicCandidatesBySession.has(key)
-          && now - (topicAttemptedAtBySession.get(key) ?? Number.NEGATIVE_INFINITY) >= TOPIC_RETRY_MS);
-      if (pendingTopicKeys.length === 0) return;
-      for (const key of pendingTopicKeys) topicAttemptedAtBySession.set(key, now);
-      const startedAt = performance.now();
-      try {
-        const result = await discovery.discover({
-          harnesses: ["claude-code", "codex"],
-          limit: sessionLimit,
-          include_topic_candidates: true,
-        });
-        if (stopped) return;
-        for (const descriptor of result.sessions) retainTopic(descriptor);
-        for (const harness of ["claude-code", "codex"] as const) {
-          const sessions = sessionsByHarness.get(harness);
-          if (sessions) sessionsByHarness.set(harness, sessions.map(retainTopic));
-        }
-        rebuildDescriptors();
-        log(`discovered ${result.sessions.length} Claude Code/Codex topics in ${Math.round(performance.now() - startedAt)}ms`);
-        await pushNow(false, "inventory");
-      } catch (e) {
-        if (!stopped) {
-          log(`topic discovery failed after ${Math.round(performance.now() - startedAt)}ms (continuing): ${message(e)}`);
-        }
-      }
-    }).finally(async () => {
-      try {
-        // Progressive slices make the first rows useful quickly, but an early panel open must not
-        // freeze whichever native store happened to answer first. Normalize once after the initial
-        // inventory is complete; subsequent updates retain the row under the pointer until close.
-        if (!stopped && !initialInventorySettled) {
-          initialInventorySettled = true;
-          rebuildDescriptors(false);
-          await pushNow(false, "inventory");
-        }
-      } finally {
-        refreshInFlight = null;
-      }
-    });
-    return refreshInFlight;
   };
 
   async function processTerminalMove(): Promise<void> {
@@ -1550,80 +1308,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     await terminalMoveInFlight;
   }
 
-  const recoverSessionIndex = (): Promise<void> => {
-    if (indexRecoveryInFlight) return indexRecoveryInFlight;
-    indexLimitFingerprint = "";
-    indexRecoveryInFlight = syncIndexSubscription()
-      .finally(() => {
-        indexRecoveryInFlight = null;
-      });
-    return indexRecoveryInFlight;
-  };
-  const onSessionIndex = (event: SessionIndexEvent): void => {
-    if (stopped || event.subscription !== indexSubscription) return;
-    if (event.error) {
-      log(`session index reported a recoverable error: ${event.error.message}`);
-      return;
-    }
-    if (!Number.isSafeInteger(event.revision) || event.revision !== indexRevision + 1) {
-      log(`session index revision gap (${indexRevision} -> ${String(event.revision)}); resnapshotting`);
-      void recoverSessionIndex();
-      return;
-    }
-    indexRevision = event.revision;
-    for (const change of event.changes ?? []) {
-      if (change.kind === "removed") {
-        if (change.key.harness !== "claude-code" && change.key.harness !== "codex") continue;
-        const key = `${change.key.harness}\0${change.key.session_id}`;
-        const sessions = sessionsByHarness.get(change.key.harness);
-        const removed = sessions?.find((descriptor) =>
-          descriptor.locator.session_id === change.key.session_id);
-        if (sessions) {
-          sessionsByHarness.set(
-            change.key.harness,
-            sessions.filter((descriptor) =>
-              descriptor.locator.session_id !== change.key.session_id),
-          );
-        }
-        activityBySession.delete(key);
-        if (removed) {
-          const descriptorKey = sessionKey(removed.locator);
-          topicCandidatesBySession.delete(descriptorKey);
-          topicAttemptedAtBySession.delete(descriptorKey);
-        }
-        continue;
-      }
-      const descriptor = retainTopic(change.descriptor);
-      const harness = descriptor.locator.harness;
-      if (harness !== "claude-code" && harness !== "codex") continue;
-      const sessions = [...(sessionsByHarness.get(harness) ?? [])];
-      const existing = sessions.findIndex((candidate) =>
-        candidate.locator.session_id === descriptor.locator.session_id);
-      if (existing >= 0) sessions[existing] = descriptor;
-      else sessions.push(descriptor);
-      sessions.sort((left, right) =>
-        (right.updated_at_ms ?? Number.MIN_SAFE_INTEGER) - (left.updated_at_ms ?? Number.MIN_SAFE_INTEGER)
-        || left.locator.session_id.localeCompare(right.locator.session_id));
-      sessionsByHarness.set(harness, sessions.slice(0, sessionLimit + 1));
-    }
-    rebuildDescriptors();
-    void bindPendingTerminalStarts();
-    void syncActivitySubscription();
-    void pushNow(false, "inventory");
-  };
-  indexTransport?.on("sessionIndexEvent", onSessionIndex);
-
   const discoverMs = options.discoverIntervalMs ?? DEFAULT_DISCOVER_INTERVAL_MS;
   // Begin polling only after bootstrap. Registering it before a slow runtime start let discovery
   // ticks compete with startup on the same harness transport.
   let stopDiscovery = (): void => undefined;
   const startDiscoveryPolling = (): void => {
-    if (discoverMs > 0 && discovery) stopDiscovery = host.every(discoverMs, () => {
-      const harnesses = indexSubscription
-        ? DISCOVERY_HARNESSES.filter((harness) => harness !== "claude-code" && harness !== "codex")
-        : DISCOVERY_HARNESSES;
-      if (harnesses.length > 0) return refreshSessions(harnesses);
-    });
+    if (discoverMs > 0 && catalog) stopDiscovery = host.every(discoverMs, refreshSessions);
   };
 
   const createController =
@@ -1872,14 +1562,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     }
     if (uiIntent?.action === "mounted") {
       panelVisible = false;
-      rebuildDescriptors(false);
+      rebuildDescriptors(catalog?.getSnapshot() ?? null, false);
       await pushNow(true);
       return;
     }
     const panelVisibility = parsePanelVisibilityIntent(intent.payload);
     if (panelVisibility !== null) {
       panelVisible = panelVisibility;
-      if (!panelVisible) rebuildDescriptors(false);
+      if (!panelVisible) rebuildDescriptors(catalog?.getSnapshot() ?? null, false);
       if (panelVisible) {
         await pushNow(true);
         void refreshNativeSessions().then(() => pushNow(false, "inventory"));
@@ -1931,6 +1621,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         transcript: [],
         error: null,
       };
+      await catalog?.setSupplementalActivityLocators([]);
       await pushNow(false, "inventory");
       try {
         if (!discovery) throw new Error("Session discovery is unavailable.");
@@ -1950,7 +1641,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           status: "ready",
           error: null,
         };
-        await syncActivitySubscription();
+        await catalog?.setSupplementalActivityLocators(
+          subagentDescriptors.map((descriptor) => descriptor.locator),
+        );
       } catch (error) {
         if (stopped || generation !== subagentLoadGeneration) return;
         subagentInspector = {
@@ -1958,6 +1651,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           status: "error",
           error: message(error),
         };
+        await catalog?.setSupplementalActivityLocators([]);
       }
       await pushNow(false, "inventory");
       return;
@@ -2010,13 +1704,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       subagentLoadGeneration += 1;
       subagentDescriptors = [];
       subagentInspector = null;
-      await syncActivitySubscription();
+      await catalog?.setSupplementalActivityLocators([]);
       await pushNow(false, "inventory");
       return;
     }
     if (uiIntent?.action === "loadSessions") {
-      sessionLimit += MAX_SESSION_ROWS;
-      await refreshSessions();
+      await catalog?.loadMore(MAX_SESSION_ROWS);
       return;
     }
     if (uiIntent?.action === "loadEarlier") {
@@ -2268,7 +1961,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         log(`new chat failed: ${actionError}`);
       }
       await pushNow(newChat.mode === "terminal");
-      if (newChat.mode === "terminal") void refreshSessions([newChat.harness]);
+      if (newChat.mode === "terminal") void refreshSessions();
       return;
     }
     if (uiIntent?.action === "send") {
@@ -2656,22 +2349,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       await flushPersistence();
       stopRepush();
       stopDiscovery();
-      activitySubscriptionGeneration += 1;
-      indexSubscriptionGeneration += 1;
-      activityTransport?.off("sessionActivityEvent", onSessionActivity);
-      indexTransport?.off("sessionIndexEvent", onSessionIndex);
-      if (activityTransport && activitySubscription) {
-        await activityTransport.unsubscribe(activitySubscription).catch((error: unknown) => {
-          log(`activity subscription cleanup failed (continuing): ${message(error)}`);
-        });
-        activitySubscription = null;
-      }
-      if (indexTransport && indexSubscription) {
-        await indexTransport.unsubscribe(indexSubscription).catch((error: unknown) => {
-          log(`session index cleanup failed (continuing): ${message(error)}`);
-        });
-        indexSubscription = null;
-      }
+      unsubscribeCatalog();
+      await catalog?.close().catch((error: unknown) => {
+        log(`session catalog cleanup failed (continuing): ${message(error)}`);
+      });
       stopIntentPump();
       pendingTerminalStarts.clear();
       await terminalBindingInFlight?.catch(() => undefined);
