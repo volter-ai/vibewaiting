@@ -15,7 +15,7 @@ import type { SupercodeTerminalSnapshot as TerminalServiceSnapshot } from "@volt
 import { DEFAULT_MAX_ENTRIES, DEFAULT_MAX_ENTRY_CHARS } from "../src/projection.js";
 import type { ExportReceipt, WidgetState } from "../src/projection.js";
 import type { MessengerPersistence, PersistedMessengerState } from "../src/persistence.js";
-import { sessionKey } from "../src/sessions.js";
+import { sessionReconnectIdentitySync as sessionKey } from "@volter-ai-dev/supercode-client/node";
 import { SupercodeController, type SupercodeClientSnapshot } from "@volter-ai-dev/supercode-client";
 import type { SessionArtifact } from "@volter-ai-dev/supercode-harness-sdk";
 import { FakeHarnessClient, FakeWidgetHost, descriptor, localHarness, waitFor } from "./fakes.js";

@@ -22,6 +22,7 @@ import {
   SessionWindowCache,
   SupercodeController,
 } from "@volter-ai-dev/supercode-client";
+import { sessionReconnectIdentitySync as sessionKey } from "@volter-ai-dev/supercode-client/node";
 import type {
   FrontendHarness,
   HarnessClientAdapter,
@@ -34,8 +35,15 @@ import type { ContinuationMode } from "@volter-ai-dev/supercode-ui";
 import { normalizeUiState, parseSupercodeUiIntent } from "@volter-ai-dev/supercode-ui/core";
 import {
   dispatchControllerIntent,
+  matchesSessionRef as matchesActive,
+  projectAttachedSession as attachmentFor,
+  projectSessionInventory as projectSessions,
   projectSubagentInventory,
   projectSubagentTranscript,
+  sessionConversationUpdatedAt as conversationUpdatedAt,
+  sessionDescriptorRuntimeStatus as sessionRuntimeStatus,
+  type ActiveSessionRef,
+  type ProjectedSessionRowModel as SessionRow,
 } from "@volter-ai-dev/supercode-ui/controller";
 import { createLucarneInjector } from "@volter-ai-dev/widget-shell/lucarne";
 import { WidgetHost } from "lucarne/widget/host";
@@ -56,17 +64,6 @@ import { join } from "node:path";
 import type { MessengerPersistence } from "./persistence.js";
 import { writeSessionArtifact } from "./artifacts.js";
 import type { ExportReceipt } from "./projection.js";
-import {
-  MAX_SESSION_ROWS,
-  attachmentFor,
-  matchesActive,
-  projectSessions,
-  conversationUpdatedAt,
-  sessionKey,
-  sessionRuntimeStatus,
-  type ActiveSessionRef,
-  type SessionRow,
-} from "./sessions.js";
 import { VIBEWAITING_RADIUS } from "./theme.js";
 import {
   VIBEWAITING_PRESENTATION,
@@ -90,6 +87,8 @@ export const DEFAULT_INTENT_POLL_MS = 100;
 export const DEFAULT_REPUSH_INTERVAL_MS = 0;
 /** Slow recovery/inventory cadence. Claude Code and Codex update through the native index stream. */
 export const DEFAULT_DISCOVER_INTERVAL_MS = 60_000;
+/** Each explicit inventory page adds the same bounded number of rows. */
+export const MAX_SESSION_ROWS = 30;
 /** Re-check a still-untitled new Claude/Codex session without rescanning topic history every tick. */
 const TOPIC_RETRY_MS = 30_000;
 /** Tool-stream churn is not unread. A no-status peer must be quiet this long before it asks for attention. */
@@ -940,11 +939,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     const isWritable = (descriptor: SessionDescriptor): boolean =>
       writableSessionKeys.has(sessionKey(descriptor.locator));
     const sessions = projectSessions(descriptors, {
+      keyFor: (descriptor) => sessionKey(descriptor.locator),
       now: observedAt,
       home,
       active: ref,
       isWritable,
-      max: sessionLimit,
+      maxSessions: sessionLimit,
       preserveOrder: true,
     });
     const inspector = subagentInspector ? {
@@ -965,11 +965,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       ),
     } : null;
     const ownRows = projectSessions(descriptors, {
+      keyFor: (descriptor) => sessionKey(descriptor.locator),
       now: observedAt,
       home,
       active: ownRef,
       isWritable,
-      max: sessionLimit,
+      maxSessions: sessionLimit,
       preserveOrder: true,
     });
     imageProjection = projectWithImages(snapshot, { ...options.projection, maxEntries: transcriptLimit });
@@ -1914,7 +1915,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         return;
       }
       const generation = ++subagentLoadGeneration;
-      const [parentRow] = projectSessions([parent], { now: now(), home, max: 1 });
+      const [parentRow] = projectSessions([parent], {
+        keyFor: (descriptor) => sessionKey(descriptor.locator),
+        now: now(),
+        home,
+        maxSessions: 1,
+      });
       subagentDescriptors = [];
       subagentInspector = {
         parentKey: uiIntent.key,

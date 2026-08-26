@@ -27,7 +27,7 @@ import {
 import { FileMessengerPersistence } from "./persistence.js";
 import { RemoteMessengerServer } from "./remote-messenger.js";
 import type { RemoteDeviceSnapshot } from "@volter-ai-dev/supercode-remote-access/client";
-import { shortCwd } from "./sessions.js";
+import { formatWorkspacePath } from "@volter-ai-dev/supercode-ui/controller";
 
 const HARNESS_IDS = new Set<HarnessId>([
   "claude-code",
@@ -182,7 +182,7 @@ export async function runNativeHost(extensionOrigin: string | undefined): Promis
   const decoder = new NativeMessageDecoder();
   const terminalService = new SupercodeTerminalController({
     allowedOrigins: extensionOrigin,
-    formatCwd: (cwd) => shortCwd(cwd, homedir()) || null,
+    formatCwd: (cwd) => formatWorkspacePath(cwd, homedir()) || null,
   });
   await terminalService.start();
   const remoteServer = new RemoteMessengerServer(extensionOrigin);
