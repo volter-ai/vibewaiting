@@ -590,6 +590,12 @@ describe("messenger session state machine", () => {
       }]);
       expect(client.authenticationVerifications).toEqual([]);
       expect(lastPush().authenticationTerminalSessionId).toBe("opaque-session-id");
+      expect(lastPush().harnessAuthentication).toMatchObject({
+        phase: "awaiting_user",
+        harness: "codex",
+        plan: { method: "device_code", interaction: "device_code", headless: true },
+      });
+      expect(JSON.stringify(lastPush().harnessAuthentication)).not.toContain("launch");
 
       terminalService.state = {
         ...terminalService.state,
@@ -607,6 +613,8 @@ describe("messenger session state machine", () => {
     expect(client.authenticationVerifications).toEqual(["codex"]);
     expect(terminalService.closed).toEqual(["opaque-session-id"]);
     expect(lastPush().authenticationTerminalSessionId).toBeNull();
+    expect(lastPush().harnessAuthentication?.phase).toBe("authenticated");
+    expect(JSON.stringify(lastPush().harnessAuthentication)).not.toContain("/usr/local/bin");
     expect(lastPush().harnesses.find((item) => item.id === "codex")?.startable).toBe(true);
     expect(lastPush().error).toBeNull();
   });
