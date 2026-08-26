@@ -203,7 +203,7 @@ class RecordingTerminalService implements TerminalService {
 }
 
 class MemoryPersistence implements MessengerPersistence {
-  state: PersistedMessengerState = { attention: [], observedCursors: {}, drafts: {}, preferredLaunchModes: {} };
+  state: PersistedMessengerState = { version: 1, attention: [], observedCursors: {}, drafts: {}, preferredLaunchModes: {} };
 
   async load(): Promise<PersistedMessengerState> {
     return structuredClone(this.state);

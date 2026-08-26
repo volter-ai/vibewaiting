@@ -45,7 +45,10 @@ import {
   sessionDescriptorRuntimeStatus as sessionRuntimeStatus,
   type ActiveSessionRef,
 } from "@volter-ai-dev/supercode-ui/controller";
-import { createNativeSessionAttentionTracker } from "@volter-ai-dev/supercode-ui/host";
+import {
+  createNativeMessengerState,
+  normalizeNativeMessengerState,
+} from "@volter-ai-dev/supercode-ui/host";
 import { createLucarneInjector } from "@volter-ai-dev/widget-shell/lucarne";
 import { WidgetHost } from "lucarne/widget/host";
 import {
@@ -513,9 +516,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const persisted = persistence
     ? await persistence.load().catch((error: unknown) => {
         log(`messenger state load failed (continuing): ${message(error)}`);
-        return { attention: [], observedCursors: {}, drafts: {}, preferredLaunchModes: {} };
+        return normalizeNativeMessengerState(null);
       })
-    : { attention: [], observedCursors: {}, drafts: {}, preferredLaunchModes: {} };
+    : normalizeNativeMessengerState(null);
 
   let stopped = false;
   let lastPushed: WidgetState | null = null;
@@ -643,20 +646,17 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const materializeArtifact = options.materializeArtifact
     ?? ((artifact: SessionArtifact): Promise<ExportReceipt> => writeSessionArtifact(artifact, join(options.workspace, ".supercode", "exports")));
 
-  let nativeAttentionState = {
-    version: 1 as const,
-    attention: persisted.attention,
-    observedCursors: persisted.observedCursors,
-  };
-  const drafts = new Map<string, string>(Object.entries(persisted.drafts));
-  const preferredLaunchModes = new Map<string, ContinuationMode>(Object.entries(persisted.preferredLaunchModes));
   let persistenceTimer: ReturnType<typeof setTimeout> | null = null;
   let persistenceInFlight: Promise<void> = Promise.resolve();
+  const messengerState = createNativeMessengerState({
+    state: persisted,
+    onChange: () => schedulePersistence(),
+  });
   const flushPersistence = (): Promise<void> => {
     if (!persistence) return Promise.resolve();
     if (persistenceTimer) clearTimeout(persistenceTimer);
     persistenceTimer = null;
-    const state = { attention: nativeAttentionState.attention, observedCursors: nativeAttentionState.observedCursors, drafts: Object.fromEntries(drafts), preferredLaunchModes: Object.fromEntries(preferredLaunchModes) };
+    const state = messengerState.snapshot();
     persistenceInFlight = persistenceInFlight
       .catch(() => undefined)
       .then(() => persistence.save(state))
@@ -668,13 +668,6 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     persistenceTimer = setTimeout(() => { void flushPersistence(); }, 300);
     persistenceTimer.unref?.();
   };
-  const attentionTracker = createNativeSessionAttentionTracker({
-    state: nativeAttentionState,
-    onChange: (state) => {
-      nativeAttentionState = state;
-      schedulePersistence();
-    },
-  });
   let panelVisible = false;
   let attentionTimer: ReturnType<typeof setTimeout> | null = null;
   let attentionDueAt = Number.POSITIVE_INFINITY;
@@ -719,8 +712,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     sessions: ReturnType<typeof projectSessions>,
     attached: ReturnType<typeof attachmentFor>,
     observedAt: number,
-  ): ReturnType<typeof attentionTracker.observe>["attention"] => {
-    const observation = attentionTracker.observe({
+  ): ReturnType<typeof messengerState.observeAttention>["attention"] => {
+    const observation = messengerState.observeAttention({
       sessions,
       descriptors,
       keyForDescriptor: (descriptor) => sessionKey(descriptor.locator),
@@ -916,7 +909,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
                 : []),
             ]
           : [];
-        const preferred = preferredLaunchModes.get(item.id);
+        const preferred = messengerState.preferredLaunchMode(item.id);
         return {
           ...item,
           launchModes,
@@ -944,7 +937,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         : null,
       exportReceipt,
       history: { sessionLimit, hasMoreSessions, transcriptLimit, hasEarlier },
-      savedDraft: draftKey ? drafts.get(draftKey) ?? "" : "",
+      savedDraft: draftKey ? messengerState.draft(draftKey) : "",
       attention: observeAttention(snapshot, sessions, attached, observedAt),
       ...(terminalView ? { terminalHost: terminalView } : {}),
     };
@@ -1737,14 +1730,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const descriptor = ref?.sessionId ? descriptors.find((candidate) => matchesActive(candidate, ref)) : undefined;
       const key = activeForeignKey ?? (descriptor ? sessionKey(descriptor.locator) : null);
       if (key) {
-        if (uiIntent.text === "") drafts.delete(key);
-        else drafts.set(key, uiIntent.text);
-        schedulePersistence();
+        messengerState.setDraft(key, uiIntent.text);
       }
       return;
     }
     if (uiIntent?.action === "ack") {
-      if (attentionTracker.acknowledge(uiIntent.key)) {
+      if (messengerState.acknowledge(uiIntent.key)) {
         await pushNow();
       }
       return;
@@ -1853,8 +1844,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           await controller.dispatch({ type: "start", harness: newChat.harness });
           await controller.dispatch({ type: "send", text: newChat.text, ...(newChat.context.length ? { context: newChat.context } : {}), ...(newChat.images.length ? { images: newChat.images } : {}) });
         }
-        preferredLaunchModes.set(newChat.harness, newChat.mode);
-        schedulePersistence();
+        messengerState.setPreferredLaunchMode(newChat.harness, newChat.mode);
       } catch (e) {
         actionError = message(e);
         log(`new chat failed: ${actionError}`);
