@@ -17,6 +17,7 @@
 import {
   HarnessAuthenticationController,
   SessionControllerPool,
+  SessionFamilyInspector,
   SupercodeSessionCatalog,
   SupercodeController,
 } from "@volter-ai-dev/supercode-client";
@@ -541,9 +542,18 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const discovery: SessionDiscoveryClient | undefined = options.discoveryClient ?? options.client;
   /** The last global scan, held whole — the row keys the panel echoes back resolve through it. */
   let descriptors: readonly SessionDescriptor[] = [];
-  let subagentDescriptors: readonly SessionDescriptor[] = [];
-  let subagentInspector: WidgetState["subagentInspector"] = null;
-  let subagentLoadGeneration = 0;
+  const familyInspector = new SessionFamilyInspector({
+    client: {
+      discover: async (query) => {
+        if (!discovery) throw new Error("Session discovery is unavailable.");
+        return discovery.discover(query);
+      },
+      session: (locator) => requireClient(options).session(locator),
+    },
+    keyForDescriptor: (descriptor) => sessionKey(descriptor.locator),
+    maxChildren: 100,
+    view: PASSIVE_MIRROR_VIEW,
+  });
   let catalogActivities = new Map<string, SupercodeSessionCatalogSnapshot["activities"][number]>();
   let sessionLimit = MAX_SESSION_ROWS;
   let hasMoreSessions = false;
@@ -786,10 +796,19 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       maxSessions: sessionLimit,
       preserveOrder: true,
     });
-    const inspector = subagentInspector ? {
-      ...subagentInspector,
+    const family = familyInspector.getSnapshot();
+    const parentRow = family.parent ? projectSessions([family.parent], {
+      keyFor: (descriptor) => sessionKey(descriptor.locator),
+      now: observedAt,
+      home,
+      maxSessions: 1,
+    })[0] : null;
+    const inspector: WidgetState["subagentInspector"] = family.status !== "idle" && family.parentKey ? {
+      parentKey: family.parentKey,
+      parentTitle: parentRow?.title ?? family.parent?.title ?? "Unavailable chat",
+      status: family.status,
       items: projectSubagentInventory(
-        subagentDescriptors.map((descriptor) => {
+        family.children.map((descriptor) => {
           const activity = catalogActivities.get(
             `${descriptor.locator.harness}\0${descriptor.locator.session_id}`,
           );
@@ -802,6 +821,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           maxSessions: 100,
         },
       ),
+      selectedKey: family.selectedKey,
+      transcript: family.selectedSession ? projectSubagentTranscript(family.selectedSession, {
+        prefix: family.selectedKey ?? family.parentKey,
+        maxEntries: options.projection?.maxEntries ?? DEFAULT_MAX_ENTRIES,
+        maxEntryChars: options.projection?.maxEntryChars ?? 16_000,
+      }) : [],
+      error: family.error,
     } : null;
     const ownRows = projectSessions(descriptors, {
       keyFor: (descriptor) => sessionKey(descriptor.locator),
@@ -1020,6 +1046,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   const unsubscribe = controller.subscribe(schedulePush);
   const unsubscribeControllerPool = controllerPool.subscribe(schedulePush);
+  const unsubscribeFamilyInspector = familyInspector.subscribe(schedulePush);
   const unsubscribeAuthentication = authentication?.subscribe(() => {
     void pushNow();
   }) ?? (() => undefined);
@@ -1333,130 +1360,22 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const parent = descriptors.find(
         (descriptor) => sessionKey(descriptor.locator) === uiIntent.key,
       );
-      if (!parent) {
-        subagentInspector = {
-          parentKey: uiIntent.key,
-          parentTitle: "Unavailable chat",
-          status: "error",
-          items: [],
-          selectedKey: null,
-          transcript: [],
-          error: "This conversation is no longer available.",
-        };
-        await pushNow(false, "inventory");
-        return;
-      }
-      if (subagentInspector?.parentKey === uiIntent.key && subagentInspector.status === "ready") {
-        subagentInspector = {
-          ...subagentInspector,
-          status: "ready",
-          selectedKey: null,
-          transcript: [],
-          error: null,
-        };
-        await pushNow(false, "inventory");
-        return;
-      }
-      const generation = ++subagentLoadGeneration;
-      const [parentRow] = projectSessions([parent], {
-        keyFor: (descriptor) => sessionKey(descriptor.locator),
-        now: now(),
-        home,
-        maxSessions: 1,
-      });
-      subagentDescriptors = [];
-      subagentInspector = {
-        parentKey: uiIntent.key,
-        parentTitle: parentRow?.title ?? parent.title ?? "Untitled chat",
-        status: "loading",
-        items: [],
-        selectedKey: null,
-        transcript: [],
-        error: null,
-      };
-      await catalog?.setSupplementalActivityLocators([]);
-      await pushNow(false, "inventory");
-      try {
-        if (!discovery) throw new Error("Session discovery is unavailable.");
-        const result = await discovery.discover({
-          harnesses: [parent.locator.harness],
-          include_child_sessions: true,
-          root_session_id: parent.locator.session_id,
-          include_topic_candidates: true,
-          limit: 101,
-        });
-        if (stopped || generation !== subagentLoadGeneration) return;
-        subagentDescriptors = result.sessions.filter(
-          (descriptor) => descriptor.parent_session_id != null,
-        ).slice(0, 100);
-        subagentInspector = {
-          ...subagentInspector,
-          status: "ready",
-          error: null,
-        };
-        await catalog?.setSupplementalActivityLocators(
-          subagentDescriptors.map((descriptor) => descriptor.locator),
-        );
-      } catch (error) {
-        if (stopped || generation !== subagentLoadGeneration) return;
-        subagentInspector = {
-          ...subagentInspector,
-          status: "error",
-          error: message(error),
-        };
-        await catalog?.setSupplementalActivityLocators([]);
-      }
+      const snapshot = await familyInspector.open(uiIntent.key, parent);
+      if (stopped) return;
+      await catalog?.setSupplementalActivityLocators(
+        snapshot.children.map((descriptor) => descriptor.locator),
+      );
       await pushNow(false, "inventory");
       return;
     }
     if (uiIntent?.action === "openSubagent") {
-      const child = subagentInspector?.parentKey === uiIntent.parentKey
-        ? subagentDescriptors.find(
-            (descriptor) => sessionKey(descriptor.locator) === uiIntent.key,
-          )
-        : undefined;
-      if (!child || !subagentInspector) {
-        if (subagentInspector) {
-          subagentInspector = { ...subagentInspector, status: "error", error: "This subagent is no longer available." };
-          await pushNow(false, "inventory");
-        }
-        return;
-      }
-      const generation = ++subagentLoadGeneration;
-      subagentInspector = {
-        ...subagentInspector,
-        status: "loading",
-        selectedKey: uiIntent.key,
-        transcript: [],
-        error: null,
-      };
-      await pushNow(false, "inventory");
-      try {
-        const session = await requireClient(options).session(child.locator).load({
-          view: PASSIVE_MIRROR_VIEW,
-        });
-        if (stopped || generation !== subagentLoadGeneration) return;
-        subagentInspector = {
-          ...subagentInspector,
-          status: "ready",
-          transcript: projectSubagentTranscript(session, {
-            prefix: uiIntent.key,
-            maxEntries: options.projection?.maxEntries ?? DEFAULT_MAX_ENTRIES,
-            maxEntryChars: options.projection?.maxEntryChars ?? 16_000,
-          }),
-          error: null,
-        };
-      } catch (error) {
-        if (stopped || generation !== subagentLoadGeneration) return;
-        subagentInspector = { ...subagentInspector, status: "error", error: message(error) };
-      }
+      await familyInspector.select(uiIntent.parentKey, uiIntent.key);
+      if (stopped) return;
       await pushNow(false, "inventory");
       return;
     }
     if (uiIntent?.action === "closeSubagents") {
-      subagentLoadGeneration += 1;
-      subagentDescriptors = [];
-      subagentInspector = null;
+      familyInspector.close();
       await catalog?.setSupplementalActivityLocators([]);
       await pushNow(false, "inventory");
       return;
@@ -2061,6 +1980,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       stopIntentPump();
       unsubscribe();
       unsubscribeControllerPool();
+      unsubscribeFamilyInspector();
+      familyInspector.dispose();
       await controllerPool.close();
       await inFlight.catch(() => undefined);
       await host.remove().catch((e: unknown) => log(`widget removal failed: ${(e as Error)?.message ?? String(e)}`));
