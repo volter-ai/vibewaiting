@@ -10,15 +10,13 @@
 // recording pushes, the agent half by the real `SupercodeController` driven through a fake harness
 // client. Nothing here reaches for a global.
 //
-// TWO controllers, deliberately. The one the daemon starts OWNS a runtime, and the client package
-// refuses to point an owning controller at someone else's session (`runtime_owned`) — while
-// `setWorkspace` would silently close that runtime to go looking. So a foreign session is followed
-// by a SECOND, non-owning controller scoped to that session's own workspace, sharing this process's
-// one harness transport (`ownsClient: false`). Attaching therefore never touches the session the
-// daemon started, and detaching is just closing the second controller.
+// The controller pool keeps the daemon-started runtime durable while foreign sessions use bounded
+// non-owning mirrors over the same transport. Supercode disposes passive followers, retains only
+// continuations that gained runtime ownership, and prevents a slow older selection from replacing
+// the latest one; this bridge owns only messenger selection and error presentation.
 import {
   HarnessAuthenticationController,
-  SessionWindowCache,
+  SessionControllerPool,
   SupercodeSessionCatalog,
   SupercodeController,
 } from "@volter-ai-dev/supercode-client";
@@ -107,8 +105,6 @@ const PASSIVE_MIRROR_VIEW = Object.freeze({
   includeSubagents: false,
   displayHistory: true,
 });
-/** Each explicit history request adds one bounded page, never the entire transcript/session store. */
-export const TRANSCRIPT_PAGE_SIZE = DEFAULT_MAX_ENTRIES;
 /** A historical image is fetched only on click, but each request still has a hard memory bound. */
 export const MAX_HISTORICAL_IMAGE_BYTES = 16 * 1024 * 1024;
 export const MAX_HISTORICAL_IMAGE_URL_CHARS = 22_400_000;
@@ -482,11 +478,6 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const daemonStartedAt = performance.now();
   const debounceMs = options.pushDebounceMs ?? DEFAULT_PUSH_DEBOUNCE_MS;
   const attach = options.attachHost ?? defaultAttachHost;
-  // Foreign mirrors are intentionally disposable, but their bounded display
-  // windows are not. Sharing this headless cache makes returning to a chat an
-  // immediate paint while its native transcript refresh continues.
-  const mirrorCache = new SessionWindowCache({ maxEntries: 12 });
-
   const controller: AgentController =
     options.controller ??
     new SupercodeController({
@@ -543,7 +534,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   let sessionLimit = MAX_SESSION_ROWS;
   let hasMoreSessions = false;
   const initialTranscriptLimit = options.projection?.maxEntries ?? DEFAULT_MAX_ENTRIES;
-  const transcriptLimits = new Map<string, number>();
+  const attachTimeoutMs = options.attachTimeoutMs ?? DEFAULT_ATTACH_TIMEOUT_MS;
   /** A page action can fail before the controller publishes a structured error. Keep it visible. */
   let actionError: string | null = null;
   let exportReceipt: ExportReceipt | null = null;
@@ -696,16 +687,35 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
    * must survive navigation to another chat, just like a background conversation in a messenger.
    * Passive mirrors are still closed when left so their transcript followers cannot accumulate.
    */
-  interface ForeignControllerSlot {
-    controller: AgentController;
-    unsubscribe: () => void;
-    sourceHarness: HarnessId;
-  }
-  const foreignControllers = new Map<string, ForeignControllerSlot>();
-  let activeForeignKey: string | null = null;
-  const activeForeign = (): ForeignControllerSlot | null =>
-    activeForeignKey === null ? null : foreignControllers.get(activeForeignKey) ?? null;
-  const activeController = (): AgentController => activeForeign()?.controller ?? controller;
+  const controllerPool = new SessionControllerPool<AgentController>({
+    primary: controller,
+    tailMessages: initialTranscriptLimit,
+    timeoutMs: attachTimeoutMs,
+    maxCachedWindows: 12,
+    createController: ({ descriptor, tailMessages, mirrorCache }) => options.createController
+      ? options.createController({
+          workspace: descriptor.cwd ?? options.workspace,
+          descriptor,
+          harnesses: controller.getSnapshot().harnesses,
+          tailMessages,
+        })
+      : new SupercodeController({
+          client: requireClient(options),
+          workspace: descriptor.cwd ?? options.workspace,
+          ownsClient: false,
+          autoObserve: false,
+          initialInventory: {
+            harnesses: controller.getSnapshot().harnesses,
+            sessions: [descriptor],
+          },
+          inventorySubscriptions: false,
+          mirrorView: { ...PASSIVE_MIRROR_VIEW, tailMessages },
+          mirrorCache,
+          allowHarnessConfiguration: true,
+        }),
+  });
+  const activeForeign = () => controllerPool.activeEntry();
+  const activeController = (): AgentController => controllerPool.activeController();
 
   const observeAttention = (
     snapshot: SupercodeClientSnapshot,
@@ -736,23 +746,16 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     // A branch starts before its new native session necessarily appears in global discovery. Once
     // it does, move the retained controller from its source-row key to the branch's real row key so
     // reopening that row returns to the same live runtime instead of spawning a duplicate mirror.
-    if (activeForeignKey !== null && snapshot.connection.mode === "control" && ref?.sessionId) {
-      const current = foreignControllers.get(activeForeignKey);
+    if (controllerPool.activeKey !== null && snapshot.connection.mode === "control" && ref?.sessionId) {
+      const current = controllerPool.activeEntry();
       const persisted = descriptors.find((descriptor) => matchesActive(descriptor, ref));
       const persistedKey = persisted ? sessionKey(persisted.locator) : null;
-      if (current && persistedKey && persistedKey !== activeForeignKey) {
-        const priorLimit = transcriptLimits.get(activeForeignKey);
-        foreignControllers.delete(activeForeignKey);
-        foreignControllers.set(persistedKey, current);
-        if (priorLimit !== undefined) {
-          transcriptLimits.delete(activeForeignKey);
-          transcriptLimits.set(persistedKey, priorLimit);
-        }
-        activeForeignKey = persistedKey;
+      if (current && persistedKey && persistedKey !== controllerPool.activeKey) {
+        controllerPool.rekeyActive(persistedKey);
       }
     }
-    const transcriptWindowKey = activeForeignKey ?? "@owned";
-    const transcriptLimit = transcriptLimits.get(transcriptWindowKey) ?? initialTranscriptLimit;
+    const activeForeignKey = controllerPool.activeKey;
+    const transcriptLimit = snapshot.history?.transcriptLimit ?? initialTranscriptLimit;
     const observedAt = now();
     const ownSnapshot = controller.getSnapshot();
     const ownRef = activeRef(ownSnapshot);
@@ -763,8 +766,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const ownedDescriptor = descriptors.find((descriptor) => matchesActive(descriptor, ownRef));
       if (ownedDescriptor) writableSessionKeys.add(sessionKey(ownedDescriptor.locator));
     }
-    for (const [key, slot] of foreignControllers) {
-      if (slot.controller.getSnapshot().availableActions.send) writableSessionKeys.add(key);
+    for (const entry of controllerPool.entries()) {
+      if (entry.controller.getSnapshot().availableActions.send) writableSessionKeys.add(entry.key);
     }
     const isWritable = (descriptor: SessionDescriptor): boolean =>
       writableSessionKeys.has(sessionKey(descriptor.locator));
@@ -1010,6 +1013,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   };
 
   const unsubscribe = controller.subscribe(schedulePush);
+  const unsubscribeControllerPool = controllerPool.subscribe(schedulePush);
   const unsubscribeAuthentication = authentication?.subscribe(() => {
     void pushNow();
   }) ?? (() => undefined);
@@ -1051,7 +1055,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     }
     const updatedByKey = new Map(all.map((descriptor) => [sessionKey(descriptor.locator), descriptor]));
     const pinnedKeys = new Set([
-      ...(activeForeignKey ? [activeForeignKey] : []),
+      ...(controllerPool.activeKey ? [controllerPool.activeKey] : []),
       ...terminalMoves.keys(),
     ]);
     const stable = descriptors.flatMap((descriptor) => {
@@ -1209,195 +1213,69 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     if (discoverMs > 0 && catalog) stopDiscovery = host.every(discoverMs, refreshSessions);
   };
 
-  const createController =
-    options.createController ??
-    ((opts: { workspace: string; descriptor: SessionDescriptor; harnesses: readonly FrontendHarness[]; tailMessages: number }): AgentController =>
-      // `ownsClient: false`: this daemon's ONE transport outlives every mirror that borrows it.
-      // Seed the locator and already-known harness inventory so initialization does not rediscover
-      // an entire workspace merely to mint the controller's local session key.
-      new SupercodeController({
-        client: requireClient(options),
-        workspace: opts.workspace,
-        ownsClient: false,
-        autoObserve: false,
-        initialInventory: {
-          harnesses: opts.harnesses,
-          sessions: [opts.descriptor],
-        },
-        // The daemon already owns the one machine-wide index and activity stream. A disposable
-        // one-session mirror only needs its bounded transcript follower; opening another native
-        // index here queues the requested chat behind an unrelated full inventory scan.
-        inventorySubscriptions: false,
-        mirrorView: { ...PASSIVE_MIRROR_VIEW, tailMessages: opts.tailMessages },
-        mirrorCache,
-        allowHarnessConfiguration: true,
-      }));
-
-  /**
-   * Leave the selected foreign conversation. A passive mirror is disposable; a resumed/branched
-   * controller is retained so switching chats never kills work the user explicitly continued.
-   */
-  const releaseForeignView = async (): Promise<void> => {
-    const key = activeForeignKey;
-    const previous = activeForeign();
-    activeForeignKey = null;
-    if (!previous || key === null) return;
-    if (previous.controller.getSnapshot().connection.mode === "control") return;
-    foreignControllers.delete(key);
-    previous.unsubscribe();
-    await previous.controller.close().catch((e: unknown) => log(`detach failed: ${message(e)}`));
-  };
-
-  // Attaches run independently and are generation-checked. A slow native transcript must never
-  // hold a newer selection behind it; whichever attempt is newest owns the panel, and every loser
-  // closes its candidate rather than leaving a follower behind.
-  let attachSeq = 0;
-  const attachTasks = new Set<Promise<void>>();
-  const attachTimeoutMs = options.attachTimeoutMs ?? DEFAULT_ATTACH_TIMEOUT_MS;
+  const releaseForeignView = (): Promise<void> => controllerPool.release();
+  let attachRequest = 0;
 
   /**
    * Record why an attach did not happen, and PUSH it — the panel's stuck "opening…" row is settled
    * by this state arriving, never by a timeout it invents. A superseded attempt (the user tapped
    * another row while this one was failing) records nothing: the newer attach owns the panel now.
    */
-  const failAttach = async (key: string, seq: number, reason: string, logLine = `attach failed: ${reason}`): Promise<void> => {
+  const failAttach = async (key: string, request: number, reason: string, logLine = `attach failed: ${reason}`): Promise<void> => {
     log(logLine);
-    if (stopped || seq !== attachSeq) return;
+    if (stopped || request !== attachRequest) return;
     attachError = toAttachError(key, reason);
     await pushNow();
   };
 
-  const runAttach = async (key: string, seq: number): Promise<void> => {
-    if (stopped || seq !== attachSeq) return;
+  const runAttach = async (key: string, request: number): Promise<void> => {
+    if (stopped || request !== attachRequest) return;
     const nativeRefresh = refreshNativeSessions();
-    // A new attempt supersedes the previous failure, whatever this one goes on to do.
     attachError = null;
-    if (activeForeignKey === key) {
-      await nativeRefresh;
-      await pushNow();
-      return;
-    }
-    const retained = foreignControllers.get(key);
-    if (retained) {
-      await releaseForeignView();
-      activeForeignKey = key;
-      log(`returning to locally controlled ${retained.controller.getSnapshot().activeHarness ?? "coding agent"} session`);
-      await nativeRefresh;
-      await pushNow();
-      return;
-    }
     const descriptor = descriptors.find((d) => sessionKey(d.locator) === key);
     if (!descriptor) {
       await failAttach(
         key,
-        seq,
+        request,
         "that session is no longer in the list",
         `attach: no discovered session with key ${key}`,
       );
       return;
     }
-    await releaseForeignView();
-    if (matchesActive(descriptor, activeRef(controller.getSnapshot()))) {
-      log(`following this daemon's own ${descriptor.locator.harness} session again`);
-      await pushNow();
-      return;
-    }
     const workspace = descriptor.cwd ?? options.workspace;
     const attachStartedAt = performance.now();
-    let initializedAt = attachStartedAt;
-    let candidate: AgentController;
     try {
-      candidate = createController({
-        workspace,
+      const selection = await controllerPool.select({
+        key,
         descriptor,
-        harnesses: controller.getSnapshot().harnesses,
-        tailMessages: transcriptLimits.get(key) ?? initialTranscriptLimit,
+        primary: matchesActive(descriptor, activeRef(controller.getSnapshot())),
       });
+      if (selection.status === "superseded") return;
+      if (stopped || request !== attachRequest) {
+        if (controllerPool.activeKey === key) await controllerPool.release();
+        return;
+      }
+      if (selection.status === "retained") {
+        log(`returning to locally controlled ${selection.controller.getSnapshot().activeHarness ?? "coding agent"} session`);
+      } else if (selection.status === "primary") {
+        log(`following this daemon's own ${descriptor.locator.harness} session again`);
+      } else {
+        log(
+          `following ${descriptor.locator.harness} in ${workspace} (read-only mirror; ` +
+          `${Math.round(performance.now() - attachStartedAt)}ms total)`,
+        );
+      }
     } catch (e) {
-      await failAttach(key, seq, message(e), `attach unavailable: ${message(e)}`);
+      await failAttach(key, request, message(e));
       return;
     }
-    const unpublishCandidate = (): void => {
-      const published = foreignControllers.get(key);
-      if (published?.controller !== candidate) return;
-      foreignControllers.delete(key);
-      if (activeForeignKey === key) activeForeignKey = null;
-      published.unsubscribe();
-    };
-    try {
-      const timeoutSeconds = Math.max(1, Math.ceil(attachTimeoutMs / 1000));
-      await withTimeout(
-        (async () => {
-          await candidate.initialize();
-          initializedAt = performance.now();
-          // The controller mints its own workspace-scoped keys; ours is a hash of the locator, so
-          // the two are matched on the pair every representation carries.
-          const target = candidate
-            .getSnapshot()
-            .sessions.find(
-              (s) => s.harness === descriptor.locator.harness && s.sessionId === descriptor.locator.session_id,
-            );
-          if (!target) throw new Error(`that session is not visible in ${workspace}`);
-          if (stopped || seq !== attachSeq) return;
-          // Publish the controller before observe resolves. A shared cached
-          // window commits synchronously at the start of observe, and this
-          // subscription is what lets that state reach the widget while the
-          // native refresh remains in flight.
-          let publishedTranscript = false;
-          const publishCandidateRevision = (): void => {
-            if (!publishedTranscript && candidate.getSnapshot().activeSession) {
-              publishedTranscript = true;
-              log(
-                `first ${descriptor.locator.harness} transcript state ready in ` +
-                `${Math.round(performance.now() - attachStartedAt)}ms`,
-              );
-              void pushNow();
-              return;
-            }
-            schedulePush();
-          };
-          const candidateSlot: ForeignControllerSlot = {
-            controller: candidate,
-            unsubscribe: candidate.subscribe(publishCandidateRevision),
-            sourceHarness: descriptor.locator.harness,
-          };
-          activeForeignKey = key;
-          foreignControllers.set(key, candidateSlot);
-          await candidate.dispatch({ type: "observe", sessionKey: target.key });
-        })(),
-        attachTimeoutMs,
-        `could not open this session within ${timeoutSeconds} ${timeoutSeconds === 1 ? "second" : "seconds"}`,
-      );
-    } catch (e) {
-      unpublishCandidate();
-      await candidate.close().catch(() => undefined);
-      await failAttach(key, seq, message(e));
-      return;
-    }
-    if (stopped || seq !== attachSeq) {
-      unpublishCandidate();
-      await candidate.close().catch(() => undefined);
-      return;
-    }
-    const attachedAt = performance.now();
-    log(
-      `following ${descriptor.locator.harness} in ${workspace} (read-only mirror; ` +
-      `${Math.round(attachedAt - attachStartedAt)}ms total = ${Math.round(initializedAt - attachStartedAt)}ms seeded init + ` +
-      `${Math.round(attachedAt - initializedAt)}ms transcript)`,
-    );
     await nativeRefresh;
-    await pushNow();
+    if (!stopped && request === attachRequest) await pushNow();
   };
 
   const attachSession = (key: string): Promise<void> => {
-    const seq = (attachSeq += 1);
-    const task = runAttach(key, seq);
-    attachTasks.add(task);
-    void task.then(
-      () => attachTasks.delete(task),
-      () => attachTasks.delete(task),
-    );
-    return task;
+    attachRequest += 1;
+    return runAttach(key, attachRequest);
   };
 
   bindPendingTerminalStarts = (): Promise<void> => {
@@ -1433,7 +1311,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         );
         pendingTerminalStarts.delete(terminalSessionId);
         log(`bound new ${pending.harness} terminal to its persisted conversation`);
-        if (!activeForeignKey) await attachSession(conversationKey);
+        if (!controllerPool.activeKey) await attachSession(conversationKey);
       }
     })().catch((error: unknown) => {
       log(`new terminal binding failed (continuing): ${message(error)}`);
@@ -1607,56 +1485,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     }
     if (uiIntent?.action === "loadEarlier") {
       actionError = null;
-      const key = activeForeignKey ?? "@owned";
-      const nextLimit = (transcriptLimits.get(key) ?? initialTranscriptLimit) + TRANSCRIPT_PAGE_SIZE;
-      transcriptLimits.set(key, nextLimit);
-      const slot = activeForeign();
-      const snapshot = slot?.controller.getSnapshot();
-      if (slot && snapshot?.connection.mode === "mirror" && activeForeignKey !== null) {
-        const foreignKey = activeForeignKey;
-        const descriptor = descriptors.find((candidate) => sessionKey(candidate.locator) === foreignKey);
-        let replacement: AgentController | null = null;
-        const seq = (attachSeq += 1);
-        try {
-          if (!descriptor) throw new Error("this conversation is no longer available to load earlier messages");
-          replacement = createController({
-            workspace: descriptor.cwd ?? options.workspace,
-            descriptor,
-            harnesses: controller.getSnapshot().harnesses,
-            tailMessages: nextLimit,
-          });
-          await withTimeout(
-            (async () => {
-              await replacement!.initialize();
-              const target = replacement!.getSnapshot().sessions.find(
-                (session) => session.harness === descriptor.locator.harness && session.sessionId === descriptor.locator.session_id,
-              );
-              if (!target) throw new Error("that session is no longer visible in its workspace");
-              await replacement!.dispatch({ type: "observe", sessionKey: target.key });
-            })(),
-            attachTimeoutMs,
-            "loading earlier messages timed out",
-          );
-          if (stopped || seq !== attachSeq) {
-            await replacement.close().catch(() => undefined);
-            return;
-          }
-          const previous = foreignControllers.get(foreignKey);
-          foreignControllers.set(foreignKey, {
-            controller: replacement,
-            unsubscribe: replacement.subscribe(schedulePush),
-            sourceHarness: previous?.sourceHarness ?? descriptor.locator.harness,
-          });
-          activeForeignKey = foreignKey;
-          previous?.unsubscribe();
-          await previous?.controller.close().catch((e: unknown) => log(`older-window replacement close failed: ${message(e)}`));
-          log(`expanded ${descriptor.locator.harness} transcript window to ${nextLimit} entries`);
-        } catch (e) {
-          await replacement?.close().catch(() => undefined);
-          transcriptLimits.set(key, nextLimit - TRANSCRIPT_PAGE_SIZE);
-          actionError = message(e);
-          log(`load earlier failed: ${actionError}`);
-        }
+      try {
+        await activeController().dispatch({ type: "loadEarlier" });
+        log(`expanded transcript window to ${activeController().getSnapshot().history?.transcriptLimit ?? "all"} messages`);
+      } catch (e) {
+        actionError = message(e);
+        log(`load earlier failed: ${actionError}`);
       }
       await pushNow();
       return;
@@ -1728,7 +1562,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const snapshot = activeController().getSnapshot();
       const ref = activeRef(snapshot);
       const descriptor = ref?.sessionId ? descriptors.find((candidate) => matchesActive(candidate, ref)) : undefined;
-      const key = activeForeignKey ?? (descriptor ? sessionKey(descriptor.locator) : null);
+      const key = controllerPool.activeKey ?? (descriptor ? sessionKey(descriptor.locator) : null);
       if (key) {
         messengerState.setDraft(key, uiIntent.text);
       }
@@ -1804,7 +1638,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         images: uiIntent.images ?? [],
       };
       actionError = null;
-      attachSeq += 1;
+      attachRequest += 1;
       try {
         if (newChat.mode === "terminal") {
           if (!options.terminalService || !terminalHost?.available) {
@@ -1886,6 +1720,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     }
     if (isMoveToTerminalIntent(intent.payload)) {
       actionError = null;
+      const activeForeignKey = controllerPool.activeKey;
       if (!options.terminalService || !activeForeignKey) {
         actionError = "open a live native-terminal conversation before moving it";
       } else if (terminalMoves.get(activeForeignKey) === "waiting") {
@@ -1923,6 +1758,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const snapshot = foreign?.controller.getSnapshot();
       const key = snapshot?.activeSessionKey ?? null;
       const activeSession = snapshot?.sessions.find((session) => session.key === key);
+      const activeForeignKey = controllerPool.activeKey;
       const descriptor = activeForeignKey
         ? descriptors.find((candidate) => sessionKey(candidate.locator) === activeForeignKey)
         : undefined;
@@ -2246,14 +2082,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       pendingTerminalStarts.clear();
       await terminalBindingInFlight?.catch(() => undefined);
       unsubscribe();
-      await Promise.all([...attachTasks].map((task) => task.catch(() => undefined)));
-      activeForeignKey = null;
-      const foreign = [...foreignControllers.values()];
-      foreignControllers.clear();
-      for (const slot of foreign) slot.unsubscribe();
-      await Promise.all(
-        foreign.map((slot) => slot.controller.close().catch((e: unknown) => log(`detach failed: ${message(e)}`))),
-      );
+      unsubscribeControllerPool();
+      await controllerPool.close();
       await inFlight.catch(() => undefined);
       await host.remove().catch((e: unknown) => log(`widget removal failed: ${(e as Error)?.message ?? String(e)}`));
       // `ownsClient: true` (above) makes this close the harness transport too — the caller that
@@ -2266,19 +2096,6 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 /** One place that turns a thrown unknown into a line a human can read. */
 function message(e: unknown): string {
   return (e as Error)?.message ?? String(e);
-}
-
-async function withTimeout<T>(work: Promise<T>, timeoutMs: number, reason: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new Error(reason)), timeoutMs);
-    timer.unref?.();
-  });
-  try {
-    return await Promise.race([work, timeout]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
 }
 
 function requireClient(options: DaemonOptions): HarnessClientAdapter {
