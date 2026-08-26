@@ -13,6 +13,11 @@ the complete generated notes and downloadable artifacts for each version.
 - Ownership-safe native-host removal with an explicit local-state purge option.
 - A pinned, bundled CLI runtime with complete third-party notices.
 
+### Changed
+
+- Native Claude Code and Codex sign-in now uses Supercode's shared verified lifecycle while
+  Vibewaiting retains only the visible terminal execution adapter.
+
 ## [0.1.0] - 2026-08-25
 
 First alpha release: a browser messenger for local Claude Code and Codex sessions,
