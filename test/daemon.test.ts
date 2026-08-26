@@ -11,7 +11,7 @@ import {
   type TerminalService,
   type WidgetBridge,
 } from "../src/daemon.js";
-import type { TerminalServiceSnapshot } from "../src/terminal-service.js";
+import type { SupercodeTerminalSnapshot as TerminalServiceSnapshot } from "@volter-ai-dev/supercode-terminal";
 import { DEFAULT_MAX_ENTRIES, DEFAULT_MAX_ENTRY_CHARS } from "../src/projection.js";
 import type { ExportReceipt, WidgetState } from "../src/projection.js";
 import type { MessengerPersistence, PersistedMessengerState } from "../src/persistence.js";

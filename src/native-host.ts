@@ -11,6 +11,7 @@ import {
   type RemoteAccessController,
   type RemoteAccessSnapshot,
 } from "@volter-ai-dev/supercode-remote-access";
+import { SupercodeTerminalController } from "@volter-ai-dev/supercode-terminal";
 import { startDaemon, type Daemon, type WidgetBridge } from "./daemon.js";
 import {
   parseNativeHostCommand,
@@ -24,9 +25,9 @@ import {
   NativeMessageDecoder,
 } from "./native-messaging.js";
 import { FileMessengerPersistence } from "./persistence.js";
-import { LocalTerminalService } from "./terminal-service.js";
 import { RemoteMessengerServer } from "./remote-messenger.js";
 import type { RemoteDeviceSnapshot } from "./remote-devices.js";
+import { shortCwd } from "./sessions.js";
 
 const HARNESS_IDS = new Set<HarnessId>([
   "claude-code",
@@ -179,7 +180,10 @@ export async function runNativeHost(extensionOrigin: string | undefined): Promis
   if (!extensionOrigin)
     throw new Error("native host did not receive its browser extension origin");
   const decoder = new NativeMessageDecoder();
-  const terminalService = new LocalTerminalService(extensionOrigin);
+  const terminalService = new SupercodeTerminalController({
+    allowedOrigins: extensionOrigin,
+    formatCwd: (cwd) => shortCwd(cwd, homedir()) || null,
+  });
   await terminalService.start();
   const remoteServer = new RemoteMessengerServer(extensionOrigin);
   const remoteEndpoint = await remoteServer.start();
