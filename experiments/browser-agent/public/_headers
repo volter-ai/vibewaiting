@@ -1,0 +1,8 @@
+/*
+  Cache-Control: no-store
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-eval' blob: https://esm.sh; style-src 'self' 'unsafe-inline'; connect-src 'self' blob: https://esm.sh wss:; worker-src 'self' blob:; frame-src 'self' blob: https://vibewaiting-browser-agent-sandbox.aaron-0ed.workers.dev; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'
+  Cross-Origin-Opener-Policy: same-origin
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), bluetooth=()
+  Referrer-Policy: no-referrer
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY

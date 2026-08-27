@@ -1,0 +1,18 @@
+[package]
+name = "grok-html-to-markdown"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+htmd = "=0.5.4"
+scraper = "=0.23.1"
+wasm-bindgen = "=0.2.100"
+
+[profile.release]
+lto = true
+opt-level = "s"
+strip = true

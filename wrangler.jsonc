@@ -1,0 +1,52 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "vibewaiting-browser-agent",
+  "main": "cloudflare/worker.ts",
+  "compatibility_date": "2026-08-27",
+  "workers_dev": true,
+  "preview_urls": true,
+  "assets": {
+    "directory": "dist/browser-agent-spike",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"],
+    "not_found_handling": "single-page-application"
+  },
+  "vars": {
+    "INFERENCE_ENABLED": "false",
+    "XAI_CLIENT_VERSION": "1.0.5",
+    "XAI_OAUTH_CLIENT_ID": "b1a00492-073a-47ea-816f-4c329264a828"
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "SESSIONS", "class_name": "GrokSession" },
+      { "name": "RATE_GATE", "class_name": "RateGate" }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["GrokSession", "RateGate"]
+    }
+  ],
+  "ratelimits": [
+    {
+      "name": "AUTH_RATE_LIMITER",
+      "namespace_id": "1842701",
+      "simple": { "limit": 20, "period": 60 }
+    },
+    {
+      "name": "CHAT_IP_RATE_LIMITER",
+      "namespace_id": "1842702",
+      "simple": { "limit": 12, "period": 60 }
+    },
+    {
+      "name": "CHAT_USER_RATE_LIMITER",
+      "namespace_id": "1842703",
+      "simple": { "limit": 8, "period": 60 }
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  }
+}

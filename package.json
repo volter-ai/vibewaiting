@@ -29,6 +29,7 @@
   },
   "files": [
     "CHANGELOG.md",
+    "LICENSES",
     "NOTICE.md",
     "PRIVACY.md",
     "SECURITY.md",
@@ -39,6 +40,14 @@
     "build": "tsc -p tsconfig.json && node widget/build.mjs && node extension/build.mjs",
     "build:widget": "node widget/build.mjs",
     "build:extension": "node extension/build.mjs",
+    "dev:almostnode": "vite --config experiments/almostnode/vite.config.ts",
+    "dev:browser-agent": "vite --config experiments/browser-agent/vite.config.ts",
+    "build:browser-agent": "vite build --config experiments/browser-agent/vite.config.ts",
+    "build:conformance": "tsc -p tsconfig.json",
+    "conformance:proxy": "npm run build:conformance && node scripts/grok-conformance-proxy.mjs",
+    "typecheck:worker": "tsc -p cloudflare/tsconfig.json",
+    "deploy:browser-agent": "VITE_SANDBOX_ORIGIN=https://vibewaiting-browser-agent-sandbox.aaron-0ed.workers.dev npm run build:browser-agent && wrangler deploy",
+    "deploy:browser-agent-sandbox": "npm run build:browser-agent && wrangler deploy --config wrangler.sandbox.jsonc",
     "verify:store-identity": "node scripts/verify-extension-identity.mjs",
     "verify:store-assets": "node scripts/verify-store-assets.mjs",
     "package:release": "node scripts/package-release.mjs",
@@ -46,9 +55,10 @@
     "dev:extension:local": "node scripts/sync-local-supercode.mjs && npm run build && node scripts/dev-extension.mjs",
     "sync:local": "node scripts/sync-local-supercode.mjs",
     "sync:local-ui": "npm run sync:local",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.widget.json && tsc -p tsconfig.extension.json && tsc -p tsconfig.test.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.widget.json && tsc -p tsconfig.extension.json && tsc -p tsconfig.test.json && tsc -p experiments/browser-agent/tsconfig.json && npm run typecheck:worker",
     "test": "vitest run",
     "test:widget": "npm run build:widget && playwright test",
+    "test:browser-agent-e2e": "npm run build:conformance && playwright test --config playwright.browser-agent.config.mjs",
     "check": "npm run verify:store-identity && npm run verify:store-assets && npm run typecheck && npm test && npm run build",
     "check:browser": "npm run check && npm run test:widget",
     "smoke": "node scripts/smoke-harness.mjs",
@@ -87,10 +97,12 @@
     "@xterm/addon-search": "0.16.0",
     "@xterm/addon-web-links": "0.12.0",
     "@xterm/xterm": "6.0.0",
+    "almostnode": "^0.2.14",
     "esbuild": "0.28.2",
     "preact": "10.29.8",
     "qrcode-generator": "1.5.2",
     "typescript": "^5.7.0",
-    "vitest": "^3.2.7"
+    "vitest": "^3.2.7",
+    "wrangler": "^4.127.0"
   }
 }

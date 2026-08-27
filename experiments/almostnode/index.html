@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>almostnode Three.js HMR spike</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <p class="eyebrow">Browser-only runtime experiment</p>
+        <h1>almostnode + Three.js + HMR</h1>
+        <p class="lede">
+          The project below lives in a virtual filesystem and is served by an
+          in-browser Vite-compatible dev server.
+        </p>
+      </header>
+
+      <section class="toolbar" aria-label="Experiment controls">
+        <button id="toggle" type="button" disabled>Change source file</button>
+        <button id="reset" type="button" disabled>Reset</button>
+        <dl class="metrics">
+          <div><dt>Runtime</dt><dd id="runtime-status">Starting…</dd></div>
+          <div><dt>Rendered revision</dt><dd id="rendered-revision">—</dd></div>
+          <div><dt>Iframe loads</dt><dd id="iframe-loads">0</dd></div>
+          <div><dt>Last HMR event</dt><dd id="hmr-status">—</dd></div>
+        </dl>
+      </section>
+
+      <section class="preview-shell" aria-label="Three.js preview">
+        <iframe
+          id="preview"
+          title="Three.js virtual project preview"
+          sandbox="allow-scripts allow-same-origin"
+        ></iframe>
+      </section>
+
+      <section class="log-shell" aria-labelledby="log-heading">
+        <h2 id="log-heading">Runtime log</h2>
+        <pre id="log" aria-live="polite"></pre>
+      </section>
+    </main>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

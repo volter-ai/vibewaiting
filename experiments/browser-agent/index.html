@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Browser Grok Build</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Browser-native coding agent experiment</p>
+          <h1>Grok Build · browser port</h1>
+        </div>
+        <div class="status-cluster">
+          <span class="runtime-dot" aria-hidden="true"></span>
+          <span id="runtime-status">Starting browser sandbox…</span>
+        </div>
+      </header>
+
+      <section class="workspace">
+        <aside class="agent-panel" aria-label="Agent controls and trajectory">
+          <div class="configuration">
+            <section class="auth-card" aria-label="Grok subscription connection">
+              <div>
+                <strong>Grok subscription</strong>
+                <span id="auth-status">Checking connection…</span>
+              </div>
+              <div class="auth-actions">
+                <button id="connect-grok" class="secondary" type="button" hidden>Connect Grok</button>
+                <button id="disconnect-grok" class="secondary" type="button" hidden>Sign out</button>
+              </div>
+              <div id="device-auth" class="device-auth" hidden>
+                <span>Enter this code at xAI</span>
+                <strong id="device-code"></strong>
+                <a id="device-link" target="_blank" rel="noopener noreferrer">Open xAI sign-in</a>
+              </div>
+            </section>
+            <label>
+              Relay endpoint
+              <input id="relay-endpoint" value="/api/grok/responses" spellcheck="false" />
+            </label>
+            <label>
+              Task
+              <textarea id="task" rows="4">Build a polished playable Three.js Pong game, inspect your work, and verify HMR with a follow-up edit.</textarea>
+            </label>
+            <div class="actions">
+              <button id="run" type="button" disabled>Run browser agent</button>
+              <button id="stop" class="secondary" type="button" disabled>Stop</button>
+              <button id="reset" class="secondary" type="button" disabled>Reset project</button>
+            </div>
+          </div>
+
+          <dl class="metrics" aria-label="Run metrics">
+            <div><dt>State</dt><dd id="agent-state">Idle</dd></div>
+            <div><dt>Turns</dt><dd id="turn-count">0</dd></div>
+            <div><dt>HMR events</dt><dd id="hmr-count">0</dd></div>
+            <div><dt>Iframe loads</dt><dd id="iframe-loads">0</dd></div>
+          </dl>
+
+          <div class="trajectory-heading">
+            <h2>Linear trajectory</h2>
+            <span>native Grok Build semantics</span>
+          </div>
+          <ol id="trajectory" class="trajectory" aria-live="polite"></ol>
+        </aside>
+
+        <section class="preview-panel" aria-label="Generated application preview">
+          <div class="preview-bar">
+            <div>
+              <span class="preview-light"></span>
+              <strong>Virtual Vite preview</strong>
+            </div>
+            <code id="preview-url">booting…</code>
+          </div>
+          <iframe
+            id="preview"
+            title="Generated Three.js application"
+            sandbox="allow-scripts allow-same-origin allow-pointer-lock"
+          ></iframe>
+          <footer>
+            <span id="rendered-revision">Waiting for generated application</span>
+            <span class="warning" id="sandbox-mode">Opaque-origin generated-code sandbox</span>
+          </footer>
+        </section>
+      </section>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

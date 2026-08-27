@@ -4,3 +4,4 @@ release/
 test-results/
 .env
 .vibewaiting/
+test/fixtures/grok-conformance/*.jsonl

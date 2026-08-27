@@ -1,5 +1,16 @@
 # Third-party notices
 
+## Grok Build
+
+The browser Grok experiment translates portions of xAI's Grok Build request,
+Responses-stream, and conversation replay behavior into TypeScript.
+
+- Source: https://github.com/xai-org/grok-build
+- Reference revision: `9684fa3cdbf2995e30ea8b9b637f1db008f144fc`
+- Copyright: 2023-2026 SpaceXAI
+- License: Apache-2.0
+- License text: `LICENSES/Apache-2.0.txt`
+
 The Vibewaiting CLI release bundles the production packages below. Exact versions and
 dependency relationships are also recorded in the release CycloneDX SBOM. License
 files supplied by each package remain beside that package under `node_modules` in the
