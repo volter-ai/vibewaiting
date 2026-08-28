@@ -244,9 +244,10 @@ export function validUuid(value: string | null): string | undefined {
 
 export function validGrokRequestId(value: string | null): string | undefined {
   if (validUuid(value)) return value ?? undefined;
-  for (const prefix of ["task-completed-", "subagent-completed-"] as const) {
+  for (const prefix of ["task-completed-", "subagent-completed-", "scheduler-fired-"] as const) {
     if (value?.startsWith(prefix) && validUuid(value.slice(prefix.length))) return value;
   }
+  if (/^workflow-completed-wf_[0-9a-f]{32}-\d+$/iu.test(value ?? "")) return value ?? undefined;
   const monitor = value?.match(/^monitor-([0-9a-f-]{36})-([0-9a-f-]{36})$/iu);
   return monitor && validUuid(monitor[1] ?? null) && validUuid(monitor[2] ?? null) ? value ?? undefined : undefined;
 }

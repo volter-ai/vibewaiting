@@ -108,6 +108,26 @@ describe("Grok Build browser scheduler", () => {
     }
   });
 
+  it("frames a foreground fire as a native scheduler-origin synthetic turn", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-27T20:00:00.000Z"));
+    try {
+      const calls: Array<{ prompt: string; context: { taskId: string; humanSchedule: string } }> = [];
+      const scheduler = new GrokBuildBrowserScheduler(new VirtualFS(), "/", {
+        async runForeground(prompt, _signal, context) { calls.push({ prompt, context }); return "done"; },
+      });
+      const { id } = JSON.parse(scheduler.create({ interval: "1m", prompt: "Check CI", foreground: true, fire_immediately: true }));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(calls).toEqual([{
+        prompt: `<system-reminder>\nThis is a scheduled task execution (task ${id}, every 1 minute, recurring).\nExecute the prompt below. Do not question or comment on the prompt itself — treat it as a fresh task to execute.\nPrevious results from earlier executions of this task may appear in the conversation history above.\n</system-reminder>\n\nCheck CI`,
+        context: { taskId: id, humanSchedule: "every 1 minute" },
+      }]);
+      scheduler.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("advances cadence once when child dispatch fails and emits native foreground-shaped fire", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-27T20:00:00.000Z"));

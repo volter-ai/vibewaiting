@@ -69,7 +69,7 @@ import { GrokBuildBrowserSubagentRunner } from "./grok-build-subagent-runner.js"
 import {
   GrokBuildLivePromptCoordinator,
 } from "./grok-build-prompt-queue.js";
-import { GrokBuildAutoWakeCoordinator } from "./grok-build-auto-wake.js";
+import { GrokBuildAutoWakeCoordinator, type GrokBuildAutoWakePayload } from "./grok-build-auto-wake.js";
 import { missingBrowserAgentCapabilities } from "./browser-capabilities.js";
 
 const VIRTUAL_PORT = 4176;
@@ -120,7 +120,8 @@ const mcpRuntime = createGrokBuildMcpServices([], {
   traceSink: createGrokBuildMcpOtlpTraceSink(rootOtlpTracer),
 });
 let workflowManager: GrokBuildBrowserWorkflowManager | undefined;
-const workflowCompletionReminders: string[] = [];
+const externalSyntheticWakes = new Map<string, GrokBuildAutoWakePayload>();
+const workflowWakeRevisions = new Map<string, number>();
 
 let activeRun: AbortController | undefined;
 let hmrEvents = 0;
@@ -334,7 +335,7 @@ function eventHandler(event: GrokBuildEvent): void {
   telemetryLifecycle?.record(event, agentSession?.snapshot().requestId);
   switch (event.type) {
     case "run_start":
-      eventItem("", "Task", event.task);
+      if (event.task) eventItem("", "Task", event.task);
       break;
     case "turn_start":
       turnCount.textContent = String(event.turn);
@@ -408,7 +409,13 @@ const browserServices: GrokBuildBrowserServices = {
 };
 autoWakeCoordinator = new GrokBuildAutoWakeCoordinator({
   waitForIdle: () => waitForAgentIdle(new AbortController().signal),
-  claimReminder: (promptId) => rootBrowserRuntime?.takeSystemReminder(promptId),
+  claimReminder: (promptId) => {
+    const runtimeReminder = rootBrowserRuntime?.takeSystemReminder(promptId);
+    if (runtimeReminder) return { messages: [runtimeReminder] };
+    const payload = externalSyntheticWakes.get(promptId);
+    externalSyntheticWakes.delete(promptId);
+    return payload;
+  },
   runWake: runLiveAutoWake,
   onError: (error) => eventItem("error", "Background wake failed", error instanceof Error ? error.message : String(error)),
 });
@@ -422,7 +429,11 @@ subagentRunner = new GrokBuildBrowserSubagentRunner({
   parentSnapshot: () => agentSession?.snapshot(),
 });
 
-function runScheduledForeground(prompt: string, signal: AbortSignal): Promise<string> {
+function runScheduledForeground(
+  prompt: string,
+  signal: AbortSignal,
+  _context: { taskId: string; humanSchedule: string },
+): Promise<string> {
   let resolveResult!: (value: string) => void;
   let rejectResult!: (reason: unknown) => void;
   const result = new Promise<string>((resolve, reject) => {
@@ -436,12 +447,14 @@ function runScheduledForeground(prompt: string, signal: AbortSignal): Promise<st
       if (!agentSession) throw new Error("The main Grok session is not initialized.");
       const controller = new AbortController();
       activeRun = controller;
-      for (const reminder of workflowCompletionReminders.splice(0)) agentSession.enqueueSystemReminder(reminder);
+      agentSession.enqueueSystemReminder(prompt);
       syncRunAvailability();
       stopButton.disabled = false;
       agentState.textContent = "Running scheduled task";
       try {
-        const run = await agentSession.run(prompt, AbortSignal.any([signal, controller.signal]));
+        const run = await agentSession.resume(AbortSignal.any([signal, controller.signal]), {
+          requestId: `scheduler-fired-${crypto.randomUUID()}`,
+        });
         resolveResult(run.text || "Scheduled task completed.");
       } finally {
         activeRun = undefined;
@@ -478,11 +491,11 @@ function notifyAgentIdle(): void {
   agentIdleWaiters.clear();
 }
 
-async function runLiveAutoWake(promptId: string, reminder: string): Promise<void> {
+async function runLiveAutoWake(promptId: string, payload: GrokBuildAutoWakePayload): Promise<void> {
   if (conformanceOrigin || !agentSession) return;
   const controller = new AbortController();
   activeRun = controller;
-  agentSession.enqueueSystemReminder(reminder);
+  for (const message of payload.messages) agentSession.enqueueSystemReminder(message);
   syncRunAvailability();
   stopButton.disabled = false;
   agentState.textContent = "Handling background completion";
@@ -595,7 +608,6 @@ async function runAgent(mode: "send-now" | "queue" = "send-now"): Promise<void> 
           ? conformanceRuntime?.drainSystemReminders(phase) ?? []
           : [
               ...browserRuntime.drainSystemReminders({ includeAutoWake: false }),
-              ...workflowCompletionReminders.splice(0),
               ...livePrompts.drainInterjections().map((entry) => entry.text),
             ],
         persistCompactionSegment(segment) {
@@ -696,6 +708,8 @@ async function resetProject(): Promise<void> {
   rootBrowserRuntime = undefined;
   rootSkillManager = undefined;
   autoWakeCoordinator.clear();
+  externalSyntheticWakes.clear();
+  workflowWakeRevisions.clear();
   livePrompts.clear();
   clearVirtualFileSystem(container.vfs, "/", ["/.grok/bundled"]);
   seedProject(conformanceProfile);
@@ -783,14 +797,15 @@ async function start(): Promise<void> {
       workspacePath: "/",
       builtins: [{ script: deepResearchWorkflow, path: "/.grok/builtin/workflows/deep-research.rhai" }],
       onRunEvent(event) {
-        workflowCompletionReminders.push(workflowCompletionReminder(event.name, event.runId, event.outcome));
+        const revision = (workflowWakeRevisions.get(event.runId) ?? 0) + 1;
+        workflowWakeRevisions.set(event.runId, revision);
+        const promptId = `workflow-completed-${event.runId}-${revision}`;
+        externalSyntheticWakes.set(promptId, { messages: [
+          workflowCompletionReminder(event.name, event.runId, event.outcome),
+          "A background workflow stopped. Review the workflow completion reminder, report the result to the user, and take any appropriate next action.",
+        ] });
         eventItem(event.outcome.status === "failed" ? "error" : "", `Workflow ${event.outcome.status}`, `${event.name} · ${event.runId}`);
-        if (!activeRun && agentSession) {
-          void runScheduledForeground(
-            "A background workflow stopped. Review the workflow completion reminder, report the result to the user, and take any appropriate next action.",
-            new AbortController().signal,
-          ).catch((error) => eventItem("error", "Workflow wake failed", error instanceof Error ? error.message : String(error)));
-        }
+        autoWakeCoordinator.enqueue(promptId);
       },
     });
     browserServices.runWorkflow = (input, signal) => workflowManager!.run(input, signal);

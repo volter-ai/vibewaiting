@@ -46,7 +46,7 @@ export interface GrokBuildBrowserServices {
   imageToVideo?(input: JsonObject, signal: AbortSignal): Promise<string>;
   referenceToVideo?(input: JsonObject, signal: AbortSignal): Promise<string>;
   webFetch?(url: string, signal: AbortSignal): Promise<string>;
-  runScheduledForeground?(prompt: string, signal: AbortSignal): Promise<string>;
+  runScheduledForeground?(prompt: string, signal: AbortSignal, context: { taskId: string; humanSchedule: string }): Promise<string>;
   onScheduledTaskEvent?(event: GrokScheduledTaskEvent): void;
   approvePlanModeEntry?(signal: AbortSignal): Promise<boolean>;
   approvePlanModeExit?(plan: string, signal: AbortSignal): Promise<{

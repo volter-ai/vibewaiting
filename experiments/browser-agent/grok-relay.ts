@@ -100,9 +100,10 @@ function validUuid(value: string | undefined): string | undefined {
 
 function validMainRequestId(value: string | undefined): string | undefined {
   if (validUuid(value)) return value;
-  for (const prefix of ["task-completed-", "subagent-completed-"] as const) {
+  for (const prefix of ["task-completed-", "subagent-completed-", "scheduler-fired-"] as const) {
     if (value?.startsWith(prefix) && validUuid(value.slice(prefix.length))) return value;
   }
+  if (/^workflow-completed-wf_[0-9a-f]{32}-\d+$/iu.test(value ?? "")) return value;
   const monitor = value?.match(/^monitor-([0-9a-f-]{36})-([0-9a-f-]{36})$/iu);
   return monitor && validUuid(monitor[1]) && validUuid(monitor[2]) ? value : undefined;
 }

@@ -1,8 +1,12 @@
 export interface GrokBuildAutoWakeDependencies {
   waitForIdle(): Promise<void>;
-  claimReminder(promptId: string): string | undefined;
-  runWake(promptId: string, reminder: string): Promise<void>;
+  claimReminder(promptId: string): GrokBuildAutoWakePayload | undefined;
+  runWake(promptId: string, payload: GrokBuildAutoWakePayload): Promise<void>;
   onError?(error: unknown): void;
+}
+
+export interface GrokBuildAutoWakePayload {
+  messages: readonly string[];
 }
 
 /** Serializes native synthetic turns without combining independent completions. */
@@ -37,9 +41,9 @@ export class GrokBuildAutoWakeCoordinator {
         this.queued.delete(promptId);
         await this.dependencies.waitForIdle();
         if (generation !== this.generation) return;
-        const reminder = this.dependencies.claimReminder(promptId);
-        if (!reminder) continue;
-        await this.dependencies.runWake(promptId, reminder);
+        const payload = this.dependencies.claimReminder(promptId);
+        if (!payload || payload.messages.length === 0) continue;
+        await this.dependencies.runWake(promptId, payload);
       }
     } catch (error) {
       this.dependencies.onError?.(error);

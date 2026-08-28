@@ -11,9 +11,9 @@ describe("Grok Build browser auto-wake coordinator", () => {
     const first = new Promise<void>((resolve) => { releaseFirst = resolve; });
     const coordinator = new GrokBuildAutoWakeCoordinator({
       waitForIdle: () => idle,
-      claimReminder: (id) => reminders.get(id),
-      async runWake(id, reminder) {
-        wakes.push(`${id}:${reminder}`);
+      claimReminder: (id) => reminders.has(id) ? { messages: [reminders.get(id)!] } : undefined,
+      async runWake(id, payload) {
+        wakes.push(`${id}:${payload.messages.join("|")}`);
         if (wakes.length === 1) await first;
       },
     });
@@ -47,7 +47,7 @@ describe("Grok Build browser auto-wake coordinator", () => {
     const wakes: string[] = [];
     const coordinator = new GrokBuildAutoWakeCoordinator({
       waitForIdle: () => ++waits === 1 ? blocked : Promise.resolve(),
-      claimReminder: (id) => id,
+      claimReminder: (id) => ({ messages: [id] }),
       async runWake(id) { wakes.push(id); },
     });
     coordinator.enqueue("old");

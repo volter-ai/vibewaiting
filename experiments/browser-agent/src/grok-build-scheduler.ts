@@ -16,7 +16,7 @@ export interface ScheduledSubagentHandle {
 export interface GrokBuildSchedulerHooks {
   spawnSubagent?(input: JsonObject, signal: AbortSignal, subagentId: string): ScheduledSubagentHandle;
   getSubagent?(subagentId: string): ScheduledSubagentHandle | undefined;
-  runForeground?(prompt: string, signal: AbortSignal): Promise<string>;
+  runForeground?(prompt: string, signal: AbortSignal, context: { taskId: string; humanSchedule: string }): Promise<string>;
   /** Removal events resolve only after the consumer durably accepts them. */
   onEvent?(event: GrokScheduledTaskEvent): unknown;
 }
@@ -331,7 +331,12 @@ export class GrokBuildBrowserScheduler {
         const next = rfc3339(nextFireAt(task));
         let subagentId: string | undefined;
         if (task.foreground) {
-          if (this.hooks.runForeground) void this.hooks.runForeground(formatScheduledTaskPrompt(task), this.controller.signal).catch(() => undefined);
+          if (this.hooks.runForeground) {
+            void this.hooks.runForeground(formatScheduledTaskPrompt(task), this.controller.signal, {
+              taskId: task.id,
+              humanSchedule,
+            }).catch(() => undefined);
+          }
         } else if (this.hooks.spawnSubagent) {
           subagentId = uuidV7();
           const previous = task.lastSubagentId ? this.hooks.getSubagent?.(task.lastSubagentId) : undefined;

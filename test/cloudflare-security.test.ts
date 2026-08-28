@@ -21,9 +21,12 @@ describe("Cloudflare browser-agent security boundary", () => {
     expect(validGrokRequestId(id)).toBe(id);
     expect(validGrokRequestId(`task-completed-${id}`)).toBe(`task-completed-${id}`);
     expect(validGrokRequestId(`subagent-completed-${id}`)).toBe(`subagent-completed-${id}`);
+    expect(validGrokRequestId(`scheduler-fired-${id}`)).toBe(`scheduler-fired-${id}`);
+    expect(validGrokRequestId("workflow-completed-wf_0123456789abcdef0123456789abcdef-2")).toBe("workflow-completed-wf_0123456789abcdef0123456789abcdef-2");
     expect(validGrokRequestId(`monitor-${id}-${eventId}`)).toBe(`monitor-${id}-${eventId}`);
     expect(validGrokRequestId(`attacker-${id}`)).toBeUndefined();
     expect(validGrokRequestId(`monitor-${id}-not-a-uuid`)).toBeUndefined();
+    expect(validGrokRequestId("workflow-completed-wf_escape-2")).toBeUndefined();
     expect(validGrokRequestId("task-completed-not-a-uuid")).toBeUndefined();
   });
   it("accepts the native streaming Responses envelope without rewriting it", () => {

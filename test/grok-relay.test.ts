@@ -18,6 +18,12 @@ describe("browser Grok relay", () => {
       "x-browser-agent-request": `subagent-completed-${id}`,
     }).requestId).toBe(`subagent-completed-${id}`);
     expect(relayMetadataFromHeaders({
+      "x-browser-agent-request": `scheduler-fired-${id}`,
+    }).requestId).toBe(`scheduler-fired-${id}`);
+    expect(relayMetadataFromHeaders({
+      "x-browser-agent-request": "workflow-completed-wf_0123456789abcdef0123456789abcdef-2",
+    }).requestId).toBe("workflow-completed-wf_0123456789abcdef0123456789abcdef-2");
+    expect(relayMetadataFromHeaders({
       "x-browser-agent-request": `monitor-${id}-44444444-4444-4444-8444-444444444444`,
     }).requestId).toBe(`monitor-${id}-44444444-4444-4444-8444-444444444444`);
   });
