@@ -107,6 +107,8 @@
     "pdfjs-dist": "^6.2.108",
     "preact": "10.29.8",
     "qrcode-generator": "1.5.2",
+    "react-refresh": "^0.14.0",
+    "three": "^0.180.0",
     "typescript": "^5.7.0",
     "vitest": "^3.2.7",
     "wrangler": "^4.127.0"

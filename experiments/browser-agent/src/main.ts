@@ -15,6 +15,7 @@ import {
   resolveSandboxOrigin,
 } from "./sandbox-protocol.js";
 import { BrowserSandboxBridge } from "./browser-sandbox-bridge.js";
+import { THREE_MODULE_ASSET_PATH } from "../sandbox-service-worker-hardening.js";
 import { BrowserGrokAuthController } from "./browser-grok-auth.js";
 import {
   autosaveBrowserProject,
@@ -142,6 +143,9 @@ const sandboxBridge = new BrowserSandboxBridge({
   nonce: sandboxNonce,
   port: VIRTUAL_PORT,
   bridge,
+  htmlModuleRewrites: {
+    [`https://esm.sh/three@${THREE_VERSION}`]: THREE_MODULE_ASSET_PATH,
+  },
   onPreviewLoad() {
     iframeLoadCount += 1;
     iframeLoads.textContent = String(iframeLoadCount);

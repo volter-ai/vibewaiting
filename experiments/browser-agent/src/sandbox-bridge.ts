@@ -1,4 +1,18 @@
 import { SANDBOX_CHANNEL, type SandboxEnvelope } from "./sandbox-protocol.js";
+import ReactRefreshRuntime from "react-refresh/runtime-development";
+
+declare global {
+  interface Window {
+    __VIBEWAITING_REACT_REFRESH_RUNTIME__?: typeof ReactRefreshRuntime;
+  }
+}
+
+Object.defineProperty(window, "__VIBEWAITING_REACT_REFRESH_RUNTIME__", {
+  configurable: false,
+  enumerable: false,
+  value: ReactRefreshRuntime,
+  writable: false,
+});
 
 const parameters = new URLSearchParams(location.search);
 const parentOrigin = new URL(parameters.get("parentOrigin") || "").origin;

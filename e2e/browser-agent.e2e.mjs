@@ -43,6 +43,20 @@ test("replays native Grok Build through an isolated browser sandbox with working
   });
   expect(isolated).toBe(true);
 
+  const externalFetch = await game.locator("body").evaluate(async () => {
+    try {
+      const response = await fetch("https://sandbox-network-denied.invalid/probe", {
+        cache: "no-store",
+        referrerPolicy: "no-referrer",
+      });
+      return { ok: response.ok, status: response.status };
+    } catch (error) {
+      return { ok: false, status: 0, name: error instanceof Error ? error.name : "unknown" };
+    }
+  });
+  expect(externalFetch.ok).toBe(false);
+  expect([0, 403]).toContain(externalFetch.status);
+
   await game.locator("body").click({ timeout: 1_000 });
   await game.locator("body").press("Space", { timeout: 1_000 });
   await expect(game.locator("body")).not.toHaveText(initialGameText || "", { timeout: 1_000 });
