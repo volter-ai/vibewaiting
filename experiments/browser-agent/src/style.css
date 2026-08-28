@@ -212,6 +212,26 @@ button:disabled { cursor: wait; opacity: .42; }
 .grok-plan-dialog footer { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 22px; border-top: 1px solid #252e39; }
 .grok-plan-dialog button.danger { margin-right: auto; color: #fecdd3; background: #4c1d2a; }
 
+.grok-mcp-dialog { width: min(720px, calc(100vw - 32px)); max-height: calc(100vh - 32px); padding: 0; overflow: hidden; border: 1px solid #33404e; border-radius: 14px; color: #dbe4ea; background: #111720; box-shadow: 0 28px 90px #000b; }
+.grok-mcp-dialog::backdrop { background: #05080dbf; backdrop-filter: blur(4px); }
+.grok-mcp-dialog > header, .grok-mcp-dialog > footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 18px; }
+.grok-mcp-dialog > header { border-bottom: 1px solid #252e39; }
+.grok-mcp-dialog > footer { justify-content: flex-end; border-top: 1px solid #252e39; }
+.grok-mcp-dialog h2 { margin: 0; font-size: 17px; }
+.grok-mcp-dialog header p { margin: 4px 0 0; color: #7f8e9a; font-size: 11px; }
+.mcp-server-list { display: grid; gap: 8px; max-height: min(540px, calc(100vh - 220px)); padding: 14px 18px; overflow: auto; }
+.mcp-server-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 12px; border: 1px solid #293442; border-radius: 10px; background: #0d131b; }
+.mcp-server-row[data-status="ready"] { border-color: #245147; }
+.mcp-server-row[data-status="failed"] { border-color: #5a2934; }
+.mcp-server-heading { display: flex; align-items: baseline; gap: 8px; }
+.mcp-server-heading strong { font-size: 12px; }
+.mcp-server-heading span { color: #77cdbd; font-size: 10px; }
+.mcp-server-row p { margin: 5px 0 0; overflow-wrap: anywhere; color: #82909c; font-size: 10px; line-height: 1.4; }
+.mcp-server-actions { display: flex; gap: 6px; }
+.mcp-server-actions button, .grok-mcp-dialog > header button, .grok-mcp-dialog > footer button { min-height: 32px; font-size: 10px; }
+.mcp-notice, .mcp-empty { margin: 0; padding: 12px 18px; color: #81c9bc; font-size: 11px; }
+.mcp-notice.error { color: #fb7185; }
+
 @media (max-width: 900px) {
   .app-shell { padding: 12px; }
   .workspace { grid-template-columns: 1fr; height: auto; }

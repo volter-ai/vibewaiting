@@ -62,6 +62,11 @@ export const GROK_BUILD_SYSTEM_PARITY = {
     evidence: ["test/fixtures/grok-conformance/native-control-behaviors-v1.json", "test/grok-build-native-control-parity.test.ts", "test/grok-build-prompt-queue.test.ts", "experiments/browser-agent/src/main.ts"],
     gap: "Every pinned native merge gate and byte-exact steer/interrupt envelope, including the Rust scalar-crossing UTF-8 boundary, has deterministic browser equivalence proof. Native concurrent producer/safe-boundary traffic remains before exact.",
   },
+  interactive_command_surface: {
+    level: "partial",
+    evidence: ["experiments/browser-agent/src/grok-build-mcp-dialog.ts", "test/grok-build-mcp-dialog.test.ts", "e2e/browser-agent.e2e.mjs"],
+    gap: "Native's explicit MCP auth trigger and live status/retry surface are now browser-native. The complete pager slash registry, command palette/autocomplete, and remaining browser-representable command actions are still being translated and proven command by command.",
+  },
   telemetry_and_feedback: {
     level: "source-ported",
     evidence: ["test/fixtures/grok-conformance/native-pong-complete-v1.jsonl", "e2e/browser-agent-long.e2e.mjs", "test/grok-build-telemetry.test.ts", "test/grok-build-otlp.test.ts", "test/grok-build-mcp-trace.test.ts", "experiments/browser-agent/src/grok-build-telemetry.ts"],
@@ -145,7 +150,7 @@ export const GROK_BUILD_TOOL_PARITY = {
     owner: "browser",
     level: "source-ported",
     evidence: ["test/fixtures/mcp/native-http-corpus.json", "test/grok-build-mcp-native-corpus.test.ts", "test/grok-build-mcp.test.ts", "test/grok-build-mcp-config.test.ts", "test/grok-build-mcp-stdio.test.ts", "test/grok-build-managed-mcp.test.ts", "test/grok-build-mcp-relay.test.ts", "test/grok-build-mcp-oauth-dialog.test.ts", "worker-test/cloudflare-auth-session.test.ts", "e2e/browser-agent.e2e.mjs", "experiments/browser-agent/src/grok-build-mcp-protocol.ts", "experiments/browser-agent/src/grok-build-mcp-config-discovery.ts", "experiments/browser-agent/src/grok-build-mcp-events.ts", "experiments/browser-agent/src/grok-build-mcp-elicitation.ts", "experiments/browser-agent/src/grok-build-mcp-oauth.ts", "experiments/browser-agent/src/grok-build-mcp-relay.ts", "experiments/browser-agent/src/grok-build-mcp-credential-store.ts", "experiments/browser-agent/src/grok-build-mcp.ts"],
-    gap: "A trusted native long session proves initialize/initialized/list/call request bodies, rmcp counters, no-OAuth discovery ordering, search_tool→use_tool dispatch, and model-visible output. Native config precedence, setup materialization, disabled tools, per-tool timeouts, persistent stdio processes, managed gateway calls, shared child-pool inheritance, proactive startup, OAuth DCR/PKCE/persistent refresh/scope-upgrade, and bounded live cross-origin SSE relay are source-ported and executable in the browser. Authenticated third-party native OAuth traffic and a real provider callback run remain before promotion to exact; the hosted relay deliberately accepts only public HTTPS port 443 targets rather than exposing a general port scanner.",
+    gap: "A trusted native long session proves initialize/initialized/list/call request bodies, rmcp counters, no-OAuth discovery ordering, search_tool→use_tool dispatch, and model-visible output. Native config precedence, setup materialization, disabled tools, per-tool timeouts, persistent stdio processes, managed gateway calls, shared child-pool inheritance, proactive startup, explicit auth-trigger recovery, OAuth DCR/PKCE/persistent refresh/scope-upgrade, and bounded live cross-origin SSE relay are source-ported and executable in the browser. Authenticated third-party native OAuth traffic and a real provider callback run remain before promotion to exact; the hosted relay deliberately accepts only public HTTPS port 443 targets rather than exposing a general port scanner.",
   },
   workflow: {
     owner: "browser",

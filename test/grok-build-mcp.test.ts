@@ -362,6 +362,41 @@ describe("Grok Build browser MCP protocol", () => {
     expect(authorizeCalls).toBe(0);
   });
 
+  it("does open a fresh authorization flow when explicit user auth follows a transient refresh failure", async () => {
+    let stored: McpOAuthCredentials = {
+      clientId: "browser-client", accessToken: "rejected", refreshToken: "refresh",
+      grantedScopes: ["mcp"], redirectUri: "https://app.example.test/callback",
+      metadata: { authorizationEndpoint: "https://auth.example.test/authorize", tokenEndpoint: "https://auth.example.test/token" },
+    };
+    let tokenCalls = 0;
+    let authorizeCalls = 0;
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === stored.metadata.tokenEndpoint) {
+        tokenCalls += 1;
+        if (tokenCalls === 1) throw new TypeError("network unavailable");
+        expect(String(init?.body)).toContain("grant_type=authorization_code");
+        return jsonResponse({ access_token: "fresh-user-token", refresh_token: "fresh-refresh", scope: "mcp" });
+      }
+      throw new Error(`Unexpected URL ${String(input)}`);
+    }) as unknown as typeof fetch;
+    const client = new GrokBuildMcpHttpClient({ name: "explicit-auth", url: "https://mcp.example.test", fetchImpl, oauth: {
+      credentialStore: {
+        load: async () => stored,
+        save: async (_key, value) => { stored = value; },
+        clear: async () => undefined,
+      },
+      authorize: async (url) => {
+        authorizeCalls += 1;
+        const parsed = new URL(url);
+        return { code: "user-code", state: parsed.searchParams.get("state")! };
+      },
+      redirectUri: stored.redirectUri,
+      resolveAuthorizationHostname: async () => ["8.8.8.8"],
+    } });
+    await client.forceReauth(new AbortController().signal);
+    expect({ authorizeCalls, tokenCalls, token: stored.accessToken }).toEqual({ authorizeCalls: 1, tokenCalls: 2, token: "fresh-user-token" });
+  });
+
   it("performs protected-resource discovery, DCR, PKCE, issuer validation, and resource-bound token exchange", async () => {
     let authorizationUrl = "";
     let saved: McpOAuthCredentials | undefined;
@@ -761,7 +796,49 @@ describe("Grok Build browser MCP registry", () => {
       toolCount: 1,
       toolNames: ["create_issue"],
       status: "ready",
+      supportsAuthentication: false,
     }]);
+  });
+
+  it("exposes explicit OAuth authentication and rebuilds the failed server catalog", async () => {
+    let stored: McpOAuthCredentials = {
+      clientId: "browser-client", accessToken: "rejected", refreshToken: "refresh",
+      grantedScopes: ["mcp"], redirectUri: "https://app.example.test/callback",
+      metadata: { authorizationEndpoint: "https://auth.example.test/authorize", tokenEndpoint: "https://auth.example.test/token" },
+    };
+    let authorizeCalls = 0;
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === stored.metadata.tokenEndpoint) {
+        const body = new URLSearchParams(String(init?.body));
+        if (body.get("grant_type") === "refresh_token") throw new TypeError("refresh network unavailable");
+        return jsonResponse({ access_token: "accepted", scope: "mcp" });
+      }
+      const request = JSON.parse(String(init?.body)) as WireRequest;
+      if (request.method === "initialize") {
+        if (new Headers(init?.headers).get("Authorization") !== "Bearer accepted") return new Response("expired", { status: 401 });
+        return jsonResponse({ jsonrpc: "2.0", id: request.id, result: { protocolVersion: "2025-11-25", capabilities: {} } });
+      }
+      if (request.method === "notifications/initialized") return new Response(null, { status: 202 });
+      return jsonResponse({ jsonrpc: "2.0", id: request.id, result: { tools: [{ name: "recovered", inputSchema: {} }] } });
+    }) as unknown as typeof fetch;
+    const registry = new GrokBuildMcpRegistry([{ name: "recoverable", url: "https://mcp.example.test", fetchImpl, oauth: {
+      credentialStore: {
+        load: async () => stored,
+        save: async (_key, value) => { stored = value; },
+        clear: async () => undefined,
+      },
+      authorize: async (url) => {
+        authorizeCalls += 1;
+        return { code: "user-code", state: new URL(url).searchParams.get("state")! };
+      },
+      redirectUri: stored.redirectUri,
+      resolveAuthorizationHostname: async () => ["8.8.8.8"],
+    } }]);
+    await registry.connectAll(new AbortController().signal);
+    expect(registry.serverSummaries()[0]).toMatchObject({ status: "failed", supportsAuthentication: true });
+    await registry.authenticate("recoverable", new AbortController().signal);
+    expect(authorizeCalls).toBe(1);
+    expect(registry.serverSummaries()[0]).toMatchObject({ status: "ready", supportsAuthentication: true, toolNames: ["recovered"] });
   });
 
   it("finds natural-language BM25 matches and does not let one failed server hide healthy tools", async () => {

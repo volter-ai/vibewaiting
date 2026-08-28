@@ -61,6 +61,7 @@ import type { GrokBuildAcpMcpServer } from "./grok-build-agent-mcp.js";
 import type { GrokBuildMcpServerConfig } from "./grok-build-mcp.js";
 import { createGrokBuildMcpHostnameResolver, createGrokBuildMcpRelayFetch } from "./grok-build-mcp-relay.js";
 import { GrokBuildMcpOAuthDialog } from "./grok-build-mcp-oauth-dialog.js";
+import { GrokBuildMcpDialog } from "./grok-build-mcp-dialog.js";
 import type { GrokBuildMcpConfigPolicy } from "./grok-build-mcp-config-parse.js";
 import {
   createGrokBuildManagedMcpConfigs,
@@ -99,6 +100,7 @@ const relayEndpoint = document.querySelector<HTMLInputElement>("#relay-endpoint"
 const taskInput = document.querySelector<HTMLTextAreaElement>("#task")!;
 const runButton = document.querySelector<HTMLButtonElement>("#run")!;
 const stopButton = document.querySelector<HTMLButtonElement>("#stop")!;
+const mcpStatusButton = document.querySelector<HTMLButtonElement>("#mcp-status")!;
 const resetButton = document.querySelector<HTMLButtonElement>("#reset")!;
 const agentState = document.querySelector<HTMLElement>("#agent-state")!;
 const turnCount = document.querySelector<HTMLElement>("#turn-count")!;
@@ -142,6 +144,7 @@ const mcpOAuth = (server: GrokBuildAcpMcpServer, policy: GrokBuildMcpConfigPolic
   resolveAuthorizationHostname: mcpHostnameResolver,
 });
 let mcpRuntime = createGrokBuildMcpServices([], mcpOptions);
+const mcpDialog = new GrokBuildMcpDialog(() => mcpRuntime.registry);
 let managedMcpConfigs: GrokBuildMcpServerConfig[] = [];
 let rootMcpConfigs: GrokBuildAcpMcpServer[] = [];
 let rootMcpPool: GrokBuildAcpMcpServer[] = [];
@@ -944,8 +947,10 @@ async function resetProject(): Promise<void> {
 
 runButton.addEventListener("click", (event) => void runAgent(event.shiftKey ? "queue" : "send-now"));
 stopButton.addEventListener("click", () => activeRun?.abort());
+mcpStatusButton.addEventListener("click", () => mcpDialog.open());
 resetButton.addEventListener("click", () => void resetProject());
 addEventListener("pagehide", () => {
+  mcpDialog.close();
   authController.destroy();
   void projectAutosave?.flush();
   if (!conformanceOrigin && agentSession) {

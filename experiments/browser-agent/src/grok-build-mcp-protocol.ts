@@ -107,6 +107,18 @@ export class GrokBuildMcpHttpClient {
     return this.initialized;
   }
 
+  get supportsAuthentication(): boolean {
+    return this.oauth !== undefined;
+  }
+
+  /** Explicit user auth trigger, distinct from automatic rejected-token recovery. */
+  async forceReauth(signal: AbortSignal): Promise<void> {
+    if (!this.oauth) throw new Error(`MCP server '${this.config.name}' does not use OAuth.`);
+    const token = await this.oauth.forceReauth(signal);
+    if (!token) throw new Error(`Authentication failed for MCP server '${this.config.name}'.`);
+    this.reset();
+  }
+
   onNotification(listener: (method: string, params: McpJsonObject) => void | Promise<void>): () => void {
     this.notificationListeners.add(listener);
     return () => this.notificationListeners.delete(listener);

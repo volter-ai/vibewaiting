@@ -107,8 +107,23 @@ export class GrokBuildMcpOAuthClient {
     if (this.noAuthorizationSupport && !force) return undefined;
     if (force) this.noAuthorizationSupport = false;
     if (this.pending && !force) return this.pending;
-    const run = () => this.prepare(signal, force);
+    const run = () => this.prepare(signal, force, false);
     const operation = (this.options.coordinateAuthorization ?? coordinateGrokBuildMcpAuthorization)(this.key, signal, run);
+    this.pending = operation;
+    try {
+      return await operation;
+    } finally {
+      if (this.pending === operation) this.pending = undefined;
+    }
+  }
+
+  /** Native `force_reauth(true)`: a user gesture may escalate even a transient refresh failure. */
+  async forceReauth(signal: AbortSignal): Promise<string | undefined> {
+    this.noAuthorizationSupport = false;
+    const operation = this.prepare(signal, true, true);
+    // A user-triggered auth replaces this tab's automatic waiter instead of
+    // joining it. Native similarly evicts the in-process dedup entry when the
+    // explicit auth trigger carries `force = true`.
     this.pending = operation;
     try {
       return await operation;
@@ -125,19 +140,20 @@ export class GrokBuildMcpOAuthClient {
     this.requiredScopes = [...new Set([...this.requiredScopes, ...scopes])];
   }
 
-  private async prepare(signal: AbortSignal, force: boolean): Promise<string | undefined> {
+  private async prepare(signal: AbortSignal, force: boolean, userTriggered: boolean): Promise<string | undefined> {
     let stored = await this.options.credentialStore.load(this.key);
     if (stored) {
-      if (!force && tokenIsUsable(stored)) return stored.accessToken;
-      const needsExpandedScopes = this.requiredScopes.some((scope) => !stored.grantedScopes.includes(scope));
-      if (stored.refreshToken && !needsExpandedScopes) {
+      const current = stored;
+      if (!force && tokenIsUsable(current)) return current.accessToken;
+      const needsExpandedScopes = this.requiredScopes.some((scope) => !current.grantedScopes.includes(scope));
+      if (current.refreshToken && !needsExpandedScopes) {
         try {
-          stored = await this.refresh(stored, signal);
+          stored = await this.refresh(current, signal);
           return stored.accessToken;
         } catch (error) {
           // Native automatic tool retries do not open a consent window for a
           // network/proxy blip. Terminal refresh rejection still escalates.
-          if (force && isTransientTokenExchangeFailure(error)) throw error;
+          if (force && !userTriggered && isTransientTokenExchangeFailure(error)) throw error;
           // Native falls through to interactive authorization after refresh failure.
         }
       }

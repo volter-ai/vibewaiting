@@ -152,6 +152,19 @@ export class GrokBuildMcpRegistry {
     await this.connect(state, signal);
   }
 
+  /** Native `x.ai/mcp/auth_trigger`: force user auth, then handshake and register tools. */
+  async authenticate(serverName: string, signal: AbortSignal): Promise<void> {
+    const state = this.servers.get(serverName);
+    if (!state) throw new Error(`Unknown MCP server '${serverName}'.`);
+    if (!state.client.supportsAuthentication) throw new Error(`MCP server '${serverName}' does not use OAuth.`);
+    await state.client.forceReauth(signal);
+    state.status = "idle";
+    state.error = undefined;
+    state.tools = [];
+    state.pending = undefined;
+    await this.connect(state, signal);
+  }
+
   /** Session teardown: close every live HTTP session and stdio child. */
   async closeAll(signal: AbortSignal): Promise<void> {
     const results = await Promise.allSettled(
@@ -165,13 +178,14 @@ export class GrokBuildMcpRegistry {
     if (failure) throw failure.reason;
   }
 
-  serverSummaries(): Array<{ name: string; description?: string; toolCount: number; toolNames: string[]; status: ServerState["status"]; error?: string }> {
+  serverSummaries(): Array<{ name: string; description?: string; toolCount: number; toolNames: string[]; status: ServerState["status"]; supportsAuthentication: boolean; error?: string }> {
     return [...this.servers.values()].sort((left, right) => left.config.name.localeCompare(right.config.name)).map((state) => ({
       name: state.config.name,
       ...(state.instructions ? { description: sanitizeDescription(state.instructions) } : {}),
       toolCount: state.tools.length,
       toolNames: state.tools.map((tool) => tool.toolName).sort(),
       status: state.status,
+      supportsAuthentication: state.client.supportsAuthentication,
       ...(state.error ? { error: state.error } : {}),
     }));
   }

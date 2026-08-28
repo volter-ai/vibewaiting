@@ -152,6 +152,12 @@ test("renders native structured question and plan approval interactions", async 
   await page.getByLabel("Plan revision feedback").fill("Add rollback steps");
   await page.getByRole("button", { name: "Request changes" }).click();
   await expect.poll(() => page.evaluate(() => window.__grokPlanExit)).toEqual({ outcome: "cancelled", feedback: "Add rollback steps" });
+
+  await page.getByRole("button", { name: "MCP", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "MCP servers" })).toBeVisible();
+  await expect(page.getByText("No MCP servers are configured.", { exact: false })).toBeVisible();
+  await page.getByRole("button", { name: "Close" }).click();
+  await expect(page.getByRole("heading", { name: "MCP servers" })).not.toBeVisible();
 });
 
 test("commits browser projects across reload and recovers the prior verified snapshot", async ({ page }) => {
