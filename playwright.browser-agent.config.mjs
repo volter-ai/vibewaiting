@@ -1,6 +1,8 @@
-import { defineConfig } from "@playwright/test";
+import { defineConfig, devices } from "@playwright/test";
 
 const conformanceCorpus = process.env.GROK_CONFORMANCE_CORPUS ?? "test/fixtures/grok-conformance/native-pong-complete-v1.jsonl";
+const browserName = process.env.BROWSER_AGENT_BROWSER ?? "chromium";
+const device = process.env.BROWSER_AGENT_DEVICE ? devices[process.env.BROWSER_AGENT_DEVICE] : undefined;
 
 export default defineConfig({
   testDir: "./e2e",
@@ -10,9 +12,10 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   use: {
+    ...device,
     actionTimeout: 1_000,
-    browserName: "chromium",
-    channel: "chrome",
+    browserName,
+    ...(browserName === "chromium" ? { channel: "chrome" } : {}),
     headless: true,
   },
   webServer: [

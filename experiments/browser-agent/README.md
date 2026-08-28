@@ -47,8 +47,11 @@ tool-name substitutions, and resume identity. Project definitions can shadow the
 additional bundled definitions are discoverable by name.
 
 The project runs inside Almostnode's browser virtual filesystem. Local development uses
-a same-origin iframe so it is easy to inspect; production must provide Almostnode's
-cross-origin sandbox host before executing untrusted generated code.
+a distinct loopback origin so it is easy to inspect; production must provide Almostnode's
+cross-origin sandbox host before executing untrusted generated code. Chromium, Firefox,
+desktop WebKit, and an iPhone WebKit profile are exercised nightly through the complete
+native replay, HMR/gameplay, isolation, IndexedDB recovery, and reload suite. Older or embedded browsers missing a
+required runtime API are rejected before the agent or generated-code sandbox starts.
 
 ## Run locally
 

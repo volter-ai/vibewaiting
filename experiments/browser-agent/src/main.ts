@@ -68,6 +68,7 @@ import { GrokBuildBrowserSubagentRunner } from "./grok-build-subagent-runner.js"
 import {
   GrokBuildLivePromptCoordinator,
 } from "./grok-build-prompt-queue.js";
+import { missingBrowserAgentCapabilities } from "./browser-capabilities.js";
 
 const VIRTUAL_PORT = 4176;
 const THREE_VERSION = "0.180.0";
@@ -94,6 +95,17 @@ const preview = document.querySelector<HTMLIFrameElement>("#preview")!;
 const previewUrl = document.querySelector<HTMLElement>("#preview-url")!;
 const renderedRevision = document.querySelector<HTMLElement>("#rendered-revision")!;
 const sandboxMode = document.querySelector<HTMLElement>("#sandbox-mode")!;
+
+const missingCapabilities = missingBrowserAgentCapabilities(globalThis);
+if (missingCapabilities.length > 0) {
+  runtimeStatus.textContent = "Browser runtime unsupported";
+  runtimeDot.classList.add("failed");
+  authStatus.textContent = `Missing: ${missingCapabilities.join(", ")}`;
+  runButton.disabled = true;
+  resetButton.disabled = true;
+  connectGrokButton.disabled = true;
+  throw new Error(`This browser cannot run the Grok sandbox: ${missingCapabilities.join(", ")}`);
+}
 
 const container = createContainer();
 const server = new ViteDevServer(container.vfs, { port: VIRTUAL_PORT, root: "/" });
