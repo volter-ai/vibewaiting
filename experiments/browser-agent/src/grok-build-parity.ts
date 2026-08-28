@@ -131,8 +131,8 @@ export const GROK_BUILD_TOOL_PARITY = {
   search_tool: {
     owner: "browser",
     level: "source-ported",
-    evidence: ["test/grok-build-mcp.test.ts", "experiments/browser-agent/src/grok-build-mcp.ts", "experiments/browser-agent/src/grok-build-mcp-search.ts"],
-    gap: "Registry/filtering/grouping, identifier expansion, NLTK English stop words, duplicate-query weighting, and bm25 2.3.2's f32 k1/b/IDF/TF scoring are source-ported. Full deunicode transliteration, byte-for-byte Snowball English stemming, native HashSet tie order, and a native ranking corpus remain before exact.",
+    evidence: ["test/grok-build-mcp.test.ts", "experiments/browser-agent/src/grok-build-mcp.ts", "experiments/browser-agent/src/grok-build-mcp-search.ts", "experiments/browser-agent/rhai-wasm/src/lib.rs"],
+    gap: "Ranking now executes Grok Build's exact bm25 2.3.2 crate in browser WASM, including deunicode, English stop words, Snowball stemming, identifier expansion, duplicate-query weighting, and f32 scoring. The complete 55+ native production haystack and live-server formatting traffic still need corpus proof before this row can be marked exact.",
   },
   use_tool: {
     owner: "browser",

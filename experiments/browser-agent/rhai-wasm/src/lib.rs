@@ -5,6 +5,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use bm25::{Language, SearchEngineBuilder};
 use rhai::{Dynamic, EvalAltResult, Position};
 use serde::{Deserialize, Serialize};
 use sha2::Digest as _;
@@ -182,6 +183,122 @@ pub fn validate_contract_json(schema_json: &str, final_text: Option<String>) -> 
     serde_json::to_string(&verdict).unwrap_or_else(|error| {
         format!(r#"{{"status":"invalid","error":"failed to serialize contract verdict: {error}"}}"#)
     })
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchTool {
+    qualified_name: String,
+    server_name: String,
+    tool_name: String,
+    description: String,
+    parameters: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchResult {
+    index: usize,
+    score: f32,
+}
+
+/// Browser/WASM form of Grok Build's exact MCP `ToolSearchIndex` ranking.
+/// This intentionally uses the same bm25 crate/version as the pinned native
+/// source instead of maintaining a JavaScript tokenizer/stemmer approximation.
+#[wasm_bindgen]
+pub fn search_tools_json(tools_json: &str, query: &str, limit: usize) -> String {
+    let result = serde_json::from_str::<Vec<SearchTool>>(tools_json)
+        .map_err(|error| format!("invalid tool-search corpus: {error}"))
+        .map(|tools| search_tools(&tools, query, limit));
+    serde_json::to_string(&result).unwrap_or_else(|error| {
+        format!(r#"{{"Err":"failed to serialize tool-search result: {error}"}}"#)
+    })
+}
+
+fn search_tools(tools: &[SearchTool], query: &str, limit: usize) -> Vec<SearchResult> {
+    if tools.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+
+    let query_lower = query.trim().to_lowercase();
+    if let Some(index) = tools.iter().position(|tool| {
+        tool.qualified_name.to_lowercase() == query_lower
+            || tool.tool_name.to_lowercase() == query_lower
+    }) {
+        return vec![SearchResult { index, score: 1.0 }];
+    }
+
+    let documents: Vec<String> = tools.iter().map(tool_document).collect();
+    let search_engine =
+        SearchEngineBuilder::<u32>::with_corpus(Language::English, documents).build();
+    search_engine
+        .search(&normalize_search_query(query), limit)
+        .into_iter()
+        .map(|result| SearchResult {
+            index: result.document.id as usize,
+            score: result.score,
+        })
+        .collect()
+}
+
+fn tool_document(tool: &SearchTool) -> String {
+    let params = tool.parameters.join(" ");
+    let document = format!(
+        "{} {} {} {}",
+        tool.server_name, tool.tool_name, tool.description, params
+    );
+    let extra = [tool.server_name.as_str(), tool.tool_name.as_str()]
+        .iter()
+        .flat_map(|value| split_search_identifier(value))
+        .chain(tool.parameters.iter().flat_map(|value| split_search_identifier(value)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("{document} {extra}")
+}
+
+fn normalize_search_query(query: &str) -> String {
+    let needs_split = query.contains("__")
+        || query.contains('_')
+        || query.contains('-')
+        || query
+            .as_bytes()
+            .windows(2)
+            .any(|pair| pair[0].is_ascii_lowercase() && pair[1].is_ascii_uppercase());
+    if !needs_split {
+        return query.to_owned();
+    }
+    let extra: Vec<&str> = query
+        .split_whitespace()
+        .flat_map(split_search_identifier)
+        .collect();
+    if extra.is_empty() {
+        query.to_owned()
+    } else {
+        format!("{query} {}", extra.join(" "))
+    }
+}
+
+fn split_search_identifier(value: &str) -> Vec<&str> {
+    let mut words = Vec::new();
+    for part in value
+        .split("__")
+        .flat_map(|part| part.split('_'))
+        .flat_map(|part| part.split('-'))
+    {
+        if part.is_empty() {
+            continue;
+        }
+        let bytes = part.as_bytes();
+        let mut start = 0;
+        for index in 1..bytes.len() {
+            if bytes[index - 1].is_ascii_lowercase() && bytes[index].is_ascii_uppercase() {
+                words.push(&part[start..index]);
+                start = index;
+            }
+        }
+        words.push(&part[start..]);
+    }
+    words
 }
 
 fn validate_contract(
@@ -537,6 +654,41 @@ mod tests {
         let schema = serde_json::json!({ "$ref": "https://example.com/schema.json" }).to_string();
         let error = validate_contract(&schema, None).unwrap_err();
         assert!(error.contains("external JSON Schema references are disabled"), "{error}");
+    }
+
+    fn source_search_tools() -> Vec<SearchTool> {
+        [
+            ("linear__save_issue", "linear", "save_issue", "Create or update a Linear issue", &["title", "team", "description", "assignee", "priority", "labels", "project"][..]),
+            ("linear__list_issues", "linear", "list_issues", "List issues in the user's Linear workspace", &["assignee", "project", "state", "team", "query"][..]),
+            ("linear__get_issue", "linear", "get_issue", "Retrieve detailed information about an issue by ID", &["id"][..]),
+            ("linear__list_projects", "linear", "list_projects", "List projects in the user's Linear workspace", &["query", "team"][..]),
+            ("demo-mcp__sendMessage", "demo-mcp", "sendMessage", "Send a message in a Slack channel", &["channel", "text"][..]),
+            ("demo-mcp__readSlackThread", "demo-mcp", "readSlackThread", "Read a Slack thread history", &["channel", "thread_ts"][..]),
+        ]
+        .into_iter()
+        .map(|(qualified_name, server_name, tool_name, description, parameters)| SearchTool {
+            qualified_name: qualified_name.into(),
+            server_name: server_name.into(),
+            tool_name: tool_name.into(),
+            description: description.into(),
+            parameters: parameters.iter().map(|value| (*value).into()).collect(),
+        })
+        .collect()
+    }
+
+    #[test]
+    fn tool_search_matches_native_source_corpus() {
+        let tools = source_search_tools();
+        for (query, expected) in [
+            ("create linear issue", "linear__save_issue"),
+            ("read slack thread", "demo-mcp__readSlackThread"),
+            ("list my issues", "linear__list_issues"),
+            ("READSLACKTHREAD", "demo-mcp__readSlackThread"),
+        ] {
+            let result = search_tools(&tools, query, 3);
+            assert!(!result.is_empty(), "query {query:?} returned no results");
+            assert_eq!(tools[result[0].index].qualified_name, expected, "query {query:?}");
+        }
     }
 
     #[test]

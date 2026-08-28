@@ -127,10 +127,10 @@ export class GrokBuildMcpRegistry {
   }
 
   /** A non-blocking snapshot, useful while background handshakes are in flight. */
-  formatSearch(query: string, limit = 5): string {
+  async formatSearch(query: string, limit = 5): Promise<string> {
     validateSearchInput(query, limit);
     const tools = [...this.servers.values()].flatMap((state) => state.tools);
-    const ranked = searchMcpDocuments(tools, query, limit);
+    const ranked = await searchMcpDocuments(tools, query, limit);
     const groups: Array<{ server: string; score: number; tools: Array<Record<string, unknown>> }> = [];
     for (const tool of ranked) {
       const rendered = {

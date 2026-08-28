@@ -37,7 +37,7 @@ export class BrowserGrokAuthController {
   private pollTimer: number | undefined;
 
   constructor(private readonly options: BrowserGrokAuthOptions) {
-    this.fetchImpl = options.fetch ?? globalThis.fetch;
+    this.fetchImpl = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
   }
 
   async refreshStatus(): Promise<void> {

@@ -15,6 +15,7 @@ export interface GrokConformanceDriverProfile {
   turnSummaryRequests?: number;
   reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
   nativeWorkspacePath: string;
+  initialFiles?: Array<{ path: string; content: string }>;
   fixture?: string;
   autoCompactThresholdPercent?: number;
   compactionTranscriptHint?: string;
@@ -82,7 +83,7 @@ export class GrokConformanceToolRuntime implements GrokBuildToolRuntime {
     const actual = await this.runtime.execute(browserCall, signal);
     if (actual.isError) throw new Error(`Browser runtime failed ${call.name}: ${actual.output}`);
     const expected = await this.recorded.execute(call);
-    validateEffect(call.name, actual.output, expected.output, this.nativeWorkspacePath, this.browserWorkspacePath);
+    validateEffect(call, actual.output, expected.output, this.nativeWorkspacePath, this.browserWorkspacePath);
     return expected;
   }
 
@@ -109,11 +110,37 @@ function remapPathText(value: string, nativeRoot: string, browserRoot: string): 
   return value.replaceAll(`${nativeRoot}/`, `${root}/`).replaceAll(nativeRoot, browserRoot);
 }
 
-function validateEffect(name: string, actual: string, expected: string, nativeRoot: string, browserRoot: string): void {
+function validateEffect(call: GrokBuildToolCall, actual: string, expected: string, nativeRoot: string, browserRoot: string): void {
   const normalizedExpected = remapPathText(expected, nativeRoot, browserRoot);
-  if (actual !== normalizedExpected) {
-    throw new Error(`${name} output drifted from native Grok Build.\nExpected:\n${normalizedExpected}\nActual:\n${actual}`);
+  const [comparableActual, comparableExpected] = isLongListingCall(call)
+    ? [normalizeLongListing(actual), normalizeLongListing(normalizedExpected)]
+    : [actual, normalizedExpected];
+  if (comparableActual !== comparableExpected) {
+    throw new Error(`${call.name} output drifted from native Grok Build.\nExpected:\n${normalizedExpected}\nActual:\n${actual}`);
   }
+}
+
+function isLongListingCall(call: GrokBuildToolCall): boolean {
+  if (call.name !== "run_terminal_command") return false;
+  try {
+    const value = JSON.parse(call.arguments) as { command?: unknown };
+    return typeof value.command === "string" && /\bls\s+-[A-Za-z]*l[A-Za-z]*\b/u.test(value.command);
+  } catch {
+    return false;
+  }
+}
+
+/** Ignores only OS-owned ls metadata; entry order, type, names, and file sizes remain strict. */
+function normalizeLongListing(output: string): string {
+  return output.split("\n").flatMap((line) => {
+    if (/^total\s+\d+$/u.test(line)) return [];
+    const fields = line.trim().split(/\s+/u);
+    if (!/^[bcdlps-][rwxStTs-]{9}@?$/u.test(fields[0] ?? "") || fields.length < 9) return [line];
+    const type = fields[0]![0];
+    const size = fields[4];
+    const name = fields.slice(8).join(" ").replace(/\/$/u, "");
+    return [`<ls-entry type=${type} size=${type === "-" ? size : "directory"} name=${name}>`];
+  }).join("\n");
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

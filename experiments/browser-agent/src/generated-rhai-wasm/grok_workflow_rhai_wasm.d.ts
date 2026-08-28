@@ -7,12 +7,19 @@ export function evaluate_json(input_json: string): string;
  * consuming a physical child-agent run just like the native host service.
  */
 export function validate_contract_json(schema_json: string, final_text?: string | null): string;
+/**
+ * Browser/WASM form of Grok Build's exact MCP `ToolSearchIndex` ranking.
+ * This intentionally uses the same bm25 crate/version as the pinned native
+ * source instead of maintaining a JavaScript tokenizer/stemmer approximation.
+ */
+export function search_tools_json(tools_json: string, query: string, limit: number): string;
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
   readonly memory: WebAssembly.Memory;
   readonly evaluate_json: (a: number, b: number) => [number, number];
+  readonly search_tools_json: (a: number, b: number, c: number, d: number, e: number) => [number, number];
   readonly validate_contract_json: (a: number, b: number, c: number, d: number) => [number, number];
   readonly __wbindgen_exn_store: (a: number) => void;
   readonly __externref_table_alloc: () => number;

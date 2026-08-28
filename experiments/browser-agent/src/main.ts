@@ -115,7 +115,7 @@ let restoredAgentSession: import("./grok-build-agent.js").GrokBuildSessionSnapsh
 let agentSession: GrokBuildSession | undefined;
 let liveStartupProfile: GrokBuildStartupProfile | undefined;
 let bundleSync: Promise<void> | undefined;
-const mediaClient = new GrokBuildMediaClient(container.vfs, fetch, () => agentSession?.snapshot().sessionId);
+const mediaClient = new GrokBuildMediaClient(container.vfs, (input, init) => fetch(input, init), () => agentSession?.snapshot().sessionId);
 let conformanceRuntime: GrokConformanceToolRuntime | undefined;
 let recordedRuntime: GrokRecordedToolRuntime | undefined;
 const agentIdleWaiters = new Set<() => void>();
@@ -224,6 +224,15 @@ const authController = new BrowserGrokAuthController({
 });
 
 function seedProject(profile?: GrokConformanceDriverProfile): void {
+  if (profile?.initialFiles?.length) {
+    for (const file of profile.initialFiles) {
+      const path = file.path.startsWith("/") ? file.path : `/${file.path}`;
+      const separator = path.lastIndexOf("/");
+      if (separator > 0) container.vfs.mkdirSync(path.slice(0, separator), { recursive: true });
+      container.vfs.writeFileSync(path, file.content);
+    }
+    return;
+  }
   const nativePongFixture = profile?.fixture === "three-pong-starter-v1";
   container.vfs.mkdirSync("/src", { recursive: true });
   container.vfs.writeFileSync(
@@ -548,7 +557,7 @@ async function runAgent(): Promise<void> {
       const browserRuntime = new GrokBuildBrowserRuntime(container, "/", browserServices);
       const skillManager = new GrokBuildSkillManager(container.vfs, "/");
       const startupSkillReminder = startupExtensionReminder(skillManager);
-      conformanceRuntime = profile?.fixture === "three-pong-starter-v1"
+      conformanceRuntime = profile?.initialFiles?.length || profile?.fixture === "three-pong-starter-v1"
         ? new GrokConformanceToolRuntime(browserRuntime, profile.toolResults, profile.nativeWorkspacePath, "/")
         : undefined;
       recordedRuntime = profile && !conformanceRuntime

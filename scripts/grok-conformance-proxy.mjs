@@ -302,6 +302,8 @@ function buildDriverProfile(path) {
     && exchange.request?.headers?.["x-grok-turn-idx"] === undefined
     && exchange !== compaction
   ).length;
+  const nativeWorkspacePath = extractWorkspacePath(initial.input);
+  const initialFiles = extractInitialWorkspaceFiles(foreground, nativeWorkspacePath);
   return {
     formatVersion: CONFORMANCE_FORMAT_VERSION,
     task: extractUserQuery(title?.request?.body?.input) ?? "",
@@ -312,12 +314,77 @@ function buildDriverProfile(path) {
     modelRequests: exchanges.filter((exchange) => exchange.key === "POST /v1/responses").length,
     turnSummaryRequests,
     reasoningEffort: initial.reasoning?.effort,
-    nativeWorkspacePath: extractWorkspacePath(initial.input),
+    nativeWorkspacePath,
+    ...(initialFiles.length > 0 ? { initialFiles } : {}),
     fixture: manifest?.fixture,
     autoCompactThresholdPercent: manifest?.autoCompactThresholdPercent,
     ...(compactionTranscriptHint ? { compactionTranscriptHint } : {}),
     ...(compactionSystemReminder ? { compactionSystemReminder } : {}),
   };
+}
+
+function extractInitialWorkspaceFiles(foreground, nativeWorkspacePath) {
+  const calls = new Map();
+  const orderedCallIds = [];
+  const outputs = new Map();
+  for (const exchange of foreground) {
+    for (const item of exchange.request?.body?.input ?? []) {
+      if (item?.type === "function_call" && typeof item.call_id === "string" && !calls.has(item.call_id)) {
+        calls.set(item.call_id, item);
+        orderedCallIds.push(item.call_id);
+      }
+      if (item?.type === "function_call_output" && typeof item.call_id === "string" && !outputs.has(item.call_id)) {
+        outputs.set(item.call_id, typeof item.output === "string" ? item.output : JSON.stringify(item.output));
+      }
+    }
+  }
+
+  const files = new Map();
+  for (const callId of orderedCallIds) {
+    const call = calls.get(callId);
+    if (!call || !isReadOnlyWorkspaceInspection(call)) break;
+    if (call.name !== "read_file") continue;
+    let args;
+    try {
+      args = JSON.parse(call.arguments || "{}");
+    } catch {
+      continue;
+    }
+    const target = args?.target_file;
+    if (typeof target !== "string" || args.offset !== undefined || args.limit !== undefined) continue;
+    const relative = workspaceRelativePath(target, nativeWorkspacePath);
+    const output = outputs.get(callId);
+    if (!relative || typeof output !== "string" || !/^\d+→/u.test(output)) continue;
+    files.set(relative, unnumberFullRead(output));
+  }
+  return [...files].map(([path, content]) => ({ path, content }));
+}
+
+function isReadOnlyWorkspaceInspection(call) {
+  if (["list_dir", "read_file", "grep"].includes(call.name)) return true;
+  if (call.name !== "run_terminal_command") return false;
+  try {
+    const { command } = JSON.parse(call.arguments || "{}");
+    if (typeof command !== "string") return false;
+    return command.split(/&&|\|\||;/u).every((part) =>
+      /^\s*(?:ls|find|cat|head|tail|pwd|git\s+(?:status|log|diff)|node\s+--check)\b/u.test(part));
+  } catch {
+    return false;
+  }
+}
+
+function workspaceRelativePath(target, workspacePath) {
+  const normalizedTarget = target.replaceAll("\\\\", "/");
+  const normalizedRoot = workspacePath.replaceAll("\\\\", "/").replace(/\/$/u, "");
+  if (normalizedTarget === normalizedRoot || !normalizedTarget.startsWith(`${normalizedRoot}/`)) return;
+  return `/${normalizedTarget.slice(normalizedRoot.length + 1)}`;
+}
+
+function unnumberFullRead(output) {
+  return output.split("\n").map((line, index) => {
+    const prefix = `${index + 1}→`;
+    return line.startsWith(prefix) ? line.slice(prefix.length) : line;
+  }).join("\n");
 }
 
 function extractUserQuery(items) {

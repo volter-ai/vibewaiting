@@ -38,13 +38,16 @@ interface VideoPollResponse {
 export class GrokBuildMediaClient {
   private nextImage = 1;
   private nextVideo = 1;
+  private readonly fetchImpl: typeof fetch;
 
   constructor(
     private readonly vfs: VirtualFS,
-    private readonly fetchImpl: typeof fetch = fetch,
+    fetchImpl: typeof fetch = (input, init) => globalThis.fetch(input, init),
     private readonly sessionId?: () => string | undefined,
     private readonly sleep: (milliseconds: number, signal: AbortSignal) => Promise<void> = abortableSleep,
-  ) {}
+  ) {
+    this.fetchImpl = fetchImpl;
+  }
 
   async generateImage(input: JsonObject, signal: AbortSignal): Promise<string> {
     const prompt = requiredString(input.prompt, "prompt");

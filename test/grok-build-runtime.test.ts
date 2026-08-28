@@ -340,4 +340,23 @@ These subagents were launched before this compaction and are still running. Use 
     expect(vfs.readFileSync("/src/game.js", "utf8")).toBe("export const ready = true;\n");
     expect(() => conformance.assertComplete()).not.toThrow();
   });
+
+  it("keeps ls entry names and file sizes strict while ignoring host-owned long-listing metadata", async () => {
+    const actual = `exit: 0\ntotal 3\ndrwxr-xr-x 1 user user 0 Jan 1 00:00 .\ndrwxr-xr-x 1 user user 0 Jan 1 00:00 ..\n-rw-r--r-- 1 user user 152 Aug 27 21:14 package.json\ndrwxr-xr-x 1 user user 0 Aug 27 21:14 src/`;
+    const expected = `exit: 0\ntotal 16\ndrwxr-xr-x@ 5 yueranyuan wheel 160 Aug 27 21:01 .\ndrwxrwxrwt 9990 root wheel 319680 Aug 27 21:01 ..\n-rw-r--r--@ 1 yueranyuan wheel 152 Aug 27 20:57 package.json\ndrwxr-xr-x@ 3 yueranyuan wheel 96 Aug 27 20:53 src`;
+    const runtime = { execute: vi.fn(async () => ({ output: actual })) };
+    const conformance = new GrokConformanceToolRuntime(runtime, [{ callId: "ls", output: expected }], "/private/tmp/native", "/");
+    await expect(conformance.execute({
+      callId: "ls",
+      name: "run_terminal_command",
+      arguments: '{"command":"ls -la /private/tmp/native"}',
+    }, new AbortController().signal)).resolves.toEqual({ output: expected });
+
+    const drift = new GrokConformanceToolRuntime(runtime, [{ callId: "ls", output: expected.replace("152", "153") }], "/private/tmp/native", "/");
+    await expect(drift.execute({
+      callId: "ls",
+      name: "run_terminal_command",
+      arguments: '{"command":"ls -la /private/tmp/native"}',
+    }, new AbortController().signal)).rejects.toThrow("output drifted");
+  });
 });

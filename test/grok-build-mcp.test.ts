@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import {
   GrokBuildMcpRegistry,
   createGrokBuildMcpServices,
@@ -14,6 +15,13 @@ import {
 } from "../experiments/browser-agent/src/grok-build-mcp-events.js";
 import type { McpOAuthCredentials } from "../experiments/browser-agent/src/grok-build-mcp-oauth.js";
 import { searchMcpDocuments } from "../experiments/browser-agent/src/grok-build-mcp-search.js";
+import { loadGrokBuildRhaiWasmSync } from "../experiments/browser-agent/src/grok-build-rhai-wasm.js";
+
+beforeAll(() => {
+  const wasm = readFileSync(new URL("../experiments/browser-agent/src/generated-rhai-wasm/grok_workflow_rhai_wasm_bg.wasm", import.meta.url));
+  const bytes = wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength) as ArrayBuffer;
+  loadGrokBuildRhaiWasmSync(bytes);
+});
 
 type WireRequest = {
   jsonrpc: "2.0";
@@ -342,18 +350,18 @@ describe("Grok Build browser MCP protocol", () => {
 });
 
 describe("Grok Build browser MCP registry", () => {
-  it("uses source-derived English stop words, stemming, identifier expansion, and duplicate-query BM25 weighting", () => {
+  it("uses native bm25 English stop words, stemming, identifier expansion, and duplicate-query weighting", async () => {
     const documents = [
       { qualifiedName: "linear__create_issue", serverName: "linear", toolName: "create_issue", description: "Create a work item", parameters: ["teamId"] },
       { qualifiedName: "slack__read_thread", serverName: "slack", toolName: "read_thread", description: "Read thread replies", parameters: ["channelId"] },
       { qualifiedName: "linear__list_issues", serverName: "linear", toolName: "list_issues", description: "List work items", parameters: [] },
     ];
-    expect(searchMcpDocuments(documents, "create linear issue", 3)[0]?.qualifiedName).toBe("linear__create_issue");
-    expect(searchMcpDocuments(documents, "read slack thread", 3)[0]?.qualifiedName).toBe("slack__read_thread");
-    expect(searchMcpDocuments(documents, "creating issues", 3)[0]?.qualifiedName).toBe("linear__create_issue");
-    const once = searchMcpDocuments(documents, "create issue", 3)[0]?.score ?? 0;
-    const withStopWords = searchMcpDocuments(documents, "the create issue", 3)[0]?.score ?? 0;
-    const duplicate = searchMcpDocuments(documents, "create issue create issue", 3)[0]?.score ?? 0;
+    expect((await searchMcpDocuments(documents, "create linear issue", 3))[0]?.qualifiedName).toBe("linear__create_issue");
+    expect((await searchMcpDocuments(documents, "read slack thread", 3))[0]?.qualifiedName).toBe("slack__read_thread");
+    expect((await searchMcpDocuments(documents, "creating issues", 3))[0]?.qualifiedName).toBe("linear__create_issue");
+    const once = (await searchMcpDocuments(documents, "create issue", 3))[0]?.score ?? 0;
+    const withStopWords = (await searchMcpDocuments(documents, "the create issue", 3))[0]?.score ?? 0;
+    const duplicate = (await searchMcpDocuments(documents, "create issue create issue", 3))[0]?.score ?? 0;
     expect(withStopWords).toBe(once);
     expect(duplicate).toBeCloseTo(once * 2, 5);
   });

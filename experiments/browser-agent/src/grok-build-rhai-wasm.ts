@@ -5,6 +5,7 @@
 import initialize, {
   evaluate_json,
   initSync,
+  search_tools_json,
   validate_contract_json,
   type InitInput,
   type SyncInitInput,
@@ -44,6 +45,7 @@ export async function loadGrokBuildRhaiWasm(
 /** Synchronous initializer used by deterministic Node/Vitest corpus tests. */
 export function loadGrokBuildRhaiWasmSync(module: SyncInitInput): GrokBuildRhaiContinuationModule {
   initSync({ module });
+  initialization ??= Promise.resolve();
   return evaluator();
 }
 
@@ -54,4 +56,21 @@ export function validateGrokBuildContract(schema: unknown, finalText?: string): 
     return { status: "invalid", error: "Rhai WASM returned an invalid output-contract verdict" };
   }
   return result as GrokBuildContractVerdict;
+}
+
+type ExactSearchResponse =
+  | { Ok: Array<{ index: number; score: number }> }
+  | { Err: string };
+
+/** Runs the pinned native bm25 2.3.2 tool index inside browser WASM. */
+export async function searchGrokBuildToolsExact(
+  tools: readonly unknown[],
+  query: string,
+  limit: number,
+): Promise<Array<{ index: number; score: number }>> {
+  initialization ??= initialize();
+  await initialization;
+  const response = JSON.parse(search_tools_json(JSON.stringify(tools), query, limit)) as ExactSearchResponse;
+  if ("Err" in response) throw new Error(response.Err);
+  return response.Ok;
 }

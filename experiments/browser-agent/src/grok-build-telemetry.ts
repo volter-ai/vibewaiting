@@ -42,7 +42,7 @@ export class GrokBuildTelemetryClient {
 
   constructor(options: GrokBuildTelemetryClientOptions = {}) {
     this.baseUrl = (options.baseUrl ?? "/api/grok").replace(/\/$/u, "");
-    this.fetchImpl = options.fetch ?? globalThis.fetch;
+    this.fetchImpl = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
   }
 
   async loadFeedbackConfig(signal?: AbortSignal): Promise<GrokBuildFeedbackConfig> {

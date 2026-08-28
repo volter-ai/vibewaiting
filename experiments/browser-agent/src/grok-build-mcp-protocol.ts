@@ -93,14 +93,16 @@ export class GrokBuildMcpHttpClient {
   private eventStreamController: AbortController | undefined;
   private readonly pendingServerRequests = new Map<string, AbortController>();
   private readonly notificationListeners = new Set<(method: string, params: McpJsonObject) => void | Promise<void>>();
+  private readonly fetchImpl: typeof fetch;
 
   constructor(readonly config: GrokBuildMcpHttpConfig) {
     validateHttpConfig(config);
+    this.fetchImpl = config.fetchImpl ?? ((input, init) => globalThis.fetch(input, init));
     this.oauth = config.oauth ? new GrokBuildMcpOAuthClient(
       config.name,
       config.url,
       config.oauth,
-      config.fetchImpl ?? fetch,
+      this.fetchImpl,
       config.headers,
     ) : undefined;
   }
@@ -195,7 +197,7 @@ export class GrokBuildMcpHttpClient {
     this.eventStreamController = undefined;
     if (!this.sessionId) return;
     const headers = await this.requestHeaders(signal, true);
-    const response = await (this.config.fetchImpl ?? fetch)(this.config.url, {
+    const response = await this.fetchImpl(this.config.url, {
       method: "DELETE", headers, signal, credentials: "omit", redirect: "error",
     });
     if (!response.ok && response.status !== 405) throw new McpHttpError(`MCP server '${this.config.name}' returned HTTP ${response.status} while closing its session.`, response.status);
@@ -258,7 +260,7 @@ export class GrokBuildMcpHttpClient {
     const timer = globalThis.setTimeout(() => controller.abort(new DOMException("MCP request timed out.", "TimeoutError")), timeoutMs);
     let response: Response;
     try {
-      response = await (this.config.fetchImpl ?? fetch)(this.config.url, {
+      response = await this.fetchImpl(this.config.url, {
         method: "POST",
         headers,
         body: JSON.stringify(payload),
@@ -397,7 +399,7 @@ export class GrokBuildMcpHttpClient {
       try {
         const headers = await this.requestHeaders(signal, true);
         if (lastEventId) headers.set("Last-Event-ID", lastEventId);
-        const response = await (this.config.fetchImpl ?? fetch)(this.config.url, { method: "GET", headers, signal, credentials: "omit", redirect: "error" });
+        const response = await this.fetchImpl(this.config.url, { method: "GET", headers, signal, credentials: "omit", redirect: "error" });
         if (response.status === 405) return;
         if (!response.ok) throw new McpHttpError(`MCP server '${this.config.name}' event stream returned HTTP ${response.status}.`, response.status);
         if (!response.body) return;

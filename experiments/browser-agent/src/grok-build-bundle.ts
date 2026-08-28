@@ -419,7 +419,7 @@ export async function syncGrokBuildBundle(
     const manifest = readGrokBuildBundleManifest(vfs);
     return { source: "fresh-cache", updated: false, ...(manifest ? { manifest } : {}) };
   }
-  const fetchImpl = options.fetch ?? globalThis.fetch;
+  const fetchImpl = options.fetch ?? ((input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init));
   const archive = await fetchImpl(options.archiveEndpoint ?? "/api/grok/bundle/archive", {
     credentials: "include",
     cache: "no-store",

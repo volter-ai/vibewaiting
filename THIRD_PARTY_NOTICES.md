@@ -15,7 +15,10 @@ The browser experiment also bundles Mozilla PDF.js (`pdfjs-dist` 6.2.108,
 Apache-2.0) for in-browser document rendering and a WebAssembly workflow runtime
 built with Rhai 1.25.1 (MIT OR Apache-2.0), wasm-bindgen (MIT OR Apache-2.0),
 Serde (MIT OR Apache-2.0), SHA-2 (MIT OR Apache-2.0), and jsonschema 0.30.0
-(MIT). Acorn 8.18.0 (MIT) provides browser-side JavaScript syntax checking.
+(MIT). The same runtime includes bm25 2.3.2 (MIT), deunicode 1.6.2
+(BSD-3-Clause), rust-stemmers 1.2.0 (MIT/BSD-3-Clause), and stop-words 0.9.0
+(MIT OR Apache-2.0) for source-identical MCP tool ranking. Acorn 8.18.0 (MIT)
+provides browser-side JavaScript syntax checking.
 Their exact transitive dependency versions are recorded in `package-lock.json` and
 `experiments/browser-agent/rhai-wasm/Cargo.lock`.
 

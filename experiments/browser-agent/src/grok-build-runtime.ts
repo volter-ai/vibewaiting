@@ -191,7 +191,11 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
       const task = this.createCommandTask(command, signal, "command");
       const completed = await settleBefore(task.promise, 120_000, signal);
       if (completed !== undefined) {
-        return formatCommandResult({ stdout: completed, stderr: "", exitCode: task.exitCode ?? (task.status === "failed" ? 1 : 0) });
+        return formatCommandResult({
+          stdout: sanitizeWorkspaceShellOutput(command, completed, this.workspacePath),
+          stderr: "",
+          exitCode: task.exitCode ?? (task.status === "failed" ? 1 : 0),
+        });
       }
       return `Command automatically moved to background with task ID: ${task.id}`;
     }
@@ -211,7 +215,10 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
         onStdout: (chunk) => { stdout += chunk; },
         onStderr: (chunk) => { stderr += chunk; },
       });
-      return formatCommandResult(result);
+      return formatCommandResult({
+        ...result,
+        stdout: sanitizeWorkspaceShellOutput(command, result.stdout, this.workspacePath),
+      });
     } catch (error) {
       if (!timedOut) throw error;
       const output = [stdout, stderr].filter(Boolean).join(stdout && stderr ? "\n" : "");
@@ -395,6 +402,13 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
 function formatCommandResult(result: RunResult): string {
   const output = [result.stdout, result.stderr].filter(Boolean).join(result.stdout && result.stderr ? "\n" : "");
   return `exit: ${result.exitCode}${output ? `\n${output}` : ""}`;
+}
+
+function sanitizeWorkspaceShellOutput(command: string, output: string, workspacePath: string): string {
+  if (workspacePath !== "/" || !/\bls\s+-[A-Za-z]*l[A-Za-z]*\b/u.test(command)) return output;
+  // almostnode needs /tmp for process plumbing. It is outside the logical
+  // project, so do not expose it as if it were a user-owned workspace entry.
+  return output.split("\n").filter((line) => !/^d\S*\s+\d+\s+\S+\s+\S+\s+\d+\s+\S+\s+\d+\s+\S+\s+tmp\/?$/u.test(line)).join("\n");
 }
 
 function boundedCommandTimeout(value: unknown, fallback: number): number {

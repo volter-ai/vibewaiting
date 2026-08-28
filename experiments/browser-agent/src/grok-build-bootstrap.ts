@@ -187,7 +187,7 @@ export function applyGrokBuildRemoteToolGates(
 
 /** Native startup ordering: models, early settings, then settings re-apply. */
 export async function fetchGrokBuildStartupProfile(options: GrokBuildStartupOptions): Promise<GrokBuildStartupProfile> {
-  const fetchImpl = options.fetch ?? globalThis.fetch;
+  const fetchImpl = options.fetch ?? ((input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init));
   const base = (options.baseUrl ?? "/api/grok").replace(/\/$/u, "");
   let models: unknown = BUNDLED_MODELS;
   try {
