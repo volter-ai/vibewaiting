@@ -1006,20 +1006,19 @@ async function routeTelemetry(request: Request, env: Env, route: GrokTelemetryRo
 
   const upstreamUrl = `${CHAT_PROXY_ORIGIN}${route.upstreamPath}`;
   const makeRequest = (current: InternalCredential): RequestInit => {
+    const traced = !route.upstreamPath.endsWith("/turn-deltas");
     const headers = new Headers({
       Authorization: `Bearer ${current.accessToken}`,
       Accept: "*/*",
       "X-XAI-Token-Auth": "xai-grok-cli",
       "x-grok-client-version": env.XAI_CLIENT_VERSION,
       "x-grok-client-mode": "headless",
-      "x-userid": current.userId,
+      ...(traced ? { traceparent: createTraceparent(), tracestate: "" } : {}),
     });
     if (request.method === "POST") headers.set("Content-Type", route.contentType);
     if (route.upstreamPath === "/v1/traces") {
       headers.set("x-userid", current.userId);
       if (current.teamId) headers.set("x-teamid", current.teamId);
-    } else {
-      headers.set("traceparent", createTraceparent());
     }
     return {
       method: request.method,

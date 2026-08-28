@@ -1,10 +1,15 @@
 import {
   McpSseDecoder,
   validateElicitationRequest,
-  validateElicitationResult,
+  validateElicitationResultForRequest,
   type McpEventHandlers,
 } from "./grok-build-mcp-events.js";
 import { GrokBuildMcpOAuthClient, type GrokBuildMcpOAuthOptions } from "./grok-build-mcp-oauth.js";
+import {
+  parseMcpChallengeScopes,
+  validateGrokBuildMcpHttpConfig,
+  waitForMcpReconnect,
+} from "./grok-build-mcp-transport-utils.js";
 
 /** JSON values accepted by the Model Context Protocol wire format. */
 export type McpJson = null | boolean | number | string | McpJson[] | { [key: string]: McpJson };
@@ -71,7 +76,7 @@ export class McpProtocolError extends Error {
 }
 
 export class McpHttpError extends Error {
-  constructor(message: string, readonly status: number) {
+  constructor(message: string, readonly status: number, readonly challenge?: string) {
     super(message);
     this.name = "McpHttpError";
   }
@@ -92,11 +97,12 @@ export class GrokBuildMcpHttpClient {
   private readonly oauth: GrokBuildMcpOAuthClient | undefined;
   private eventStreamController: AbortController | undefined;
   private readonly pendingServerRequests = new Map<string, AbortController>();
+  private activeElicitation: { id: string; controller: AbortController } | undefined;
   private readonly notificationListeners = new Set<(method: string, params: McpJsonObject) => void | Promise<void>>();
   private readonly fetchImpl: typeof fetch;
 
   constructor(readonly config: GrokBuildMcpHttpConfig) {
-    validateHttpConfig(config);
+    validateGrokBuildMcpHttpConfig(config);
     this.fetchImpl = config.fetchImpl ?? ((input, init) => globalThis.fetch(input, init));
     this.oauth = config.oauth ? new GrokBuildMcpOAuthClient(
       config.name,
@@ -181,13 +187,20 @@ export class GrokBuildMcpHttpClient {
     return tools;
   }
 
-  async callTool(name: string, args: McpJsonObject, signal: AbortSignal): Promise<McpCallToolResult> {
+  async callTool(
+    name: string,
+    args: McpJsonObject,
+    signal: AbortSignal,
+    onAuthRetry?: () => void,
+  ): Promise<McpCallToolResult> {
     await this.initialize(signal);
     const result = await this.rpc(
       "tools/call",
       { name, arguments: args },
       signal,
       this.config.toolTimeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS,
+      true,
+      onAuthRetry,
     );
     return asObject(result, "tools/call result") as McpCallToolResult;
   }
@@ -215,6 +228,7 @@ export class GrokBuildMcpHttpClient {
     signal: AbortSignal,
     timeoutMs: number,
     includeProtocolVersion = true,
+    onAuthRetry?: () => void,
   ): Promise<McpJson> {
     const id = this.nextRequestId++;
     const responses = await this.post(
@@ -223,6 +237,7 @@ export class GrokBuildMcpHttpClient {
       signal,
       timeoutMs,
       includeProtocolVersion,
+      onAuthRetry,
     );
     const response = responses.find((candidate) => candidate.id === id);
     if (!response) throw new Error(`MCP server '${this.config.name}' did not return JSON-RPC response ${id}.`);
@@ -236,12 +251,14 @@ export class GrokBuildMcpHttpClient {
     signal: AbortSignal,
     timeoutMs: number,
     includeProtocolVersion = true,
+    onAuthRetry?: () => void,
   ): Promise<JsonRpcResponse[]> {
     try {
       return await this.postOnce(payload, expectedId, signal, timeoutMs, includeProtocolVersion, false);
     } catch (error) {
       if (!(error instanceof McpHttpError) || ![401, 403].includes(error.status) || !this.oauth) throw error;
-      await this.oauth.invalidate();
+      onAuthRetry?.();
+      if (error.status === 403) this.oauth.requireScopes(parseMcpChallengeScopes(error.challenge));
       return this.postOnce(payload, expectedId, signal, timeoutMs, includeProtocolVersion, true);
     }
   }
@@ -284,6 +301,7 @@ export class GrokBuildMcpHttpClient {
       throw new McpHttpError(
         `MCP server '${this.config.name}' returned HTTP ${response.status}${detail ? `: ${detail}` : ""}`,
         response.status,
+        response.headers.get("WWW-Authenticate") ?? undefined,
       );
     }
     if (response.status === 202 || response.status === 204) return [];
@@ -363,6 +381,10 @@ export class GrokBuildMcpHttpClient {
 
   private async handleServerRequest(id: string | number, method: string, params: McpJsonObject, parentSignal: AbortSignal): Promise<void> {
     const controller = new AbortController();
+    if (method === "elicitation/create") {
+      this.activeElicitation?.controller.abort(new DOMException("Superseded by a newer elicitation request.", "AbortError"));
+      this.activeElicitation = { id: String(id), controller };
+    }
     this.pendingServerRequests.set(String(id), controller);
     let response: McpJsonObject;
     try {
@@ -374,12 +396,15 @@ export class GrokBuildMcpHttpClient {
           ? await this.config.events.onElicitation(request, AbortSignal.any([parentSignal, controller.signal]))
           : { action: "decline" as const };
         if (controller.signal.aborted) result = { action: "cancel" };
-        response = { jsonrpc: "2.0", id, result: validateElicitationResult(result) as unknown as McpJson };
+        response = { jsonrpc: "2.0", id, result: validateElicitationResultForRequest(request, result) as unknown as McpJson };
       }
     } catch (error) {
-      response = { jsonrpc: "2.0", id, error: { code: -32603, message: error instanceof Error ? error.message : String(error) } };
+      response = method === "elicitation/create"
+        ? { jsonrpc: "2.0", id, result: { action: "cancel" } }
+        : { jsonrpc: "2.0", id, error: { code: -32603, message: error instanceof Error ? error.message : String(error) } };
     } finally {
       this.pendingServerRequests.delete(String(id));
+      if (this.activeElicitation?.id === String(id)) this.activeElicitation = undefined;
     }
     await this.post(response, undefined, parentSignal, this.config.toolTimeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS);
   }
@@ -424,26 +449,8 @@ export class GrokBuildMcpHttpClient {
         failures += 1;
       }
       const exponential = 1_000 * (2 ** Math.min(Math.max(0, failures - 1), 16));
-      await abortableDelay(serverRetryMs ?? (failures ? exponential : 1_000), signal);
+      await waitForMcpReconnect(serverRetryMs ?? (failures ? exponential : 1_000), signal);
     }
-  }
-}
-
-function validateHttpConfig(config: GrokBuildMcpHttpConfig): void {
-  if (!config.name || config.name.includes("__")) throw new Error("MCP server name must be non-empty and cannot contain '__'.");
-  let url: URL;
-  try {
-    url = new URL(config.url, globalThis.location?.href);
-  } catch {
-    throw new Error(`Invalid MCP server URL: ${config.url}`);
-  }
-  const localHttp = url.protocol === "http:" && (url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]");
-  if (url.protocol !== "https:" && !localHttp) throw new Error("MCP server URL must use HTTPS (HTTP is allowed only for localhost). ");
-  for (const [name, value] of Object.entries(config.headers ?? {})) {
-    if (!name.trim() || /[\r\n]/u.test(name) || /[\r\n]/u.test(value)) throw new Error(`Invalid MCP header '${name}'.`);
-  }
-  for (const timeout of [config.startupTimeoutMs, config.toolTimeoutMs]) {
-    if (timeout !== undefined && (!Number.isSafeInteger(timeout) || timeout <= 0)) throw new Error("MCP timeouts must be positive integers.");
   }
 }
 
@@ -488,14 +495,4 @@ function responseContainsId(value: McpJson, id: number): boolean {
   return Array.isArray(value)
     ? value.some((item) => isObject(item) && item.id === id)
     : isObject(value) && value.id === id;
-}
-
-async function abortableDelay(milliseconds: number, signal: AbortSignal): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    const timer = globalThis.setTimeout(resolve, milliseconds);
-    signal.addEventListener("abort", () => {
-      globalThis.clearTimeout(timer);
-      reject(signal.reason ?? new DOMException("The operation was aborted.", "AbortError"));
-    }, { once: true });
-  });
 }

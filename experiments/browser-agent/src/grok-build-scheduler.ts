@@ -1,11 +1,12 @@
 import type { VirtualFS } from "almostnode";
+import { uuidV7 } from "./grok-build-background-tasks.js";
 
 export type JsonObject = Record<string, unknown>;
 
 export type GrokScheduledTaskEvent =
-  | { type: "created"; taskId: string; prompt: string; humanSchedule: string; nextFireAt: string }
-  | { type: "fired"; taskId: string; prompt: string; humanSchedule: string; nextFireAt: string; subagentId?: string }
-  | { type: "removed"; taskId: string; reason: "deleted" | "expired" };
+  | { type: "created"; taskId: string; prompt: string; humanSchedule: string; nextFireAt: string; generation: string; revision: number }
+  | { type: "fired"; taskId: string; prompt: string; humanSchedule: string; nextFireAt: string; generation: string; revision: number; subagentId?: string }
+  | { type: "removed"; taskId: string; reason: "deleted" | "expired"; generation: string; revision: number };
 
 export interface ScheduledSubagentHandle {
   readonly status: "running" | "completed" | "failed" | "cancelled" | "timed_out";
@@ -16,7 +17,13 @@ export interface GrokBuildSchedulerHooks {
   spawnSubagent?(input: JsonObject, signal: AbortSignal, subagentId: string): ScheduledSubagentHandle;
   getSubagent?(subagentId: string): ScheduledSubagentHandle | undefined;
   runForeground?(prompt: string, signal: AbortSignal): Promise<string>;
-  onEvent?(event: GrokScheduledTaskEvent): void;
+  /** Removal events resolve only after the consumer durably accepts them. */
+  onEvent?(event: GrokScheduledTaskEvent): unknown;
+}
+
+interface PendingRemoval {
+  taskId: string;
+  event: Extract<GrokScheduledTaskEvent, { type: "removed" }>;
 }
 
 interface ScheduledTask {
@@ -54,6 +61,9 @@ interface PersistedSchedulerState {
 const MAX_SCHEDULED_TASKS = 50;
 const RECURRING_TASK_TTL_MS = 7 * 86_400_000;
 const LOOP_FRESH_CHAIN_EVERY = 10;
+const DURABILITY_BARRIER_TIMEOUT_MS = 30_000;
+
+class SchedulerBarrierError extends Error {}
 
 /** Browser-native port of Grok Build's scheduler actor and persisted state. */
 export class GrokBuildBrowserScheduler {
@@ -61,6 +71,11 @@ export class GrokBuildBrowserScheduler {
   private readonly controller = new AbortController();
   private timer: ReturnType<typeof setTimeout> | undefined;
   private firing = false;
+  private readonly blockedExpiries = new Set<string>();
+  private readonly generation = uuidV7();
+  private revision = 0;
+  private pendingRemoval: PendingRemoval | undefined;
+  private pendingRemovalAttempt: Promise<void> | undefined;
 
   constructor(
     private readonly vfs: VirtualFS,
@@ -68,10 +83,12 @@ export class GrokBuildBrowserScheduler {
     private readonly hooks: GrokBuildSchedulerHooks = {},
   ) {
     this.restore();
+    for (const task of this.tasks.values()) this.emitCreated(task, false);
     this.arm();
   }
 
   create(input: JsonObject): string {
+    if (this.pendingRemoval) throw new Error(`scheduler removal for ${this.pendingRemoval.taskId} is pending`);
     const existingId = typeof input.task_id === "string" ? input.task_id : undefined;
     const existing = existingId ? this.tasks.get(existingId) : undefined;
     if (existingId && !existing) {
@@ -82,7 +99,7 @@ export class GrokBuildBrowserScheduler {
     if (existing && input.prompt === undefined && input.interval === undefined) {
       throw new Error("nothing to update: provide interval and/or prompt alongside task_id");
     }
-    if (!existing && input.recurring === false) {
+    if (!existing && !bool(input.recurring, true)) {
       throw new Error("one-shot tasks are not supported; run a background terminal command instead (`sleep <secs> && <command>`, background: true) or do the work now");
     }
     if (!existing && intervalSecs === undefined) throw new Error("interval is required when creating a task");
@@ -112,27 +129,40 @@ export class GrokBuildBrowserScheduler {
     this.tasks.set(id, task);
     this.persist();
     this.arm();
-    this.hooks.onEvent?.({
-      type: "created",
-      taskId: id,
-      prompt: task.prompt,
-      humanSchedule: intervalToHuman(task.intervalSecs),
-      nextFireAt: rfc3339(nextFireAt(task)),
-    });
+    this.emitCreated(task, true);
     return JSON.stringify({ id, humanSchedule: intervalToHuman(task.intervalSecs), updated: Boolean(existing) });
   }
 
-  delete(input: JsonObject): string {
+  async delete(input: JsonObject): Promise<string> {
     const id = requiredString(input.id, "id");
-    const removed = this.tasks.delete(id);
-    if (removed) {
-      this.persist();
-      this.arm();
-      this.hooks.onEvent?.({ type: "removed", taskId: id, reason: "deleted" });
+    if (this.pendingRemoval?.taskId === id) {
+      if (this.pendingRemovalAttempt) {
+        await this.pendingRemovalAttempt;
+        return deleteResult(id, false);
+      }
+      await this.completePendingRemoval();
+      return deleteResult(id, true);
     }
-    return JSON.stringify(removed
-      ? { success: true, message: `Scheduled task ${id} cancelled.` }
-      : { success: false, message: `No scheduled task with ID ${id} found. Use scheduler_list to see active tasks.` });
+    if (this.pendingRemoval) throw new Error(`scheduler removal for ${this.pendingRemoval.taskId} is pending`);
+    if (!this.tasks.has(id)) return deleteResult(id, false);
+    if (!this.hooks.onEvent) {
+      throw new Error("durable scheduler removal requires an acknowledging notification consumer");
+    }
+
+    this.suspendTimer();
+    this.tasks.delete(id);
+    this.pendingRemoval = {
+      taskId: id,
+      event: {
+        type: "removed",
+        taskId: id,
+        reason: "deleted",
+        generation: this.generation,
+        revision: this.revision + 1,
+      },
+    };
+    await this.completePendingRemoval();
+    return deleteResult(id, true);
   }
 
   list(): string {
@@ -144,6 +174,63 @@ export class GrokBuildBrowserScheduler {
       createdAt: rfc3339(task.createdAt),
       recurring: task.recurring,
     })) });
+  }
+
+  dispose(): void {
+    this.controller.abort(new DOMException("Scheduler stopped", "AbortError"));
+    if (this.timer !== undefined) globalThis.clearTimeout(this.timer);
+    this.timer = undefined;
+  }
+
+  private emitCreated(task: ScheduledTask, transition: boolean): void {
+    if (transition) this.revision += 1;
+    this.hooks.onEvent?.({
+      type: "created",
+      taskId: task.id,
+      prompt: task.prompt,
+      humanSchedule: intervalToHuman(task.intervalSecs),
+      nextFireAt: rfc3339(nextFireAt(task)),
+      generation: this.generation,
+      revision: this.revision,
+    });
+  }
+
+  private async completePendingRemoval(): Promise<void> {
+    if (this.pendingRemovalAttempt) return this.pendingRemovalAttempt;
+    const attempt = Promise.resolve().then(() => this.performPendingRemoval());
+    this.pendingRemovalAttempt = attempt;
+    try {
+      await attempt;
+    } finally {
+      if (this.pendingRemovalAttempt === attempt) this.pendingRemovalAttempt = undefined;
+    }
+  }
+
+  private async performPendingRemoval(): Promise<void> {
+    const pending = this.pendingRemoval;
+    if (!pending) return;
+    if (!this.hooks.onEvent) {
+      // Native targets are immutable. Releasing this reservation prevents all
+      // later scheduler mutations from being wedged if the target disappeared.
+      this.pendingRemoval = undefined;
+      throw new Error("durable scheduler removal requires an acknowledging notification consumer");
+    }
+    try {
+      this.persist();
+    } catch (error) {
+      throw new Error(`failed to persist scheduler resources: ${message(error)}`);
+    }
+    try {
+      await awaitDurabilityBarrier(this.hooks.onEvent(pending.event), this.controller.signal);
+    } catch (error) {
+      if (error instanceof SchedulerBarrierError) throw error;
+      throw new Error(`failed to publish scheduler tombstone: ${message(error)}`);
+    }
+    // A failed acknowledgement keeps this reservation and therefore reuses
+    // the same generation/revision tombstone when delete is retried.
+    this.pendingRemoval = undefined;
+    this.revision = pending.event.revision;
+    this.arm();
   }
 
   private restore(): void {
@@ -204,9 +291,10 @@ export class GrokBuildBrowserScheduler {
   }
 
   private arm(): void {
-    if (this.timer !== undefined) globalThis.clearTimeout(this.timer);
-    this.timer = undefined;
-    const next = [...this.tasks.values()].map(nextWakeAt).sort((left, right) => left - right)[0];
+    this.suspendTimer();
+    const next = [...this.tasks.values()]
+      .filter((task) => !this.blockedExpiries.has(task.id))
+      .map(nextWakeAt).sort((left, right) => left - right)[0];
     if (next === undefined) return;
     const delay = Math.min(Math.max(0, next - Date.now()), 2_147_483_647);
     this.timer = globalThis.setTimeout(() => {
@@ -215,50 +303,67 @@ export class GrokBuildBrowserScheduler {
     }, delay);
   }
 
+  private suspendTimer(): void {
+    if (this.timer !== undefined) globalThis.clearTimeout(this.timer);
+    this.timer = undefined;
+  }
+
   private async fireDue(): Promise<void> {
     if (this.firing) return;
     this.firing = true;
     try {
       while (true) {
         const now = Date.now();
-        const task = [...this.tasks.values()].find((candidate) => nextWakeAt(candidate) <= now);
+        const task = [...this.tasks.values()].find((candidate) => !this.blockedExpiries.has(candidate.id) && nextWakeAt(candidate) <= now);
         if (!task) break;
         if (task.expiresAt !== undefined && now >= task.expiresAt) {
-          this.tasks.delete(task.id);
-          this.persist();
-          this.hooks.onEvent?.({ type: "removed", taskId: task.id, reason: "expired" });
+          await this.expireTask(task);
           continue;
         }
         if (task.lastSubagentId && this.hooks.getSubagent?.(task.lastSubagentId)?.status === "running") {
           task.lastFiredAt = now;
           this.persist();
+          this.emitCreated(task, false);
           continue;
         }
+        const previousLastFiredAt = task.lastFiredAt;
         task.lastFiredAt = now;
         const humanSchedule = intervalToHuman(task.intervalSecs);
         const next = rfc3339(nextFireAt(task));
         let subagentId: string | undefined;
-        if (task.foreground && this.hooks.runForeground) {
-          void this.hooks.runForeground(formatScheduledTaskPrompt(task), this.controller.signal).catch(() => undefined);
+        if (task.foreground) {
+          if (this.hooks.runForeground) void this.hooks.runForeground(formatScheduledTaskPrompt(task), this.controller.signal).catch(() => undefined);
         } else if (this.hooks.spawnSubagent) {
-          subagentId = crypto.randomUUID();
+          subagentId = uuidV7();
           const previous = task.lastSubagentId ? this.hooks.getSubagent?.(task.lastSubagentId) : undefined;
           const restart = task.chainResetPending || task.iterationsSinceFresh >= LOOP_FRESH_CHAIN_EVERY || previous?.status !== "completed";
           const priorSummary = restart && previous?.output ? truncateChars(previous.output, 600) : undefined;
-          this.hooks.spawnSubagent({
-            prompt: formatLoopIterationPrompt(task, humanSchedule, priorSummary),
-            description: `loop: ${truncateChars(task.prompt.split("\n")[0] || task.prompt, 60)} (${humanSchedule})`,
-            subagent_type: "general-purpose",
-            background: true,
-            ...(restart ? {} : { resume_from: task.lastSubagentId }),
-          }, this.controller.signal, subagentId);
+          try {
+            this.hooks.spawnSubagent({
+              prompt: formatLoopIterationPrompt(task, humanSchedule, priorSummary),
+              description: `loop: ${truncateChars(task.prompt.split("\n")[0] || task.prompt, 60)} (${humanSchedule})`,
+              subagent_type: "general-purpose",
+              background: true,
+              completion_output_cap: 4_000,
+              spawn_depth: 0,
+              loop_task_id: task.id,
+              ...(restart ? {} : { resume_from: task.lastSubagentId }),
+            }, this.controller.signal, subagentId);
+          } catch {
+            if (previousLastFiredAt === undefined) delete task.lastFiredAt;
+            else task.lastFiredAt = previousLastFiredAt;
+            this.persist();
+            continue;
+          }
           task.lastSubagentId = subagentId;
           task.iterationsSinceFresh = restart ? 1 : task.iterationsSinceFresh + 1;
           task.chainResetPending = false;
         }
         this.persist();
+        this.revision += 1;
         this.hooks.onEvent?.({
           type: "fired", taskId: task.id, prompt: task.prompt, humanSchedule, nextFireAt: next,
+          generation: this.generation, revision: this.revision,
           ...(subagentId ? { subagentId } : {}),
         });
       }
@@ -267,10 +372,52 @@ export class GrokBuildBrowserScheduler {
       this.arm();
     }
   }
+
+  private async expireTask(task: ScheduledTask): Promise<void> {
+    if (task.durable && !this.hooks.onEvent) {
+      this.blockedExpiries.add(task.id);
+      return;
+    }
+    this.tasks.delete(task.id);
+    const event: Extract<GrokScheduledTaskEvent, { type: "removed" }> = {
+      type: "removed",
+      taskId: task.id,
+      reason: "expired",
+      generation: this.generation,
+      revision: this.revision + 1,
+    };
+    if (task.durable) {
+      try {
+        this.persist();
+      } catch {
+        this.tasks.set(task.id, task);
+        this.blockedExpiries.add(task.id);
+        return;
+      }
+      try {
+        await awaitDurabilityBarrier(this.hooks.onEvent!(event), this.controller.signal);
+      } catch {
+        // Persistence already committed the absence. As in native, an
+        // acknowledgement failure does not resurrect or retry the expiry.
+        return;
+      }
+      this.revision = event.revision;
+      return;
+    }
+    try { this.persist(); } catch { /* Non-durable expiry is best effort. */ }
+    this.revision = event.revision;
+    this.hooks.onEvent?.(event);
+  }
 }
 
 export function parseGrokSchedulerInterval(value: string): number {
   return parseInterval(value);
+}
+
+function deleteResult(id: string, removed: boolean): string {
+  return JSON.stringify(removed
+    ? { success: true, message: `Scheduled task ${id} cancelled.` }
+    : { success: false, message: `No scheduled task with ID ${id} found. Use scheduler_list to see active tasks.` });
 }
 
 function parseInterval(value: string): number {
@@ -304,7 +451,7 @@ function intervalToHuman(seconds: number): string {
 }
 
 function schedulerId(now: number): string {
-  return Math.trunc(now).toString(16).padStart(12, "0").slice(-12);
+  return uuidV7(now).replaceAll("-", "").slice(0, 12);
 }
 
 function nextFireAt(task: ScheduledTask): number {
@@ -316,7 +463,7 @@ function nextWakeAt(task: ScheduledTask): number {
 }
 
 function rfc3339(timestamp: number): string {
-  return new Date(timestamp).toISOString().replace(/Z$/u, "+00:00");
+  return new Date(timestamp).toISOString().replace(/\.000Z$/u, "+00:00").replace(/Z$/u, "+00:00");
 }
 
 function truncateUtf8Boundary(value: string, maxBytes: number): string {
@@ -350,7 +497,36 @@ function requiredString(value: unknown, name: string): string {
 }
 
 function bool(value: unknown, fallback: boolean): boolean {
-  return typeof value === "boolean" ? value : fallback;
+  if (value === undefined) return fallback;
+  if (value === null) return false;
+  if (typeof value === "boolean") return value;
+  if (value === 1 || (typeof value === "string" && ["true", "yes", "1"].includes(value.trim().toLowerCase()))) return true;
+  if (value === 0 || (typeof value === "string" && ["false", "no", "0"].includes(value.trim().toLowerCase()))) return false;
+  throw new Error(`expected a boolean (true/false, "true"/"false", "yes"/"no", "1"/"0", 1/0), got ${JSON.stringify(value)}`);
+}
+
+function message(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function awaitDurabilityBarrier(value: unknown, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) throw new SchedulerBarrierError("scheduler removal cancelled");
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let removeAbort: (() => void) | undefined;
+  try {
+    await Promise.race([
+      Promise.resolve(value),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new SchedulerBarrierError("scheduler removal timed out")), DURABILITY_BARRIER_TIMEOUT_MS);
+        const aborted = (): void => reject(new SchedulerBarrierError("scheduler removal cancelled"));
+        signal.addEventListener("abort", aborted, { once: true });
+        removeAbort = () => signal.removeEventListener("abort", aborted);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    removeAbort?.();
+  }
 }
 
 function normalize(path: string): string {

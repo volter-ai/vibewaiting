@@ -1,4 +1,5 @@
 import type { VirtualFS } from "almostnode";
+import { runIsolatedBrowserCommand } from "./grok-build-command-isolation.js";
 
 export interface BrowserTaskRunResult {
   stdout: string;
@@ -31,8 +32,11 @@ export interface BrowserBackgroundTask {
   exitCode?: number;
   outputFile: string;
   rawOutputBytes: number;
+  truncated: boolean;
   explicitlyCancelled?: boolean;
   timedOut?: boolean;
+  /** Mutable notification owner used when a child session exits. */
+  notificationSink?: (reminder: string) => void;
 }
 
 export interface ExternalTaskOptions {
@@ -48,6 +52,10 @@ const MAX_MULTI_TASK_IDS = 20;
 const MAX_TOOL_OUTPUT_BYTES = 40_000;
 const OUTPUT_PREVIEW_BYTES = 2_000;
 const SOFT_WRAP_WIDTH = 2_000;
+const COMMAND_OUTPUT_CHAR_LIMIT = 20_000;
+const MONITOR_OUTPUT_CHAR_LIMIT = 10 * 1024 * 1024;
+const RETAINED_LOG_BYTES = 64 * 1024 * 1024;
+const FRONT_BACK_MARKER = "\n\n... (output truncated) ...\n\n";
 
 /** Stateful browser port of Grok Build's terminal/subagent task registry. */
 export class GrokBuildBackgroundTasks {
@@ -66,25 +74,40 @@ export class GrokBuildBackgroundTasks {
     return this.tasks.get(id);
   }
 
+  /** Transfer a live terminal task between session-local registries. */
+  take(id: string): BrowserBackgroundTask | undefined {
+    const task = this.tasks.get(id);
+    if (task) this.tasks.delete(id);
+    return task;
+  }
+
+  adopt(task: BrowserBackgroundTask): void {
+    this.tasks.set(task.id, task);
+  }
+
   createCommand(
     command: string,
     parentSignal: AbortSignal,
     kind: "command" | "monitor",
     onOutput?: (chunk: string, task: BrowserBackgroundTask) => void,
     maxRuntimeMs?: number,
+    requestedOutputFile?: string,
+    requestedTaskId?: string,
   ): BrowserBackgroundTask {
-    const id = uuidV7();
+    const id = requestedTaskId ?? uuidV7();
     const controller = new AbortController();
-    const outputFile = `/tmp/${id}.log`;
+    const outputFile = requestedOutputFile ?? `/tmp/${id}.log`;
     this.ensureOutputFile(outputFile);
     let streamed = false;
     let combined = "";
     const append = (chunk: string): void => {
       if (!chunk) return;
       streamed = true;
-      combined += chunk;
-      task.output = combined;
-      task.rawOutputBytes = utf8Length(combined);
+      task.rawOutputBytes += utf8Length(chunk);
+      combined = utf8Prefix(combined + chunk, RETAINED_LOG_BYTES);
+      const view = ringOutput(combined, kind === "monitor" ? MONITOR_OUTPUT_CHAR_LIMIT : COMMAND_OUTPUT_CHAR_LIMIT);
+      task.output = view.output;
+      task.truncated = view.truncated || task.rawOutputBytes > utf8Length(combined);
       this.container.vfs.writeFileSync(outputFile, combined);
       onOutput?.(chunk, task);
     };
@@ -99,26 +122,29 @@ export class GrokBuildBackgroundTasks {
       startedAt: Date.now(),
       outputFile,
       rawOutputBytes: 0,
+      truncated: false,
     };
     const timeout = maxRuntimeMs && maxRuntimeMs > 0 ? setTimeout(() => {
       if (task.status !== "running") return;
       task.timedOut = true;
       controller.abort(new DOMException("Task timed out", "TimeoutError"));
     }, maxRuntimeMs) : undefined;
-    task.promise = this.container.run(command, {
+    task.promise = runIsolatedBrowserCommand(this.container, command, {
       cwd: this.workspacePath,
       signal: AbortSignal.any([parentSignal, controller.signal]),
       onStdout: append,
       onStderr: append,
     }).then((result) => {
       const output = streamed ? combined : joinOutput(result.stdout, result.stderr);
-      this.finish(task, output, result.exitCode === 0 ? "completed" : "failed", result.exitCode);
+      const cancelled = Boolean(task.explicitlyCancelled);
+      const timedOut = Boolean(task.timedOut && !cancelled);
+      this.finish(task, output, timedOut ? "timed_out" : cancelled ? "cancelled" : result.exitCode === 0 ? "completed" : "failed", timedOut || cancelled ? undefined : result.exitCode, streamed);
       return task.output;
     }, (error: unknown) => {
       const timedOut = Boolean(task.timedOut && !task.explicitlyCancelled);
       const cancelled = Boolean(task.explicitlyCancelled);
       const output = streamed ? combined : timedOut || cancelled ? "" : error instanceof Error ? error.message : String(error);
-      this.finish(task, output, timedOut ? "timed_out" : cancelled ? "cancelled" : "failed", timedOut || cancelled ? undefined : 1);
+      this.finish(task, output, timedOut ? "timed_out" : cancelled ? "cancelled" : "failed", timedOut || cancelled ? undefined : 1, streamed);
       return task.output;
     }).finally(() => { if (timeout !== undefined) clearTimeout(timeout); });
     this.tasks.set(id, task);
@@ -139,6 +165,7 @@ export class GrokBuildBackgroundTasks {
       startedAt: Date.now(),
       outputFile: "",
       rawOutputBytes: 0,
+      truncated: false,
     };
     task.promise = options.promise(AbortSignal.any([options.parentSignal, controller.signal])).then((output) => {
       this.finish(task, output, "completed", 0);
@@ -166,10 +193,10 @@ export class GrokBuildBackgroundTasks {
         ? `already_exited: Subagent already ${task.status}`
         : "already_exited: Task had already completed";
     }
-    task.controller.abort(new DOMException("Task terminated", "AbortError"));
     task.explicitlyCancelled = true;
     task.status = "cancelled";
     task.endedAt = Date.now();
+    task.controller.abort(new DOMException("Task terminated", "AbortError"));
     return task.kind === "subagent"
       ? "killed: Subagent cancellation initiated"
       : "killed: Task was terminated successfully";
@@ -212,19 +239,31 @@ export class GrokBuildBackgroundTasks {
     output: string,
     status: BrowserBackgroundTask["status"],
     exitCode: number | undefined,
+    preserveStreamedOutput = false,
   ): void {
     const explicitlyCancelled = task.status === "cancelled";
     if (explicitlyCancelled) status = "cancelled";
     task.status = status;
     task.endedAt = Date.now();
-    task.output = output;
-    task.rawOutputBytes = utf8Length(output);
+    if (!preserveStreamedOutput) {
+      task.rawOutputBytes = utf8Length(output);
+      if (task.kind === "command" || task.kind === "monitor") {
+        const retained = utf8Prefix(output, RETAINED_LOG_BYTES);
+        const view = ringOutput(retained, task.kind === "monitor" ? MONITOR_OUTPUT_CHAR_LIMIT : COMMAND_OUTPUT_CHAR_LIMIT);
+        task.output = view.output;
+        task.truncated = view.truncated || task.rawOutputBytes > utf8Length(retained);
+        output = retained;
+      } else {
+        task.output = output;
+      }
+    }
     if (!explicitlyCancelled && exitCode !== undefined) task.exitCode = exitCode;
     if (task.outputFile) this.container.vfs.writeFileSync(task.outputFile, output);
   }
 
   private ensureOutputFile(path: string): void {
-    this.container.vfs.mkdirSync("/tmp", { recursive: true });
+    const parent = path.slice(0, path.lastIndexOf("/")) || "/";
+    this.container.vfs.mkdirSync(parent, { recursive: true });
     this.container.vfs.writeFileSync(path, "");
   }
 }
@@ -247,9 +286,9 @@ interface WaitRequest {
 
 function taskView(task: BrowserBackgroundTask, wait: WaitRequest): TaskView {
   let output = task.output;
-  let truncated = false;
+  let truncated = task.truncated;
   if (utf8Length(output) > MAX_TOOL_OUTPUT_BYTES) {
-    output = `${utf8Prefix(output, OUTPUT_PREVIEW_BYTES)}\n\n[Output truncated - ${utf8Length(output)} bytes total. Use read_file on ${task.outputFile} for full content]`;
+    output = `${utf8Prefix(output, OUTPUT_PREVIEW_BYTES)}\n\n[Output truncated - ${task.rawOutputBytes} bytes total. Use read_file on ${task.outputFile} for full content]`;
     truncated = true;
   } else {
     output = softWrapLines(output, SOFT_WRAP_WIDTH);
@@ -265,13 +304,27 @@ function taskView(task: BrowserBackgroundTask, wait: WaitRequest): TaskView {
   }
   return {
     taskId: task.id,
-    command: task.kind === "subagent" ? `[subagent:${task.subagentType ?? "general-purpose"}] ${task.description ?? ""}` : task.command ?? "",
+    command: task.kind === "subagent"
+      ? `[subagent:${task.subagentType ?? "general-purpose"}] ${task.description ?? ""}`
+      : task.kind === "monitor"
+        ? `[monitor] ${task.description ?? ""}`
+        : task.command ?? "",
     status: task.status,
     durationSecs: Math.max(0, (task.endedAt ?? Date.now()) - task.startedAt) / 1_000,
     ...(task.exitCode !== undefined ? { exitCode: task.exitCode } : {}),
     output,
     outputFile: task.outputFile,
     truncated,
+  };
+}
+
+function ringOutput(value: string, charLimit: number): { output: string; truncated: boolean } {
+  const characters = [...value];
+  if (characters.length <= charLimit) return { output: value, truncated: false };
+  const half = Math.floor(charLimit / 2);
+  return {
+    output: `${characters.slice(0, half).join("").trimEnd()}${FRONT_BACK_MARKER}${characters.slice(-half).join("").trimStart()}`,
+    truncated: true,
   };
 }
 

@@ -15,6 +15,7 @@ import {
 } from "./grok-build-background-tasks.js";
 import { GrokBuildMonitorEventStream } from "./grok-build-monitor.js";
 import { tryBrowserNodeCheck } from "./browser-node-check.js";
+import { installBrowserCommandIsolation } from "./grok-build-command-isolation.js";
 
 interface RunResult {
   stdout: string;
@@ -75,7 +76,10 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
   private readonly files: GrokBuildFileSystemTools;
   private readonly scheduler?: GrokBuildBrowserScheduler;
   private planMode = false;
+  private awaitingPlanApproval = false;
+  private planApprovalInFlight = false;
   private readonly asynchronousReminders: string[] = [];
+  private readonly reportedTaskCompletions = new Set<string>();
 
   constructor(
     private readonly container: BrowserContainer,
@@ -83,9 +87,12 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
     private readonly services: GrokBuildBrowserServices = {},
     private readonly allowedTools?: ReadonlySet<string>,
   ) {
+    installBrowserCommandIsolation(container);
     this.files = new GrokBuildFileSystemTools(container.vfs, workspacePath);
     this.background = new GrokBuildBackgroundTasks(container, workspacePath);
-    this.planMode = this.restorePlanMode();
+    const restoredPlanMode = this.restorePlanMode();
+    this.planMode = restoredPlanMode.active;
+    this.awaitingPlanApproval = restoredPlanMode.awaitingPlanApproval;
     if (!allowedTools || allowedTools.has("scheduler_create")) {
       this.scheduler = new GrokBuildBrowserScheduler(container.vfs, workspacePath, {
         spawnSubagent: (input, signal, id) => this.createSubagentTask(input, signal, id),
@@ -126,6 +133,61 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
     return this.asynchronousReminders.splice(0);
   }
 
+  hasPendingPlanApproval(): boolean {
+    return this.planMode && this.awaitingPlanApproval;
+  }
+
+  /** Re-issue a persisted plan approval after a browser/session reconnect. */
+  async resumePendingPlanApproval(signal: AbortSignal): Promise<string | undefined> {
+    if (!this.hasPendingPlanApproval() || this.planApprovalInFlight) return undefined;
+    const planFile = this.planFilePath();
+    const content = this.container.vfs.existsSync(planFile) && this.container.vfs.statSync(planFile).isFile()
+      ? this.container.vfs.readFileSync(planFile, "utf8")
+      : "";
+    if (!content.trim()) {
+      this.setPlanState(true, false);
+      return undefined;
+    }
+    if (!this.services.approvePlanModeExit) return undefined;
+    this.planApprovalInFlight = true;
+    try {
+      const approval = normalizePlanApproval(await this.services.approvePlanModeExit(content, signal));
+      this.setPlanState(this.planMode, false);
+      if (approval.outcome === "abandoned") {
+        this.setPlanState(false, false);
+        return undefined;
+      }
+      if (approval.outcome === "cancelled") return revisePlanMessage(approval.feedback);
+      this.setPlanState(false, false);
+      return "The user approved the plan. Implement the plan in plan.md.";
+    } catch {
+      // A delivered reverse-request that loses its browser/client remains
+      // parked so the next restore can issue it again.
+      this.setPlanState(true, true);
+      return undefined;
+    } finally {
+      this.planApprovalInFlight = false;
+    }
+  }
+
+  /**
+   * Native subagent teardown reparents every surviving terminal task to its
+   * parent session. The process and output file stay intact; only registry and
+   * notification ownership move.
+   */
+  reparentBackgroundTasksTo(parent: GrokBuildBrowserRuntime): string[] {
+    const reparented: string[] = [];
+    for (const task of [...this.background.values()]) {
+      if (task.status !== "running" || (task.kind !== "command" && task.kind !== "monitor")) continue;
+      const transferred = this.background.take(task.id);
+      if (!transferred || (transferred.kind !== "command" && transferred.kind !== "monitor")) continue;
+      transferred.notificationSink = parent.reminderSink(transferred.kind);
+      parent.background.adopt(transferred);
+      reparented.push(transferred.id);
+    }
+    return reparented;
+  }
+
   async execute(call: GrokBuildToolCall, signal: AbortSignal): Promise<GrokBuildToolResult> {
     if (this.allowedTools && !this.allowedTools.has(call.name)) {
       return failure(`Tool ${call.name} is not available to this subagent capability mode.`);
@@ -142,16 +204,16 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
     if (planRejection) return { output: planRejection };
 
     try {
-      const output = await this.dispatch(call.name, input, signal);
+      const output = await this.dispatch(call.name, input, signal, call.callId);
       return typeof output === "string" ? { output } : output;
     } catch (error) {
       return failure(message(error));
     }
   }
 
-  private async dispatch(name: string, input: JsonObject, signal: AbortSignal): Promise<string | GrokBuildToolResult> {
+  private async dispatch(name: string, input: JsonObject, signal: AbortSignal, callId: string): Promise<string | GrokBuildToolResult> {
     switch (name) {
-      case "run_terminal_command": return this.runTerminal(input, signal);
+      case "run_terminal_command": return this.runTerminal(input, signal, callId);
       case "read_file": return this.files.readFile(input);
       case "search_replace": return this.files.searchReplace(input);
       case "list_dir": return this.files.listDir(input);
@@ -163,7 +225,7 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
       case "scheduler_create": return requiredScheduler(this.scheduler).create(input);
       case "scheduler_delete": return requiredScheduler(this.scheduler).delete(input);
       case "scheduler_list": return requiredScheduler(this.scheduler).list();
-      case "monitor": return this.monitor(input, signal);
+      case "monitor": return this.monitor(input, signal, callId);
       case "search_tool": return this.services.searchTools
         ? this.services.searchTools(string(input.query, "query"), integer(input.limit, 5), signal)
         : noMcpToolsConfigured();
@@ -182,13 +244,13 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
     }
   }
 
-  private async runTerminal(input: JsonObject, signal: AbortSignal): Promise<string> {
+  private async runTerminal(input: JsonObject, signal: AbortSignal, callId: string): Promise<string> {
     const command = string(input.command, "command");
-    if (boolean(input.background, false)) return this.startBackground(command, signal, backgroundTimeout(input.timeout));
+    if (boolean(input.background, false)) return this.startBackground(command, signal, backgroundTimeout(input.timeout), callId);
     const builtin = tryBrowserNodeCheck(this.container.vfs, this.workspacePath, command);
     if (builtin) return formatCommandResult(builtin);
     if (input.timeout === undefined || input.timeout === null) {
-      const task = this.createCommandTask(command, signal, "command");
+      const task = this.createCommandTask(command, signal, "command", undefined, callId, true);
       const completed = await settleBefore(task.promise, 120_000, signal);
       if (completed !== undefined) {
         return formatCommandResult({
@@ -197,6 +259,8 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
           exitCode: task.exitCode ?? (task.status === "failed" ? 1 : 0),
         });
       }
+      task.notificationSink = this.reminderSink("command");
+      this.watchBackgroundCompletion(task);
       return `Command automatically moved to background with task ID: ${task.id}`;
     }
     const controller = new AbortController();
@@ -228,13 +292,25 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
     }
   }
 
-  private startBackground(command: string, parentSignal: AbortSignal, maxRuntimeMs?: number): string {
-    const task = this.createCommandTask(command, parentSignal, "command", maxRuntimeMs);
+  private startBackground(command: string, parentSignal: AbortSignal, maxRuntimeMs: number | undefined, callId: string): string {
+    const task = this.createCommandTask(command, parentSignal, "command", maxRuntimeMs, callId);
+    task.notificationSink = this.reminderSink("command");
+    this.watchBackgroundCompletion(task);
     return `Command started in background with task ID: ${task.id}`;
   }
 
-  private createCommandTask(command: string, parentSignal: AbortSignal, kind: "command" | "monitor", maxRuntimeMs?: number): BrowserBackgroundTask {
-    return this.background.createCommand(command, parentSignal, kind, undefined, maxRuntimeMs);
+  private watchBackgroundCompletion(task: BrowserBackgroundTask): void {
+    void task.promise.then(() => {
+      if (task.explicitlyCancelled || this.reportedTaskCompletions.has(task.id)) return;
+      this.reportedTaskCompletions.add(task.id);
+      task.notificationSink?.(formatBashCompletion(task));
+    });
+  }
+
+  private createCommandTask(command: string, parentSignal: AbortSignal, kind: "command" | "monitor", maxRuntimeMs?: number, callId?: string, useCallIdAsTaskId = false): BrowserBackgroundTask {
+    const name = callId?.replace(/[^A-Za-z0-9_.-]/gu, "_");
+    const outputFile = name ? join("/tmp/grok-build-session/terminal", `${kind === "monitor" ? "monitor-" : ""}${name}.log`) : undefined;
+    return this.background.createCommand(command, parentSignal, kind, undefined, maxRuntimeMs, outputFile, useCallIdAsTaskId ? callId : undefined);
   }
 
   private async spawnSubagent(input: JsonObject, parentSignal: AbortSignal): Promise<string> {
@@ -250,11 +326,17 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
 
   private createSubagentTask(input: JsonObject, parentSignal: AbortSignal, id: string): BrowserBackgroundTask {
     const service = requiredService(this.services.spawnSubagent, "spawn_subagent");
+    const completionOutputCap = Number.isSafeInteger(input.completion_output_cap) && Number(input.completion_output_cap) >= 0
+      ? Number(input.completion_output_cap)
+      : undefined;
     return this.background.createExternal({
       id,
       kind: "subagent",
       parentSignal,
-      promise: (childSignal) => service(input, childSignal, id),
+      promise: async (childSignal) => {
+        const output = await service(input, childSignal, id);
+        return completionOutputCap === undefined ? output : capCompletionOutput(output, completionOutputCap);
+      },
       ...(typeof input.description === "string" ? { description: input.description } : {}),
       subagentType: typeof input.subagent_type === "string" ? input.subagent_type : "general-purpose",
     });
@@ -309,24 +391,33 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
     const content = this.container.vfs.existsSync(planFile) && this.container.vfs.statSync(planFile).isFile()
       ? this.container.vfs.readFileSync(planFile, "utf8")
       : "";
-    if (!content.trim()) {
-      this.setPlanMode(false);
-      return "Plan mode exit approved. No plan content was found — you can proceed.";
+    this.setPlanState(true, true);
+    let approval: { outcome: "approved" | "cancelled" | "abandoned"; feedback?: string };
+    try {
+      approval = this.services.approvePlanModeExit
+        ? normalizePlanApproval(await this.services.approvePlanModeExit(content, signal))
+        : { outcome: "approved" };
+    } catch (error) {
+      if (signal.aborted) {
+        this.setPlanState(true, false);
+        throw error;
+      }
+      // Non-abort failures mean a delivered browser interaction disappeared;
+      // preserve the persisted gate for resume/reconnect.
+      throw new Error("Plan approval could not be completed because the client disconnected. Plan mode remains active; the approval will reappear on reconnect.", { cause: error });
     }
-    const approval = this.services.approvePlanModeExit
-      ? await this.services.approvePlanModeExit(content, signal)
-      : { outcome: "approved" as const };
+    this.setPlanState(true, false);
     if (approval.outcome === "abandoned") {
-      this.setPlanMode(false);
+      this.setPlanState(false, false);
       return "The user chose to abandon the plan entirely (via the Abandon option in the plan approval dialog). Plan mode has been disabled. Do not call exit_plan_mode again unless the user explicitly asks to re-enter plan mode.";
     }
     if (approval.outcome === "cancelled") {
-      const feedback = approval.feedback?.trim();
-      return feedback
-        ? `The user wants to revise the plan. The user said:\n${feedback}`
-        : "The user wants to revise the plan. Ask the user what changes they would like to make.";
+      return content.trim()
+        ? revisePlanMessage(approval.feedback)
+        : "The user does not want to exit plan mode. Continue planning and ask the user what they would like to do.";
     }
-    this.setPlanMode(false);
+    this.setPlanState(false, false);
+    if (!content.trim()) return "Plan mode exit approved. No plan content was found — you can proceed.";
     return `Your plan has been approved. You can now start coding.\n\nYour plan has been saved at: ${planFile}\n\n## Plan:\n${content}`;
   }
 
@@ -339,20 +430,26 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
   }
 
   private setPlanMode(active: boolean): void {
-    this.planMode = active;
-    const path = join(this.workspacePath, ".grok/plan-mode.json");
-    this.ensureParent(path);
-    this.container.vfs.writeFileSync(path, JSON.stringify({ version: 1, active }));
+    this.setPlanState(active, false);
   }
 
-  private restorePlanMode(): boolean {
+  private setPlanState(active: boolean, awaitingPlanApproval: boolean): void {
+    this.planMode = active;
+    this.awaitingPlanApproval = active && awaitingPlanApproval;
     const path = join(this.workspacePath, ".grok/plan-mode.json");
-    if (!this.container.vfs.existsSync(path) || !this.container.vfs.statSync(path).isFile()) return false;
+    this.ensureParent(path);
+    this.container.vfs.writeFileSync(path, JSON.stringify({ version: 1, active, awaitingPlanApproval: this.awaitingPlanApproval }));
+  }
+
+  private restorePlanMode(): { active: boolean; awaitingPlanApproval: boolean } {
+    const path = join(this.workspacePath, ".grok/plan-mode.json");
+    if (!this.container.vfs.existsSync(path) || !this.container.vfs.statSync(path).isFile()) return { active: false, awaitingPlanApproval: false };
     try {
-      const state = JSON.parse(this.container.vfs.readFileSync(path, "utf8")) as { version?: unknown; active?: unknown };
-      return state.version === 1 && state.active === true;
+      const state = JSON.parse(this.container.vfs.readFileSync(path, "utf8")) as { version?: unknown; active?: unknown; awaitingPlanApproval?: unknown };
+      const active = state.version === 1 && state.active === true;
+      return { active, awaitingPlanApproval: active && state.awaitingPlanApproval === true };
     } catch {
-      return false;
+      return { active: false, awaitingPlanApproval: false };
     }
   }
 
@@ -360,7 +457,7 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
     return join(this.workspacePath, ".grok/plan.md");
   }
 
-  private monitor(input: JsonObject, signal: AbortSignal): string {
+  private monitor(input: JsonObject, signal: AbortSignal, callId: string): string {
     const command = string(input.command, "command");
     const description = string(input.description, "description");
     const persistent = boolean(input.persistent, false);
@@ -371,18 +468,21 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
       throw new Error("persistent must be true when timeout_ms exceeds 36000000ms");
     }
     let stream: GrokBuildMonitorEventStream | undefined;
-    const emit = (reminder: string): void => {
-      this.asynchronousReminders.push(reminder);
-      this.services.onMonitorEvent?.(reminder);
-    };
-    const task = this.background.createCommand(command, signal, "monitor", (chunk, current) => {
+    let task: BrowserBackgroundTask;
+    const emit = (reminder: string): void => task.notificationSink?.(reminder);
+    const outputName = callId.replace(/[^A-Za-z0-9_.-]/gu, "_");
+    task = this.background.createCommand(command, signal, "monitor", (chunk, current) => {
       stream ??= new GrokBuildMonitorEventStream(current.id, description, emit);
       stream.push(chunk);
-    });
+    }, persistent ? undefined : requestedTimeout, join("/tmp/grok-build-session/terminal", `monitor-${outputName}.log`));
+    task.description = description;
+    task.notificationSink = this.reminderSink("monitor");
     stream ??= new GrokBuildMonitorEventStream(task.id, description, emit);
-    void task.promise.finally(() => stream?.flush());
+    void task.promise.finally(() => {
+      stream?.flush();
+      if (!task.explicitlyCancelled) emit(formatMonitorCompletion(task));
+    });
     const timeoutMs = persistent ? 0 : requestedTimeout;
-    if (timeoutMs > 0) setTimeout(() => { if (task.status === "running") task.controller.abort(); }, timeoutMs);
     return persistent
       ? `Monitor started (task ${task.id}, persistent -- runs until kill_task or session end).\nYou will be notified on each event. Keep working -- do not poll or sleep.\nEvents may arrive while you are waiting for the user -- an event is not their reply.`
       : `Monitor started (task ${task.id}, timeout ${timeoutMs}ms).\nYou will be notified on each event. Keep working -- do not poll or sleep.\nEvents may arrive while you are waiting for the user -- an event is not their reply.`;
@@ -393,10 +493,73 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
     this.container.vfs.mkdirSync(parent, { recursive: true });
   }
 
+  private reminderSink(kind: "command" | "monitor"): (reminder: string) => void {
+    return (reminder) => {
+      this.asynchronousReminders.push(reminder);
+      if (kind === "monitor") this.services.onMonitorEvent?.(reminder);
+    };
+  }
+
   private resolve(path: string): string {
     const absolute = path.startsWith("/") ? path : join(this.workspacePath, path);
     return normalize(absolute);
   }
+}
+
+/** Native task-coordinator truncation: cap UTF-8 bytes, then add its footer. */
+export function capCompletionOutput(output: string, cap: number): string {
+  const bytes = new TextEncoder().encode(output);
+  if (bytes.length <= cap) return output;
+  const shown = utf8PrefixBytes(output, cap);
+  const shownBytes = new TextEncoder().encode(shown).length;
+  return `${shown}\n[output truncated: ${shownBytes} of ${bytes.length} bytes shown]`;
+}
+
+function normalizePlanApproval(value: unknown): { outcome: "approved" | "cancelled" | "abandoned"; feedback?: string } {
+  if (!value || typeof value !== "object") return { outcome: "cancelled" };
+  const approval = value as { outcome?: unknown; feedback?: unknown };
+  const outcome = approval.outcome === "approved" || approval.outcome === "abandoned"
+    ? approval.outcome
+    : "cancelled";
+  return {
+    outcome,
+    ...(typeof approval.feedback === "string" ? { feedback: approval.feedback } : {}),
+  };
+}
+
+function revisePlanMessage(feedback: string | undefined): string {
+  const trimmed = feedback?.trim();
+  return trimmed
+    ? `The user wants to revise the plan. The user said:\n${trimmed}`
+    : "The user wants to revise the plan. Ask the user what changes they would like to make.";
+}
+
+function utf8PrefixBytes(value: string, maximumBytes: number): string {
+  const bytes = new TextEncoder().encode(value);
+  let end = Math.min(maximumBytes, bytes.length);
+  while (end > 0) {
+    try { return new TextDecoder("utf-8", { fatal: true }).decode(bytes.slice(0, end)); }
+    catch { end -= 1; }
+  }
+  return "";
+}
+
+function formatMonitorCompletion(task: BrowserBackgroundTask): string {
+  const reason = task.timedOut
+    ? "killed by signal timeout"
+    : task.exitCode === undefined
+      ? "ended"
+      : `exited (code ${task.exitCode})`;
+  const duration = Math.max(0, (task.endedAt ?? Date.now()) - task.startedAt) / 1_000;
+  return `Monitor "${task.id}" ended: [monitor ended: ${reason}].\nDescription: ${task.description ?? "monitor"}\nCommand: ${task.command ?? ""}\nDuration: ${duration.toFixed(1)}s\nUse get_command_or_subagent_output("${task.id}") for full output.\n`;
+}
+
+function formatBashCompletion(task: BrowserBackgroundTask): string {
+  const status = task.timedOut
+    ? "terminated by signal timeout"
+    : `exit code: ${task.exitCode ?? "unknown"}`;
+  const duration = Math.max(0, (task.endedAt ?? Date.now()) - task.startedAt) / 1_000;
+  return `Background task "${task.id}" completed (${status}).\nCommand: ${task.command ?? ""} | Duration: ${duration.toFixed(1)}s\nUse get_command_or_subagent_output("${task.id}") to see the full output.`;
 }
 
 function formatCommandResult(result: RunResult): string {
@@ -485,7 +648,12 @@ function integer(value: unknown, fallback: number): number {
 }
 
 function boolean(value: unknown, fallback: boolean): boolean {
-  return typeof value === "boolean" ? value : fallback;
+  if (value === undefined) return fallback;
+  if (value === null) return false;
+  if (typeof value === "boolean") return value;
+  if (value === 1 || (typeof value === "string" && ["true", "yes", "1"].includes(value.trim().toLowerCase()))) return true;
+  if (value === 0 || (typeof value === "string" && ["false", "no", "0"].includes(value.trim().toLowerCase()))) return false;
+  throw new Error(`expected a boolean (true/false, "true"/"false", "yes"/"no", "1"/"0", 1/0), got ${JSON.stringify(value)}`);
 }
 
 function object(value: unknown, name: string): JsonObject {

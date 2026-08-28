@@ -21,4 +21,15 @@ describe("browser node syntax check", () => {
     expect(tryBrowserNodeCheck(vfs, "/", "node --check broken.js")).toMatchObject({ exitCode: 1, stdout: "" });
     expect(tryBrowserNodeCheck(vfs, "/", "npm test")).toBeUndefined();
   });
+
+  it("honors Node module mode, quoted paths, compound checks, and shell redirection", () => {
+    const { vfs } = createContainer();
+    vfs.mkdirSync("/src", { recursive: true });
+    vfs.writeFileSync("/src/one file.js", "const one = 1;\n");
+    vfs.writeFileSync("/src/two.js", "export const two = 2;\n");
+    expect(tryBrowserNodeCheck(vfs, "/", "node --check 'src/one file.js' && node -c src/two.js")).toMatchObject({ exitCode: 1 });
+    vfs.writeFileSync("/package.json", JSON.stringify({ type: "module" }));
+    expect(tryBrowserNodeCheck(vfs, "/", "node --check 'src/one file.js' && node -c src/two.js > /check.log")).toEqual({ stdout: "", stderr: "", exitCode: 0 });
+    expect(vfs.readFileSync("/check.log", "utf8")).toBe("");
+  });
 });

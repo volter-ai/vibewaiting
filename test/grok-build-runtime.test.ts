@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { VirtualFS } from "almostnode";
 import {
+  capCompletionOutput,
   GrokBuildBrowserRuntime,
   GrokConformanceToolRuntime,
 } from "../experiments/browser-agent/src/grok-build-runtime.js";
@@ -13,6 +14,12 @@ function runtime() {
 }
 
 describe("Grok Build browser tool runtime", () => {
+  it("caps scheduler-loop completion output by UTF-8 bytes with the native footer", () => {
+    expect(capCompletionOutput("abcdef", 4)).toBe("abcd\n[output truncated: 4 of 6 bytes shown]");
+    expect(capCompletionOutput("a💡b", 3)).toBe("a\n[output truncated: 1 of 6 bytes shown]");
+    expect(capCompletionOutput("short", 8)).toBe("short");
+  });
+
   it("implements native concise reads, exact edits, trees, grep, todos, and writes", async () => {
     const { vfs, tools } = runtime();
     const signal = new AbortController().signal;
@@ -37,6 +44,57 @@ describe("Grok Build browser tool runtime", () => {
     const { tools } = runtime();
     await expect(tools.execute({ callId: "1", name: "image_gen", arguments: JSON.stringify({ prompt: "Pong" }) }, new AbortController().signal))
       .resolves.toMatchObject({ isError: true, output: expect.stringContaining("service adapter") });
+  });
+
+  it("reparents a live nested-child monitor registry and all later notifications to the root", async () => {
+    vi.useFakeTimers();
+    try {
+      const vfs = new VirtualFS();
+      let onStdout: ((chunk: string) => void) | undefined;
+      let finish!: (result: { stdout: string; stderr: string; exitCode: number }) => void;
+      const running = new Promise<{ stdout: string; stderr: string; exitCode: number }>((resolve) => { finish = resolve; });
+      const container = {
+        vfs,
+        async run(_command: string, options?: { onStdout?: (chunk: string) => void }) {
+          onStdout = options?.onStdout;
+          return running;
+        },
+      };
+      const child = new GrokBuildBrowserRuntime(container, "/", {});
+      const middle = new GrokBuildBrowserRuntime(container, "/", {});
+      const parent = new GrokBuildBrowserRuntime(container, "/", {});
+      const started = await child.execute({
+        callId: "child-monitor",
+        name: "monitor",
+        arguments: JSON.stringify({ command: "tail -f app.log", description: "app log", persistent: true }),
+      }, new AbortController().signal);
+      const id = /task ([0-9a-f-]+)/u.exec(started.output)?.[1];
+      expect(id).toBeTruthy();
+
+      onStdout?.("before transfer\n");
+      await vi.advanceTimersByTimeAsync(200);
+      expect(child.drainSystemReminders().join("\n")).toContain("before transfer");
+
+      expect(child.reparentBackgroundTasksTo(middle)).toEqual([id]);
+      expect(middle.reparentBackgroundTasksTo(parent)).toEqual([id]);
+      onStdout?.("after transfer\n");
+      await vi.advanceTimersByTimeAsync(200);
+      expect(child.drainSystemReminders()).toEqual([]);
+      expect(parent.drainSystemReminders().join("\n")).toContain("after transfer");
+
+      finish({ stdout: "", stderr: "", exitCode: 0 });
+      await running;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(parent.drainSystemReminders().join("\n")).toContain(`Monitor "${id}" ended`);
+      const polled = await parent.execute({
+        callId: "poll",
+        name: "get_command_or_subagent_output",
+        arguments: JSON.stringify({ task_ids: [id] }),
+      }, new AbortController().signal);
+      expect(polled.output).toContain("Status: completed");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("returns native MCP-empty discovery and tracks browser subagents through poll and kill", async () => {
@@ -135,8 +193,8 @@ These subagents were launched before this compaction and are still running. Use 
       }, signal);
       await vi.advanceTimersByTimeAsync(120_000);
       const started = await command;
-      const taskId = /task ID: ([0-9a-f-]+)/u.exec(started.output)?.[1];
-      expect(taskId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
+      expect(started.output).toBe("Command automatically moved to background with task ID: command");
+      const taskId = "command";
 
       const poll = tools.execute({
         callId: "poll",
@@ -292,6 +350,60 @@ These subagents were launched before this compaction and are still running. Use 
       output: expect.stringContaining("Your plan has been approved"),
     });
     await expect(execute("write", { file_path: "/src/main.ts", content: "new" })).resolves.toEqual({ output: "Wrote file successfully to /src/main.ts." });
+  });
+
+  it("persists a disconnected plan approval and re-parks it after restore", async () => {
+    const vfs = new VirtualFS();
+    vfs.writeFileSync("/source.ts", "old");
+    const disconnected = new GrokBuildBrowserRuntime({ vfs, async run() { return { stdout: "", stderr: "", exitCode: 0 }; } }, "/", {
+      async approvePlanModeExit() { throw new Error("client disconnected"); },
+    });
+    const signal = new AbortController().signal;
+    await disconnected.execute({ callId: "enter", name: "enter_plan_mode", arguments: "{}" }, signal);
+    vfs.writeFileSync("/.grok/plan.md", "# Plan\n\n1. Build it.\n");
+    await expect(disconnected.execute({ callId: "exit", name: "exit_plan_mode", arguments: "{}" }, signal)).resolves.toEqual({
+      isError: true,
+      output: "Plan approval could not be completed because the client disconnected. Plan mode remains active; the approval will reappear on reconnect.",
+    });
+    expect(disconnected.hasPendingPlanApproval()).toBe(true);
+    expect(JSON.parse(vfs.readFileSync("/.grok/plan-mode.json", "utf8"))).toMatchObject({
+      active: true,
+      awaitingPlanApproval: true,
+    });
+
+    const restored = new GrokBuildBrowserRuntime({ vfs, async run() { return { stdout: "", stderr: "", exitCode: 0 }; } }, "/", {
+      async approvePlanModeExit() { return { outcome: "approved" }; },
+    });
+    expect(restored.hasPendingPlanApproval()).toBe(true);
+    await expect(restored.resumePendingPlanApproval(signal)).resolves.toBe("The user approved the plan. Implement the plan in plan.md.");
+    expect(restored.hasPendingPlanApproval()).toBe(false);
+    await expect(restored.execute({
+      callId: "write",
+      name: "write",
+      arguments: JSON.stringify({ file_path: "/source.ts", content: "new" }),
+    }, signal)).resolves.toMatchObject({ output: "Wrote file successfully to /source.ts." });
+  });
+
+  it("intercepts empty-plan exits and fails closed on unknown approval outcomes", async () => {
+    const vfs = new VirtualFS();
+    const seenPlans: string[] = [];
+    const tools = new GrokBuildBrowserRuntime({ vfs, async run() { return { stdout: "", stderr: "", exitCode: 0 }; } }, "/", {
+      async approvePlanModeExit(plan) {
+        seenPlans.push(plan);
+        return { outcome: "unknown" } as never;
+      },
+    });
+    const signal = new AbortController().signal;
+    await tools.execute({ callId: "enter", name: "enter_plan_mode", arguments: "{}" }, signal);
+    await expect(tools.execute({ callId: "exit", name: "exit_plan_mode", arguments: "{}" }, signal)).resolves.toEqual({
+      output: "The user does not want to exit plan mode. Continue planning and ask the user what they would like to do.",
+    });
+    expect(seenPlans).toEqual([""]);
+    await expect(tools.execute({
+      callId: "write",
+      name: "write",
+      arguments: JSON.stringify({ file_path: "/blocked.ts", content: "no" }),
+    }, signal)).resolves.toMatchObject({ output: expect.stringContaining("not allowed in plan mode") });
   });
 
   it("matches native grep modes, context markers, filters, caps, and gitignore traversal", async () => {

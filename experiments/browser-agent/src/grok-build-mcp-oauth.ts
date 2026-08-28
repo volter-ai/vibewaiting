@@ -1,3 +1,8 @@
+import {
+  coordinateGrokBuildMcpAuthorization,
+  createGrokBuildMcpClientAssertion,
+} from "./grok-build-mcp-oauth-browser.js";
+
 export interface McpOAuthMetadata {
   authorizationEndpoint: string;
   tokenEndpoint: string;
@@ -45,6 +50,13 @@ export interface GrokBuildMcpOAuthOptions {
   scopes?: readonly string[];
   redirectUri?: string;
   discoveryTimeoutMs?: number;
+  clientCredentials?:
+    | { clientId: string; clientSecret: string; scopes?: readonly string[]; resource?: string; method?: "client_secret_post" }
+    | { clientId: string; signingKey: CryptoKey | JsonWebKey; algorithm: "RS256" | "RS384" | "RS512" | "ES256" | "ES384"; scopes?: readonly string[]; resource?: string; tokenEndpointAudience?: string; method: "private_key_jwt" };
+  /** Required for cross-origin AS hosts: resolve through the relay; every returned IP must be public. */
+  resolveAuthorizationHostname?: (hostname: string, signal: AbortSignal) => Promise<readonly string[]>;
+  /** Override for tests/custom runtimes. Browser default uses Web Locks when available. */
+  coordinateAuthorization?: <T>(key: string, signal: AbortSignal, operation: () => Promise<T>) => Promise<T>;
 }
 
 interface OAuthTokenPayload {
@@ -63,6 +75,7 @@ const REFRESH_BUFFER_SECONDS = 30;
 export class GrokBuildMcpOAuthClient {
   private readonly key: string;
   private pending: Promise<string | undefined> | undefined;
+  private requiredScopes: string[] = [];
 
   constructor(
     private readonly serverName: string,
@@ -76,7 +89,8 @@ export class GrokBuildMcpOAuthClient {
 
   async accessToken(signal: AbortSignal, force = false): Promise<string | undefined> {
     if (this.pending && !force) return this.pending;
-    const operation = this.prepare(signal, force);
+    const run = () => this.prepare(signal, force);
+    const operation = (this.options.coordinateAuthorization ?? coordinateGrokBuildMcpAuthorization)(this.key, signal, run);
     this.pending = operation;
     try {
       return await operation;
@@ -87,6 +101,10 @@ export class GrokBuildMcpOAuthClient {
 
   async invalidate(): Promise<void> {
     await this.options.credentialStore.clear(this.key);
+  }
+
+  requireScopes(scopes: readonly string[]): void {
+    this.requiredScopes = [...new Set([...this.requiredScopes, ...scopes])];
   }
 
   private async prepare(signal: AbortSignal, force: boolean): Promise<string | undefined> {
@@ -116,12 +134,32 @@ export class GrokBuildMcpOAuthClient {
       throw new Error(`MCP server '${this.serverName}': Auth required (non-interactive session; authenticate in the browser or set an Authorization header)`, { cause: error });
     }
 
+    await validateAuthorizationMetadata(metadata, new URL(this.serverUrl), this.options.resolveAuthorizationHostname, signal);
+    const scopes = [...new Set([...selectScopes(this.options.scopes, metadata.scopesSupported), ...this.requiredScopes])];
+    if (this.options.clientCredentials) {
+      const configured = this.options.clientCredentials;
+      const fields: Record<string, string> = {
+        grant_type: "client_credentials",
+        client_id: configured.clientId,
+        ...(configured.scopes?.length ? { scope: configured.scopes.join(" ") } : scopes.length ? { scope: scopes.join(" ") } : {}),
+        resource: configured.resource ?? this.serverUrl,
+      };
+      let clientSecret: string | undefined;
+      if (configured.method === "private_key_jwt") {
+        fields.client_assertion_type = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
+        fields.client_assertion = await createGrokBuildMcpClientAssertion(configured, metadata.tokenEndpoint);
+      } else clientSecret = configured.clientSecret;
+      const token = await exchangeToken(metadata, fields, configured.clientId, clientSecret, this.fetchImpl, signal);
+      const credentials = credentialsFromToken(token, { clientId: configured.clientId, ...(clientSecret ? { clientSecret } : {}), metadata, redirectUri: "", fallbackScopes: [...(configured.scopes ?? scopes)] });
+      await this.options.credentialStore.save(this.key, credentials);
+      this.requiredScopes = [];
+      return credentials.accessToken;
+    }
     if (!(this.options.interactive ?? this.options.authorize !== undefined) || !this.options.authorize) {
       throw new Error(`MCP server '${this.serverName}' supports OAuth but has no usable stored token; interactive authorization is required.`);
     }
     const redirectUri = this.options.redirectUri;
     if (!redirectUri) throw new Error(`MCP OAuth redirectUri is required for '${this.serverName}'.`);
-    const scopes = selectScopes(this.options.scopes, metadata.scopesSupported);
     let clientId = this.options.clientId ?? stored?.clientId;
     let clientSecret = this.options.clientSecret ?? stored?.clientSecret;
     if (!clientId) {
@@ -165,10 +203,12 @@ export class GrokBuildMcpOAuthClient {
       fallbackScopes: scopes,
     });
     await this.options.credentialStore.save(this.key, credentials);
+    this.requiredScopes = [];
     return credentials.accessToken;
   }
 
   private async refresh(stored: McpOAuthCredentials, signal: AbortSignal): Promise<McpOAuthCredentials> {
+    await validateAuthorizationMetadata(stored.metadata, new URL(this.serverUrl), this.options.resolveAuthorizationHostname, signal);
     const token = await exchangeToken(stored.metadata, {
       grant_type: "refresh_token",
       refresh_token: stored.refreshToken!,
@@ -197,6 +237,7 @@ export class GrokBuildMcpOAuthClient {
       for (const candidate of candidates) {
         const url = new URL(candidate, resource);
         if (!allowedAuthorizationMetadataUrl(url)) continue;
+        await validateAuthorizationUrl(url, resource, this.options.resolveAuthorizationHostname, signal);
         const metadata = await discoverAuthorizationMetadata(url, this.fetchImpl, signal);
         if (metadata) {
           const scopesSupported = resourceMetadata.scopes_supported ?? metadata.scopesSupported;
@@ -222,6 +263,21 @@ export class GrokBuildMcpOAuthClient {
       return false;
     }
   }
+}
+
+async function validateAuthorizationMetadata(metadata: McpOAuthMetadata, resource: URL, resolver: GrokBuildMcpOAuthOptions["resolveAuthorizationHostname"], signal: AbortSignal): Promise<void> {
+  for (const value of [metadata.authorizationEndpoint, metadata.tokenEndpoint, metadata.registrationEndpoint]) {
+    if (!value) continue;
+    await validateAuthorizationUrl(new URL(value), resource, resolver, signal);
+  }
+}
+
+async function validateAuthorizationUrl(url: URL, resource: URL, resolver: GrokBuildMcpOAuthOptions["resolveAuthorizationHostname"], signal: AbortSignal): Promise<void> {
+  if (!allowedAuthorizationMetadataUrl(url)) throw new Error(`Unsafe OAuth authorization-server URL '${url.toString()}'.`);
+  if (url.origin === resource.origin) return;
+  if (!resolver) throw new Error(`Cross-origin OAuth server '${url.origin}' requires relay-backed DNS validation.`);
+  const addresses = await resolver(url.hostname, signal);
+  if (addresses.length === 0 || addresses.some((address) => !isPublicIpAddress(address))) throw new Error(`OAuth server '${url.hostname}' resolved to a non-public address.`);
 }
 
 interface ResourceMetadata {
@@ -369,9 +425,35 @@ function allowedAuthorizationMetadataUrl(url: URL): boolean {
   if (!["http:", "https:"].includes(url.protocol)) return false;
   const host = url.hostname.replace(/\.$/u, "").toLowerCase();
   if (host === "localhost" || host.endsWith(".localhost")) return false;
-  if (/^(?:127\.|10\.|192\.168\.|169\.254\.|0\.)/u.test(host)) return false;
+  if (host.endsWith(".local") || host.endsWith(".internal")) return false;
+  if (isIpLiteral(host) && !isPublicIpAddress(host)) return false;
   const private172 = /^172\.(\d+)\./u.exec(host);
   if (private172 && Number(private172[1]) >= 16 && Number(private172[1]) <= 31) return false;
+  return true;
+}
+
+function isIpLiteral(host: string): boolean { return /^\[?[0-9a-f:.]+\]?$/iu.test(host); }
+
+export function isPublicIpAddress(input: string): boolean {
+  const host = input.replace(/^\[|\]$/gu, "").toLowerCase();
+  if (host.includes(":")) {
+    if (host === "::" || host === "::1" || /^f[cd]/u.test(host) || /^fe[89ab]/u.test(host) || /^ff/u.test(host)) return false;
+    if (/^2001:db8(?::|$)/u.test(host) || /^100:(?:0*:){0,3}/u.test(host)) return false;
+    const mapped = /^(?:::ffff:)?(\d+\.\d+\.\d+\.\d+)$/u.exec(host)?.[1];
+    return mapped ? isPublicIpAddress(mapped) : /^[0-9a-f:]+$/u.test(host);
+  }
+  const parts = host.split(".").map(Number);
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
+  const [a = 0, b = 0] = parts;
+  if (a === 0 || a === 10 || a === 127 || a >= 224) return false;
+  if (a === 100 && b >= 64 && b <= 127) return false;
+  if (a === 169 && b === 254) return false;
+  if (a === 172 && b >= 16 && b <= 31) return false;
+  if (a === 192 && b === 168) return false;
+  if (a === 192 && (b === 0 || b === 2 || b === 88)) return false;
+  if (a === 198 && (b === 18 || b === 19)) return false;
+  if (a === 198 && b === 51) return false;
+  if (a === 203 && b === 0) return false;
   return true;
 }
 

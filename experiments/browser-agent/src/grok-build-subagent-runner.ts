@@ -1,0 +1,345 @@
+import { createContainer } from "almostnode";
+import { GROK_BUILD_TOOLS, GrokBuildSession, type GrokBuildSessionSnapshot } from "./grok-build-agent.js";
+import { GrokBuildBrowserRuntime, type GrokBuildBrowserServices } from "./grok-build-runtime.js";
+import { discoverGrokBuildAgents, renderGrokBuildAgentProjectInstructions, renderGrokBuildAgentPrompt, type GrokBuildAgentDefinition } from "./grok-build-agents.js";
+import { discoverGrokBuildSubagentDefinitions, resolveGrokBuildSubagentRuntime, validateGrokBuildSubagentResume } from "./grok-build-subagent-config.js";
+import { GrokBuildSubagentAdmission } from "./grok-build-subagent-admission.js";
+import { GrokBuildSkillManager } from "./grok-build-skill-manager.js";
+import { formatGrokBuildSkillListing } from "./grok-build-skills.js";
+import { composeGrokBuildMcpCatalog, resolveGrokBuildAgentMcp } from "./grok-build-agent-mcp.js";
+import { createGrokBuildMcpServices } from "./grok-build-mcp.js";
+import {
+  configureGrokBuildAgentTools,
+  formatGrokBuildPreloadedSkills,
+  grokBuildAgentMemory,
+  GrokBuildCompletionTracker,
+  GrokBuildHookedRuntime,
+  runGrokBuildAgentHooks,
+  toolConfigCanonicalNames,
+  type GrokBuildAgentHookRunner,
+} from "./grok-build-custom-agent.js";
+import { createGrokBuildMcpOtlpTraceSink, GrokBuildAgentTraceProducer } from "./grok-build-otlp-trace.js";
+import { GrokBuildTelemetryClient } from "./grok-build-telemetry.js";
+import type { GrokBuildWorkflowSubagentResult } from "./grok-build-workflows.js";
+
+type BrowserContainer = ReturnType<typeof createContainer>;
+
+interface StoredSubagentSession {
+  type: string;
+  persona?: string;
+  model?: string;
+  cwd: string;
+  snapshot: GrokBuildSessionSnapshot;
+  status: "running" | "completed";
+}
+
+export interface GrokBuildBrowserSubagentRunnerOptions {
+  container: BrowserContainer;
+  services: GrokBuildBrowserServices;
+  admission?: GrokBuildSubagentAdmission;
+  telemetryClient?: GrokBuildTelemetryClient;
+  endpoint(): string;
+  startupModel(): string | undefined;
+  rootRuntime(): GrokBuildBrowserRuntime | undefined;
+  rootSkillManager(): GrokBuildSkillManager | undefined;
+  parentSnapshot(): GrokBuildSessionSnapshot | undefined;
+}
+
+/** Owns resumable child sessions and their native agent-definition lifecycle. */
+export class GrokBuildBrowserSubagentRunner {
+  private readonly admission: GrokBuildSubagentAdmission;
+  private readonly telemetry: GrokBuildTelemetryClient;
+  private readonly sessions = new Map<string, StoredSubagentSession>();
+
+  constructor(private readonly options: GrokBuildBrowserSubagentRunnerOptions) {
+    this.admission = options.admission ?? new GrokBuildSubagentAdmission();
+    this.telemetry = options.telemetryClient ?? new GrokBuildTelemetryClient();
+  }
+
+  async run(
+    input: Record<string, unknown>, signal: AbortSignal, subagentId: string,
+    parentRuntime = this.options.rootRuntime(),
+  ): Promise<string> {
+    const result = await this.admission.run(signal, () => this.runAdmitted(input, signal, subagentId, parentRuntime));
+    if (!result.success) throw new Error(result.error ?? result.output);
+    return result.output || `Subagent ${subagentId} completed.`;
+  }
+
+  async runAdmitted(
+    input: Record<string, unknown>, signal: AbortSignal, subagentId: string,
+    parentRuntime?: GrokBuildBrowserRuntime,
+  ): Promise<GrokBuildWorkflowSubagentResult> {
+    const { container } = this.options;
+    const type = typeof input.subagent_type === "string" ? input.subagent_type : "general-purpose";
+    const requestedModel = typeof input.model === "string" ? input.model : undefined;
+    const requestedPersona = typeof input.persona === "string" ? input.persona : undefined;
+    const resumeFrom = typeof input.resume_from === "string" ? input.resume_from : undefined;
+    const prior = resumeFrom ? this.sessions.get(resumeFrom) : undefined;
+    if (resumeFrom && !prior) throw new Error(`Unknown completed subagent: ${resumeFrom}`);
+    if (prior?.status !== undefined && prior.status !== "completed") throw new Error(`Subagent ${resumeFrom} is still running.`);
+    if (prior) validateGrokBuildSubagentResume(type, requestedPersona, {
+      subagentType: prior.type, ...(prior.persona ? { persona: prior.persona } : {}),
+      ...(prior.model ? { model: prior.model } : {}), cwd: prior.cwd,
+    });
+    if (!prior && requestedModel && !["grok-4.5", "grok-4.6"].includes(requestedModel)) {
+      throw new Error(`Unsupported subagent model: ${requestedModel}`);
+    }
+    const requestedCwd = typeof input.cwd === "string" ? normalizeBrowserPath(input.cwd) : "/";
+    const cwd = prior && container.vfs.existsSync(prior.cwd) && container.vfs.statSync(prior.cwd).isDirectory() ? prior.cwd
+      : prior ? "/" : requestedCwd;
+    if (!container.vfs.existsSync(cwd) || !container.vfs.statSync(cwd).isDirectory()) throw new Error(`Subagent cwd is not a directory: ${cwd}`);
+    const definition = discoverGrokBuildAgents(container.vfs, { cwd }).find((candidate) => candidate.name === type);
+    if (!definition) throw new Error(`Unknown subagent type: ${type}`);
+    const definitions = discoverGrokBuildSubagentDefinitions(container.vfs, { cwd });
+    const runtimeConfig = resolveGrokBuildSubagentRuntime(type, definition, {
+      ...(!prior && requestedModel ? { model: requestedModel } : {}),
+      ...(typeof input.reasoning_effort === "string" ? { reasoningEffort: input.reasoning_effort } : {}),
+      ...(requestedPersona ? { persona: requestedPersona } : {}),
+      ...(typeof input.capability_mode === "string" && ["read-only", "read-write", "execute", "all"].includes(input.capability_mode)
+        ? { capabilityMode: input.capability_mode as "read-only" | "read-write" | "execute" | "all" } : {}),
+      ...(input.isolation === "worktree" || input.isolation === "none" ? { isolation: input.isolation } : {}),
+      ...(input.fork_context === true ? { forkContext: true } : {}),
+    }, definitions, container.vfs, cwd, this.options.startupModel());
+    if (runtimeConfig.personaError) throw new Error(runtimeConfig.personaError);
+    if (runtimeConfig.isolation === "worktree") throw new Error("Browser projects do not have a host Git worktree; use isolation=none.");
+    const effectiveModel = prior?.model ?? (["grok-4.5", "grok-4.6"].includes(runtimeConfig.model ?? "")
+      ? runtimeConfig.model : this.options.startupModel());
+    const endpoint = this.options.endpoint();
+    const trace = new GrokBuildAgentTraceProducer({ sessionId: subagentId, modelId: effectiveModel ?? "grok-4.6", responsesEndpoint: endpoint });
+
+    const allowed = subagentToolNames(type, runtimeConfig.capabilityMode, definition);
+    if (definition.memory) for (const name of ["read_file", "search_replace", "write"]) allowed.add(name);
+    const baseTools = GROK_BUILD_TOOLS.filter((tool) => tool.type === "function"
+      ? typeof tool.name === "string" && allowed.has(tool.name)
+      : allowed.has(tool.type));
+    const mcpResolution = resolveGrokBuildAgentMcp({
+      definition: {
+        mcpServers: definition.mcpServers,
+        mcpInheritance: definition.mcpInheritance,
+        scope: definition.source === "builtin" ? "built-in" : definition.source,
+      },
+      parentConfigs: [], parentPool: [], projectTrusted: true,
+    });
+    const mcpCatalog = composeGrokBuildMcpCatalog(mcpResolution.owned, mcpResolution.inherited);
+    const browserMcp = createGrokBuildMcpServices(mcpCatalog.flatMap((server) => server.type === "stdio" ? [] : [{
+      name: server.name,
+      url: server.url,
+      headers: Object.fromEntries(server.headers.map((header) => [header.name, header.value])),
+      enableEventStream: server.type === "sse",
+    }]), { traceSink: createGrokBuildMcpOtlpTraceSink(trace.tracer) });
+    let runtime!: GrokBuildBrowserRuntime;
+    const subagentServices: GrokBuildBrowserServices = {
+      ...this.options.services,
+      ...(mcpCatalog.length ? { searchTools: browserMcp.services.searchTools, useTool: browserMcp.services.useTool } : {}),
+      spawnSubagent: (childInput, childSignal, childId) => this.run(childInput, childSignal, childId, runtime),
+    };
+    runtime = new GrokBuildBrowserRuntime(container, cwd, subagentServices, allowed);
+    const skillManager = new GrokBuildSkillManager(container.vfs, cwd);
+    const rootSkills = this.options.rootSkillManager();
+    const discoveredSkills = definition.inheritSkills && rootSkills
+      ? rootSkills.startupSkills()
+      : definition.discoverSkills ? skillManager.startupSkills() : [];
+    const preloadedSkills = formatGrokBuildPreloadedSkills(container.vfs, definition.skills, discoveredSkills);
+    const subagentSkills = discoveredSkills.filter((skill) => !preloadedSkills.paths.has(skill.path));
+    const subagentSkillListing = formatGrokBuildSkillListing(subagentSkills);
+    const startupSkillReminder = subagentSkillListing ? `<system-reminder>\n${subagentSkillListing}\n</system-reminder>` : undefined;
+    const projectInstructionReminder = definition.agentsMd ? renderGrokBuildAgentProjectInstructions(container.vfs, cwd) : undefined;
+    const memory = grokBuildAgentMemory(container.vfs, definition, cwd);
+    const promptDefinition: GrokBuildAgentDefinition = {
+      ...definition,
+      promptBody: `${preloadedSkills.injection}${definition.promptBody ?? ""}${memory.injection}`,
+    };
+    const configured = configureGrokBuildAgentTools(baseTools, runtime, definition);
+    const hookRunner: GrokBuildAgentHookRunner = {
+      async run(command, hookOptions) {
+        const controller = new AbortController();
+        const timer = globalThis.setTimeout(() => controller.abort(new DOMException("Hook timed out", "TimeoutError")), hookOptions.timeoutMs);
+        try { return await container.run(command, { cwd: hookOptions.cwd, signal: AbortSignal.any([hookOptions.signal, controller.signal]) }); }
+        finally { globalThis.clearTimeout(timer); }
+      },
+    };
+    const agentRuntime = new GrokBuildHookedRuntime(configured.runtime, definition.hooks, cwd, hookRunner);
+    const platform = globalThis.navigator?.platform || "Browser";
+    const systemPrompt = renderGrokBuildAgentPrompt(promptDefinition, {
+      ...(runtimeConfig.roleInstructions ? { roleInstructions: runtimeConfig.roleInstructions } : {}),
+      ...(runtimeConfig.personaInstructions ? { personaInstructions: runtimeConfig.personaInstructions } : {}),
+      osName: `${platform} (browser sandbox subagent)`,
+      shellPath: "/bin/sh", workingDirectory: cwd, currentDate: new Date().toISOString().slice(0, 10),
+      toolNamesByKind: subagentPromptToolKinds(allowed),
+    }) ?? "";
+    const baseSnapshot = prior?.snapshot ?? (input.fork_context === true ? this.options.parentSnapshot() : undefined);
+    let latest = baseSnapshot ? subagentSnapshotWithSystemPrompt(baseSnapshot, systemPrompt, subagentId) : undefined;
+    const completionTracker = new GrokBuildCompletionTracker(configured.canonicalToolName);
+    const session = new GrokBuildSession({
+      endpoint,
+      environment: {
+        systemPrompt,
+        os: `${platform} (browser sandbox subagent)`,
+        shell: "/bin/sh",
+        workspacePath: cwd,
+        today: new Date().toISOString().slice(0, 10),
+        ...(startupSkillReminder || projectInstructionReminder
+          ? { startupReminders: [projectInstructionReminder, startupSkillReminder].filter((value): value is string => Boolean(value)) } : {}),
+      },
+      runtime: agentRuntime,
+      tools: configured.tools,
+      sessionId: subagentId,
+      enableSessionTitle: false,
+      ...(definition.discoverSkills ? { getPostToolSystemReminder: (call: Parameters<GrokBuildSkillManager["afterToolCall"]>[0], result: Parameters<GrokBuildSkillManager["afterToolCall"]>[1]) => skillManager.afterToolCall(call, result) } : {}),
+      drainSystemReminders: () => runtime.drainSystemReminders(),
+      ...(effectiveModel ? { model: effectiveModel } : {}),
+      ...(runtimeConfig.reasoningEffort && runtimeConfig.reasoningEffort !== "max"
+        ? { reasoningEffort: runtimeConfig.reasoningEffort as "none" | "minimal" | "low" | "medium" | "high" | "xhigh" } : {}),
+      maxTurns: definition.maxTurns ?? 100,
+      onEvent(event) { completionTracker.event(event); trace.record(event); },
+      ...(latest ? { restore: latest } : {}),
+      onCheckpoint: (snapshot) => {
+        latest = snapshot;
+        this.storeSession(subagentId, type, requestedPersona, effectiveModel, cwd, snapshot, "running");
+      },
+    });
+    if (!latest) latest = session.snapshot();
+    this.storeSession(subagentId, type, requestedPersona, effectiveModel, cwd, latest, "running");
+    const started = performance.now();
+    try {
+      await runGrokBuildAgentHooks(definition.hooks, "SessionStart", type, cwd, hookRunner, signal);
+      const runTurn = async (prompt: string) => {
+        const promptGate = await runGrokBuildAgentHooks(definition.hooks, "UserPromptSubmit", prompt, cwd, hookRunner, signal);
+        if (promptGate.denied) throw new Error(promptGate.denied);
+        return session.run(prompt, signal);
+      };
+      let result = await completionTracker.run(String(input.prompt ?? ""), definition.completionRequirement, signal, runTurn);
+      for (let stopAttempt = 0; result.status === "complete" && stopAttempt < (definition.maxTurns ?? 100); stopAttempt += 1) {
+        const stopGate = await runGrokBuildAgentHooks(definition.hooks, "SubagentStop", type, cwd, hookRunner, signal);
+        if (!stopGate.denied) break;
+        result = await completionTracker.run(stopGate.denied, definition.completionRequirement, signal, runTurn);
+      }
+      this.storeSession(subagentId, type, requestedPersona, effectiveModel, cwd, session.snapshot(), "completed");
+      const usage = session.usage();
+      return {
+        childSessionId: subagentId,
+        success: result.status === "complete",
+        output: result.text || `Subagent ${subagentId} completed.`,
+        ...(result.status === "limit" ? { error: "Subagent reached its maximum turn limit." } : {}),
+        totalTokensUsed: usage.totalTokensUsed,
+        durationMs: Math.max(0, Math.round(performance.now() - started)),
+        ...(usage.incomplete ? { usageIncomplete: true } : {}),
+      };
+    } catch (error) {
+      if (signal.aborted) throw error;
+      this.storeSession(subagentId, type, requestedPersona, effectiveModel, cwd, session.snapshot(), "completed");
+      const usage = session.usage();
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        childSessionId: subagentId, success: false, output: message, error: message,
+        totalTokensUsed: usage.totalTokensUsed,
+        durationMs: Math.max(0, Math.round(performance.now() - started)),
+        ...(usage.incomplete ? { usageIncomplete: true } : {}),
+      };
+    } finally {
+      const owner = parentRuntime ?? this.options.rootRuntime();
+      if (owner && owner !== runtime) runtime.reparentBackgroundTasksTo(owner);
+      void this.telemetry.exportAgentTraceSpans(trace.finish()).catch(() => undefined);
+    }
+  }
+
+  private storeSession(
+    id: string, type: string, persona: string | undefined, model: string | undefined,
+    cwd: string, snapshot: GrokBuildSessionSnapshot, status: StoredSubagentSession["status"],
+  ): void {
+    this.sessions.set(id, {
+      type, ...(persona ? { persona } : {}), ...(model ? { model } : {}), cwd, snapshot, status,
+    });
+  }
+}
+
+export function subagentToolNames(type: string, capabilityMode: string | undefined, definition: GrokBuildAgentDefinition): Set<string> {
+  const read = ["read_file", "list_dir", "grep", "todo_write", "web_search", "x_search", "web_fetch", "get_command_or_subagent_output", "kill_command_or_subagent", "enter_plan_mode", "exit_plan_mode"];
+  const write = ["search_replace", "write", "image_gen", "image_edit", "image_to_video", "reference_to_video"];
+  const execute = ["run_terminal_command"];
+  const all = [...read, ...write, ...execute, "scheduler_create", "scheduler_delete", "scheduler_list", "monitor", "search_tool", "use_tool"];
+  let allowed = type === "explore" ? new Set(["read_file", "list_dir", "grep"])
+    : type === "plan" ? new Set(["read_file", "list_dir", "grep", "todo_write", "web_search"])
+      : new Set(all);
+  const configured = toolConfigCanonicalNames(definition.toolConfig);
+  if (configured) {
+    const declared = new Set(configured);
+    if (definition.injectDefaultTools) for (const optional of optionalToolNames()) declared.add(optional);
+    allowed = new Set([...allowed].filter((name) => declared.has(name)));
+  }
+  if (!definition.injectDefaultTools) for (const optional of optionalToolNames()) allowed.delete(optional);
+  if (definition.tools.length) {
+    const kindAliases: Record<string, readonly string[]> = {
+      read: ["read_file"], write: ["write"], edit: ["search_replace"], bash: execute, execute,
+      glob: ["list_dir"], list: ["list_dir"], grep: ["grep"], search: ["grep"], plan: ["todo_write"],
+    };
+    const explicit = new Set<string>();
+    const canonicalNames = canonicalSubagentToolNames();
+    let unresolved = false;
+    let hasAgentDirective = false;
+    for (const entry of definition.tools) {
+      if (/^(?:agent|task)(?:\([^)]*\))?$/iu.test(entry)) { hasAgentDirective = true; continue; }
+      const canonical = canonicalNames[entry] ?? entry;
+      if (allowed.has(canonical)) explicit.add(canonical);
+      else if (kindAliases[entry.toLowerCase()]) for (const name of kindAliases[entry.toLowerCase()]!) if (allowed.has(name)) explicit.add(name);
+      else if (!entry.startsWith("mcp__")) unresolved = true;
+    }
+    if (!unresolved) {
+      for (const always of ["search_tool", "use_tool"]) if (allowed.has(always)) explicit.add(always);
+      if (hasAgentDirective) for (const dependency of ["get_command_or_subagent_output", "kill_command_or_subagent"]) if (allowed.has(dependency)) explicit.add(dependency);
+      allowed = explicit;
+    }
+  }
+  const canonicalDenied = canonicalSubagentToolNames();
+  for (const denied of definition.disallowedTools) allowed.delete(canonicalDenied[denied] ?? denied);
+  const ceiling = capabilityMode === "read-only" ? new Set(read)
+    : capabilityMode === "read-write" ? new Set([...read, ...write])
+      : capabilityMode === "execute" ? new Set([...read, ...execute]) : undefined;
+  if (ceiling) allowed = new Set([...allowed].filter((name) => ceiling.has(name)));
+  return allowed;
+}
+
+function optionalToolNames(): readonly string[] {
+  return ["web_search", "x_search", "web_fetch", "image_gen", "image_edit", "image_to_video", "reference_to_video", "write", "enter_plan_mode", "exit_plan_mode"];
+}
+
+function canonicalSubagentToolNames(): Record<string, string> {
+  return {
+    run_terminal_cmd: "run_terminal_command", get_task_output: "get_command_or_subagent_output",
+    kill_task: "kill_command_or_subagent", task: "spawn_subagent",
+  };
+}
+
+function subagentPromptToolKinds(allowed: ReadonlySet<string>): Record<string, string | undefined> {
+  return {
+    read: allowed.has("read_file") ? "read_file" : undefined,
+    edit: allowed.has("search_replace") ? "search_replace" : undefined,
+    execute: allowed.has("run_terminal_command") ? "run_terminal_command" : undefined,
+    list: allowed.has("list_dir") ? "list_dir" : undefined,
+    search: allowed.has("grep") ? "grep" : undefined,
+    web_search: allowed.has("web_search") ? "web_search" : undefined,
+    plan: allowed.has("todo_write") ? "todo_write" : undefined,
+    background_task_action: allowed.has("get_command_or_subagent_output") ? "get_command_or_subagent_output" : undefined,
+  };
+}
+
+function subagentSnapshotWithSystemPrompt(source: GrokBuildSessionSnapshot, systemPrompt: string, sessionId: string): GrokBuildSessionSnapshot {
+  const snapshot = structuredClone(source);
+  const system = snapshot.input.find((item) => item.type === "message" && item.role === "system");
+  if (system && system.type === "message") system.content = systemPrompt;
+  else snapshot.input.unshift({ type: "message", role: "system", content: systemPrompt });
+  snapshot.sessionId = sessionId;
+  snapshot.requestId = crypto.randomUUID();
+  snapshot.promptIndex = 0;
+  snapshot.titleCreated = false;
+  return snapshot;
+}
+
+function normalizeBrowserPath(path: string): string {
+  const parts: string[] = [];
+  for (const part of path.replaceAll("\\", "/").split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") parts.pop(); else parts.push(part);
+  }
+  return `/${parts.join("/")}`;
+}

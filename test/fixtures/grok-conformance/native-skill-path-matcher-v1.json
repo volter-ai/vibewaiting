@@ -1,0 +1,21 @@
+{
+  "sourceRevision": "9684fa3c",
+  "nativeImplementation": "ignore 0.4.26 GitignoreBuilder::matched_path_or_any_parents(path, false).is_ignore()",
+  "cases": [
+    { "id": "parent-directory", "patterns": ["src"], "path": "src/deep/file.ts", "matched": true },
+    { "id": "basename-any-depth", "patterns": ["*.ts"], "path": "src/deep/file.ts", "matched": true },
+    { "id": "question-and-class", "patterns": ["src/file?.[tj]s"], "path": "src/file1.ts", "matched": true },
+    { "id": "negated-class-hit", "patterns": ["src/[!a-c]*.ts"], "path": "src/zeta.ts", "matched": true },
+    { "id": "negated-class-miss", "patterns": ["src/[!a-c]*.ts"], "path": "src/beta.ts", "matched": false },
+    { "id": "brace-alternate", "patterns": ["src/{main,lib}.ts"], "path": "src/lib.ts", "matched": true },
+    { "id": "negation-last", "patterns": ["*.ts", "!generated.ts"], "path": "src/generated.ts", "matched": false },
+    { "id": "ignore-last", "patterns": ["!generated.ts", "*.ts"], "path": "src/generated.ts", "matched": true },
+    { "id": "escaped-bang", "patterns": ["\\!literal"], "path": "!literal/file.txt", "matched": true },
+    { "id": "escaped-hash", "patterns": ["\\#notes"], "path": "#notes/file.txt", "matched": true },
+    { "id": "anchored-miss", "patterns": ["/root-only"], "path": "nested/root-only/file.txt", "matched": false },
+    { "id": "legal-globstar", "patterns": ["src/**/file.ts"], "path": "src/a/b/file.ts", "matched": true },
+    { "id": "illegal-globstar", "patterns": ["src/a**b.ts"], "path": "src/a/deep/b.ts", "matched": false },
+    { "id": "directory-only-parent", "patterns": ["cache/"], "path": "cache/deep/file", "matched": true },
+    { "id": "whitelist-closest", "patterns": ["src", "!src/generated.ts"], "path": "src/generated.ts", "matched": false }
+  ]
+}

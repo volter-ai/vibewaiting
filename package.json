@@ -74,7 +74,9 @@
     "@volter-ai-dev/supercode-ui": "0.1.66",
     "@volter-ai-dev/widget-shell": "0.4.0",
     "lucarne": "1.7.5",
-    "ws": "8.21.3"
+    "smol-toml": "^1.8.0",
+    "ws": "8.21.3",
+    "yaml": "^2.9.0"
   },
   "bundleDependencies": [
     "@termfleet/terminal",

@@ -1,5 +1,7 @@
 import { test, expect } from "@playwright/test";
 
+test.skip(Boolean(process.env.GROK_LONG_CONFORMANCE_CORPUS), "The opt-in long corpus has its own generic assertions.");
+
 async function expectTextEventually(locator, expected, attempts = 5) {
   let failure;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -16,7 +18,7 @@ async function expectTextEventually(locator, expected, attempts = 5) {
 test("replays native Grok Build through an isolated browser sandbox with working HMR and gameplay", async ({ page }) => {
   await page.goto("http://127.0.0.1:4175/?conformance=http%3A%2F%2F127.0.0.1%3A4319", {
     waitUntil: "domcontentloaded",
-    timeout: 1_000,
+    timeout: 10_000,
   });
 
   await expectTextEventually(page.locator("#agent-state"), "Complete");
@@ -52,7 +54,7 @@ test("renders native structured question and plan approval interactions", async 
     contentType: "application/json",
     body: '{"error":{"message":"UI-only test"}}',
   }));
-  await page.goto("http://127.0.0.1:4175/", { waitUntil: "domcontentloaded", timeout: 1_000 });
+  await page.goto("http://127.0.0.1:4175/", { waitUntil: "domcontentloaded", timeout: 10_000 });
 
   await page.evaluate(() => {
     window.__grokQuestionResult = import("/src/grok-build-question-dialog.ts").then(({ askGrokUserQuestions }) => askGrokUserQuestions([

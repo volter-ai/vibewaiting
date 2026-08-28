@@ -161,6 +161,63 @@ describe("browser-native Grok Build session", () => {
     vi.unstubAllGlobals();
   });
 
+  it("frames text-extracted images as deferred native reminder messages", async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    const responses = [
+      stream({ output: [{ type: "function_call", call_id: "read", name: "read_file", arguments: "{}" }] }),
+      stream({ output: [{ type: "message", content: [{ type: "output_text", text: "Done" }] }] }, "Done"),
+    ];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return responses.shift() ?? (() => { throw new Error("unexpected request"); })();
+    }));
+    const session = new GrokBuildSession({
+      endpoint: "/api/grok/responses",
+      environment: { os: "Browser", shell: "/bin/sh", workspacePath: "/", today: "2026-08-27" },
+      runtime: { async execute() { return { output: "1→image [image content will be provided separately]", deferredImages: ["data:image/png;base64,AAAA"] }; } },
+      enableSessionTitle: false,
+    });
+    await session.run("Inspect", new AbortController().signal);
+    expect((requests[1]?.input as Array<Record<string, unknown>>).slice(-2)).toEqual([
+      { type: "function_call_output", call_id: "read", output: "1→image [image content will be provided separately]" },
+      {
+        type: "message",
+        role: "user",
+        content: [
+          { type: "input_text", text: "[Image extracted from tool result above]" },
+          { type: "input_image", image_url: "data:image/png;base64,AAAA", detail: "auto" },
+        ],
+      },
+    ]);
+    vi.unstubAllGlobals();
+  });
+
+  it("continues the run when a monitor reminder arrives during an otherwise final sample", async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    const responses = [
+      stream({ output: [{ type: "message", content: [{ type: "output_text", text: "Waiting" }] }] }, "Waiting"),
+      stream({ output: [{ type: "message", content: [{ type: "output_text", text: "Handled" }] }] }, "Handled"),
+    ];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return responses.shift() ?? (() => { throw new Error("unexpected request"); })();
+    }));
+    let drains = 0;
+    const session = new GrokBuildSession({
+      endpoint: "/api/grok/responses",
+      environment: { os: "Browser", shell: "/bin/sh", workspacePath: "/", today: "2026-08-27" },
+      runtime: { async execute() { return { output: "unused" }; } },
+      enableSessionTitle: false,
+      drainSystemReminders: () => ++drains === 2 ? ["<monitor-event>DONE</monitor-event>"] : [],
+    });
+    await expect(session.run("Wait", new AbortController().signal)).resolves.toEqual({ status: "complete", text: "Handled" });
+    expect(requests).toHaveLength(2);
+    expect((requests[1]?.input as Array<Record<string, unknown>>).at(-1)).toEqual({
+      type: "message", role: "user", content: "<monitor-event>DONE</monitor-event>",
+    });
+    vi.unstubAllGlobals();
+  });
+
   it("uses a full agent-definition prompt when a child overrides the system prompt", () => {
     const conversation = createInitialConversation("Inspect auth", {
       systemPrompt: "You are the read-only explore child.",

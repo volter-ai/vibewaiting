@@ -1,8 +1,10 @@
 import { defineConfig } from "@playwright/test";
 
+const conformanceCorpus = process.env.GROK_CONFORMANCE_CORPUS ?? "test/fixtures/grok-conformance/native-pong-complete-v1.jsonl";
+
 export default defineConfig({
   testDir: "./e2e",
-  testMatch: "browser-agent.e2e.mjs",
+  testMatch: ["browser-agent.e2e.mjs", "browser-agent-long.e2e.mjs"],
   timeout: 10_000,
   expect: { timeout: 1_000 },
   fullyParallel: false,
@@ -15,7 +17,7 @@ export default defineConfig({
   },
   webServer: [
     {
-      command: "node scripts/grok-conformance-proxy.mjs replay --corpus test/fixtures/grok-conformance/native-pong-complete-v1.jsonl --port 4319",
+      command: `node scripts/grok-conformance-proxy.mjs replay --corpus ${JSON.stringify(conformanceCorpus)} --port 4319`,
       url: "http://127.0.0.1:4319/__conformance__/driver-profile",
       reuseExistingServer: false,
       timeout: 10_000,

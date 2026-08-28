@@ -116,25 +116,45 @@ function mapArchivePath(path: string): string | undefined {
   return;
 }
 
-function sanitizeManifest(value: unknown): GrokBuildBundleManifest | undefined {
+function parseManifest(value: unknown): GrokBuildBundleManifest | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const raw = value as { version?: unknown; checksums?: unknown };
   if (typeof raw.version !== "string" || !raw.checksums || typeof raw.checksums !== "object" || Array.isArray(raw.checksums)) return;
-  const checksums: Record<string, string> = {};
-  for (const [path, checksum] of Object.entries(raw.checksums as Record<string, unknown>)) {
-    const safe = sanitizeGrokBuildBundlePath(path);
-    if (safe && typeof checksum === "string") checksums[safe] = checksum;
-  }
+  if (Object.values(raw.checksums as Record<string, unknown>).some((checksum) => typeof checksum !== "string")) return;
+  const checksums = raw.checksums as Record<string, string>;
   return { version: raw.version, checksums };
+}
+
+function sanitizeManifest(manifest: GrokBuildBundleManifest | undefined): GrokBuildBundleManifest | undefined {
+  if (!manifest) return;
+  const checksums: Record<string, string> = {};
+  for (const [path, checksum] of Object.entries(manifest.checksums)) {
+    const safe = sanitizeGrokBuildBundlePath(path);
+    if (safe) checksums[safe] = checksum;
+  }
+  return { version: manifest.version, checksums };
 }
 
 export function readGrokBuildBundleManifest(vfs: GrokBuildBundleFileSystem): GrokBuildBundleManifest | undefined {
   if (!vfs.existsSync(GROK_BUILD_BUNDLE_MANIFEST)) return;
   try {
-    return sanitizeManifest(JSON.parse(vfs.readFileSync(GROK_BUILD_BUNDLE_MANIFEST, "utf8")) as unknown);
+    return parseManifest(JSON.parse(vfs.readFileSync(GROK_BUILD_BUNDLE_MANIFEST, "utf8")) as unknown);
   } catch {
     return;
   }
+}
+
+function readManifestForMutation(vfs: GrokBuildBundleFileSystem): GrokBuildBundleManifest | undefined {
+  if (!vfs.existsSync(GROK_BUILD_BUNDLE_MANIFEST)) return;
+  let value: unknown;
+  try {
+    value = JSON.parse(vfs.readFileSync(GROK_BUILD_BUNDLE_MANIFEST, "utf8")) as unknown;
+  } catch (error) {
+    throw new Error(`failed to parse ${GROK_BUILD_BUNDLE_MANIFEST}`, { cause: error });
+  }
+  const manifest = parseManifest(value);
+  if (!manifest) throw new Error(`failed to parse ${GROK_BUILD_BUNDLE_MANIFEST}`);
+  return manifest;
 }
 
 export function isGrokBuildBundleCacheFresh(
@@ -243,65 +263,78 @@ function parsePax(payload: Uint8Array): Record<string, string> {
   return values;
 }
 
-function parseTar(bytes: Uint8Array): TarEntry[] {
-  const entries: TarEntry[] = [];
-  let offset = 0;
-  let localPax: Record<string, string> | undefined;
-  let globalPax: Record<string, string> = {};
-  let longPath: string | undefined;
-  while (offset + TAR_BLOCK_BYTES <= bytes.length) {
-    const header = bytes.subarray(offset, offset + TAR_BLOCK_BYTES);
-    if (header.every((byte) => byte === 0)) break;
-    validateTarChecksum(header);
-    const size = parseTarNumber(header.subarray(124, 136));
-    const contentStart = offset + TAR_BLOCK_BYTES;
-    const contentEnd = contentStart + size;
-    if (!Number.isSafeInteger(contentEnd) || contentEnd > bytes.length) throw new Error("archive entry is truncated");
-    const content = bytes.slice(contentStart, contentEnd);
-    const type = header[156] ?? 0;
-    const name = parseTarString(header.subarray(0, 100));
-    const prefix = parseTarString(header.subarray(345, 500));
-    const headerPath = prefix ? `${prefix}/${name}` : name;
-    if (type === 120) localPax = parsePax(content);
-    else if (type === 103) globalPax = { ...globalPax, ...parsePax(content) };
-    else if (type === 76) longPath = parseTarString(content);
-    else {
-      const path = localPax?.path ?? globalPax.path ?? longPath ?? headerPath;
-      entries.push({ path, type, content });
-      localPax = undefined;
-      longPath = undefined;
-    }
-    offset = contentStart + Math.ceil(size / TAR_BLOCK_BYTES) * TAR_BLOCK_BYTES;
-  }
-  return entries;
-}
-
-async function decompressGzipBounded(compressed: Uint8Array): Promise<Uint8Array> {
+async function* streamTarEntries(compressed: Uint8Array): AsyncGenerator<TarEntry> {
   const compressedBuffer = compressed.buffer.slice(
     compressed.byteOffset,
     compressed.byteOffset + compressed.byteLength,
   ) as ArrayBuffer;
-  const stream = new Blob([compressedBuffer]).stream().pipeThrough(new DecompressionStream("gzip"));
-  const reader = stream.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > TAR_STREAM_MAX_BYTES) {
-      await reader.cancel();
-      throw new Error(`archive exceeds browser extraction ceiling (${TAR_STREAM_MAX_BYTES} bytes)`);
+  const reader = new Blob([compressedBuffer]).stream().pipeThrough(new DecompressionStream("gzip")).getReader();
+  let buffered = new Uint8Array();
+  let streamBytes = 0;
+  let streamDone = false;
+  let localPax: Record<string, string> | undefined;
+  let globalPax: Record<string, string> = {};
+  let longPath: string | undefined;
+  let regularEntries = 0;
+  let regularBytes = 0;
+
+  const fill = async (minimum: number): Promise<boolean> => {
+    while (buffered.byteLength < minimum && !streamDone) {
+      const { done, value } = await reader.read();
+      if (done) { streamDone = true; break; }
+      streamBytes += value.byteLength;
+      if (streamBytes > TAR_STREAM_MAX_BYTES) throw new Error(`archive exceeds browser extraction ceiling (${TAR_STREAM_MAX_BYTES} bytes)`);
+      const joined = new Uint8Array(buffered.byteLength + value.byteLength);
+      joined.set(buffered);
+      joined.set(value, buffered.byteLength);
+      buffered = joined;
     }
-    chunks.push(value);
+    return buffered.byteLength >= minimum;
+  };
+  const take = (length: number): Uint8Array => {
+    const value = buffered.slice(0, length);
+    buffered = buffered.slice(length);
+    return value;
+  };
+
+  try {
+    while (await fill(TAR_BLOCK_BYTES)) {
+      const header = take(TAR_BLOCK_BYTES);
+      if (header.every((byte) => byte === 0)) break;
+      validateTarChecksum(header);
+      const size = parseTarNumber(header.subarray(124, 136));
+      const type = header[156] ?? 0;
+      if (type === 0 || type === 48) {
+        regularEntries += 1;
+        if (regularEntries > GROK_BUILD_BUNDLE_MAX_ENTRIES) throw new Error(`archive exceeds maximum entry count (${GROK_BUILD_BUNDLE_MAX_ENTRIES})`);
+        if (size > GROK_BUILD_BUNDLE_MAX_ENTRY_BYTES) throw new Error(`archive entry exceeds maximum size (${GROK_BUILD_BUNDLE_MAX_ENTRY_BYTES} bytes)`);
+        regularBytes += size;
+        if (!Number.isSafeInteger(regularBytes)) throw new Error("decompressed size overflow");
+        if (regularBytes > GROK_BUILD_BUNDLE_MAX_DECOMPRESSED_BYTES) throw new Error(`archive exceeds maximum decompressed size (${GROK_BUILD_BUNDLE_MAX_DECOMPRESSED_BYTES} bytes)`);
+      }
+      const paddedSize = Math.ceil(size / TAR_BLOCK_BYTES) * TAR_BLOCK_BYTES;
+      if (!Number.isSafeInteger(paddedSize) || !(await fill(paddedSize))) throw new Error("archive entry is truncated");
+      const content = take(size);
+      take(paddedSize - size);
+      const name = parseTarString(header.subarray(0, 100));
+      const prefix = parseTarString(header.subarray(345, 500));
+      const headerPath = prefix ? `${prefix}/${name}` : name;
+      if (type === 120) localPax = parsePax(content);
+      else if (type === 103) globalPax = { ...globalPax, ...parsePax(content) };
+      else if (type === 76) longPath = parseTarString(content);
+      else {
+        const path = localPax?.path ?? globalPax.path ?? longPath ?? headerPath;
+        yield { path, type, content };
+        localPax = undefined;
+        longPath = undefined;
+      }
+    }
+    if (!streamDone && buffered.byteLength > 0 && buffered.byteLength < TAR_BLOCK_BYTES) {
+      throw new Error("archive entry is truncated");
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
   }
-  const output = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    output.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return output;
 }
 
 export async function extractGrokBuildBundleArchive(
@@ -309,20 +342,12 @@ export async function extractGrokBuildBundleArchive(
   archiveBytes: Uint8Array,
 ): Promise<GrokBuildBundleManifest> {
   if (archiveBytes.byteLength > GROK_BUILD_BUNDLE_MAX_COMPRESSED_BYTES) throw new Error("Grok bundle archive is too large.");
-  const entries = parseTar(await decompressGzipBounded(archiveBytes));
-  const oldManifest = readGrokBuildBundleManifest(vfs);
+  const oldManifest = sanitizeManifest(readManifestForMutation(vfs));
   ensureBundleDirectories(vfs);
   const nextChecksums: Record<string, string> = {};
   let version = "";
-  let regularEntries = 0;
-  let regularBytes = 0;
-  for (const entry of entries) {
+  for await (const entry of streamTarEntries(archiveBytes)) {
     if (entry.type !== 0 && entry.type !== 48) continue;
-    regularEntries += 1;
-    if (regularEntries > GROK_BUILD_BUNDLE_MAX_ENTRIES) throw new Error(`archive exceeds maximum entry count (${GROK_BUILD_BUNDLE_MAX_ENTRIES})`);
-    if (entry.content.byteLength > GROK_BUILD_BUNDLE_MAX_ENTRY_BYTES) throw new Error(`archive entry exceeds maximum size (${GROK_BUILD_BUNDLE_MAX_ENTRY_BYTES} bytes)`);
-    regularBytes += entry.content.byteLength;
-    if (regularBytes > GROK_BUILD_BUNDLE_MAX_DECOMPRESSED_BYTES) throw new Error(`archive exceeds maximum decompressed size (${GROK_BUILD_BUNDLE_MAX_DECOMPRESSED_BYTES} bytes)`);
     const normalized = entry.path.startsWith("./") ? entry.path.slice(2) : entry.path;
     if (normalized === "bundle.json") {
       const metadata = JSON.parse(new TextDecoder().decode(entry.content)) as { version?: unknown };
@@ -344,7 +369,7 @@ function parseLegacyBundle(value: unknown): GrokBuildLegacyBundle {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid legacy Grok bundle");
   const raw = value as Record<string, unknown>;
   if (typeof raw.version !== "string") throw new Error("legacy Grok bundle is missing its version");
-  const maps = ["personas", "roles", "agents", "skills"] as const;
+  const maps = ["personas", "roles", "agents"] as const;
   const result = { version: raw.version } as GrokBuildLegacyBundle;
   for (const key of maps) {
     const map = raw[key];
@@ -353,6 +378,11 @@ function parseLegacyBundle(value: unknown): GrokBuildLegacyBundle {
     }
     result[key] = map as Record<string, string>;
   }
+  const skills = raw.skills ?? {};
+  if (!skills || typeof skills !== "object" || Array.isArray(skills) || Object.values(skills as Record<string, unknown>).some((item) => typeof item !== "string")) {
+    throw new Error("legacy Grok bundle has an invalid skills map");
+  }
+  result.skills = skills as Record<string, string>;
   return result;
 }
 
@@ -361,21 +391,27 @@ export async function writeGrokBuildLegacyBundle(
   value: unknown,
 ): Promise<GrokBuildBundleManifest> {
   const bundle = parseLegacyBundle(value);
-  const oldManifest = readGrokBuildBundleManifest(vfs);
-  ensureBundleDirectories(vfs);
-  const nextChecksums: Record<string, string> = {};
+  const oldManifest = sanitizeManifest(readManifestForMutation(vfs));
   const kinds = [
     ["personas", ".toml", bundle.personas],
     ["roles", ".toml", bundle.roles],
     ["agents", ".md", bundle.agents],
     ["skills", "", bundle.skills],
   ] as const;
+  // Native `bundle_files` validates the entire JSON payload before creating
+  // directories or writing the first file.
+  const files: Array<{ relativePath: string; content: string }> = [];
   for (const [directory, extension, entries] of kinds) {
     for (const [name, content] of Object.entries(entries)) {
       if (!validateBundleName(name)) throw new Error(`invalid bundled ${directory} name: ${JSON.stringify(name)}`);
       const relativePath = directory === "skills" ? `skills/${name}/SKILL.md` : `${directory}/${name}${extension}`;
-      await writeManagedFile(vfs, relativePath, new TextEncoder().encode(content), oldManifest, nextChecksums);
+      files.push({ relativePath, content });
     }
+  }
+  ensureBundleDirectories(vfs);
+  const nextChecksums: Record<string, string> = {};
+  for (const file of files) {
+    await writeManagedFile(vfs, file.relativePath, new TextEncoder().encode(file.content), oldManifest, nextChecksums);
   }
   if (oldManifest) {
     for (const [path, checksum] of Object.entries(oldManifest.checksums)) {

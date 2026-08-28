@@ -11,6 +11,7 @@ import {
   normalizeWebFetchUrl,
   normalizeImageMediaRequest,
   normalizeVideoMediaRequest,
+  normalizeGrokTelemetryRoute,
   sameWebFetchHost,
 } from "../../cloudflare/security.js";
 import {
@@ -25,6 +26,7 @@ const RESPONSES_PROXY_URL = "https://cli-chat-proxy.grok.com/v1/responses";
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const MAX_BOOTSTRAP_RESPONSE_BYTES = 1024 * 1024;
 const MAX_BUNDLE_RESPONSE_BYTES = 8 * 1024 * 1024;
+const MAX_TELEMETRY_BYTES = 1024 * 1024;
 
 interface StoredCredential {
   key?: unknown;
@@ -339,6 +341,47 @@ async function proxyBundle(
   response.end(body);
 }
 
+async function proxyTelemetry(
+  request: IncomingMessage,
+  response: ServerResponse,
+  credential: GrokCredential,
+  fetchImpl: typeof globalThis.fetch,
+  upstreamBaseUrl: string | undefined,
+  clientVersion: string | undefined,
+  route: NonNullable<ReturnType<typeof normalizeGrokTelemetryRoute>>,
+): Promise<void> {
+  const body = request.method === "POST" ? await readBody(request) : undefined;
+  if (body && body.byteLength > MAX_TELEMETRY_BYTES) throw new Error("The Grok telemetry payload exceeded 1 MiB.");
+  if (body && route.contentType === "application/json") {
+    const value: unknown = JSON.parse(body.toString("utf8"));
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("The Grok telemetry payload must be a JSON object.");
+  }
+  const origin = (upstreamBaseUrl ?? "https://cli-chat-proxy.grok.com").replace(/\/v1\/?$/u, "").replace(/\/$/u, "");
+  const traced = !route.upstreamPath.endsWith("/turn-deltas");
+  const headers = new Headers({
+    Authorization: `Bearer ${credential.token}`,
+    Accept: "*/*",
+    "X-XAI-Token-Auth": "xai-grok-cli",
+    "x-grok-client-version": clientVersion ?? "1.0.5",
+    "x-grok-client-mode": "headless",
+    ...(traced ? { traceparent: createTraceparent(), tracestate: "" } : {}),
+    ...(route.upstreamPath === "/v1/traces" && credential.userId ? { "x-userid": credential.userId } : {}),
+    ...(body ? { "Content-Type": route.contentType } : {}),
+  });
+  const upstream = await fetchImpl(`${origin}${route.upstreamPath}`, {
+    method: request.method ?? "GET",
+    headers,
+    ...(body ? { body: body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength) as ArrayBuffer } : {}),
+    signal: AbortSignal.timeout(15_000),
+  });
+  const responseBody = await boundedUpstreamBody(upstream, MAX_TELEMETRY_BYTES);
+  response.statusCode = upstream.status;
+  response.setHeader("Cache-Control", "no-store");
+  response.setHeader("Content-Type", upstream.headers.get("Content-Type") ?? (route.contentType === "application/json" ? "application/json; charset=utf-8" : route.contentType));
+  response.setHeader("X-Content-Type-Options", "nosniff");
+  response.end(responseBody);
+}
+
 function authFileFromEnvironment(explicit?: string): string {
   if (explicit) return resolve(explicit);
   if (process.env.GROK_AUTH_FILE) return resolve(process.env.GROK_AUTH_FILE);
@@ -607,6 +650,16 @@ export function createGrokRelay(options: GrokRelayOptions = {}): Plugin {
             } else {
               await proxyVideoPoll(request, response, credential, fetchImpl, mediaBaseUrl);
             }
+          } catch (error) {
+            json(response, 502, { error: { message: error instanceof Error ? error.message : String(error) } });
+          }
+          return;
+        }
+        const telemetryRoute = path ? normalizeGrokTelemetryRoute(path, request.method ?? "") : undefined;
+        if (telemetryRoute) {
+          try {
+            const credential = await readGrokCredential(authFileFromEnvironment(options.authFile));
+            await proxyTelemetry(request, response, credential, fetchImpl, options.upstreamBaseUrl ?? process.env.GROK_CONFORMANCE_BASE_URL, options.clientVersion ?? process.env.GROK_CLIENT_VERSION, telemetryRoute);
           } catch (error) {
             json(response, 502, { error: { message: error instanceof Error ? error.message : String(error) } });
           }

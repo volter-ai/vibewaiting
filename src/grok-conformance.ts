@@ -202,13 +202,30 @@ export function canonicalRequest(
   body: Buffer,
   state: LaneProtocolState,
 ): CanonicalRequest {
+  const canonical = canonicalBody(body, singleHeader(headers["content-type"]), state);
+  normalizeTelemetryMeasurements(upstreamPath, canonical);
   return {
     method: method.toUpperCase(),
     path: state.normalizePath(upstreamPath),
     query: [...url.searchParams.entries()].sort(([ak, av], [bk, bv]) => ak.localeCompare(bk) || av.localeCompare(bv)),
     headers: canonicalHeaders(headers, state),
-    body: canonicalBody(body, singleHeader(headers["content-type"]), state),
+    body: canonical,
   };
+}
+
+/** Preserve telemetry structure/counters while removing values that necessarily change on replay. */
+export function normalizeTelemetryMeasurements(path: string, body: unknown): void {
+  if (!isObject(body) || !/^\/v1\/sessions\/[^/]+\/(?:signals|turn-deltas)$/u.test(path)) return;
+  const volatile = new Set([
+    "avgItlMeanMs", "avgResponseTimeMs", "avgTimeToFirstTokenMs", "itlMaxMs", "itlMeanMs",
+    "itlP50Ms", "itlP99Ms", "lastItlP50Ms", "lastItlP99Ms", "maxTimeToFirstTokenMs",
+    "minTimeToFirstTokenMs", "sessionDurationSeconds", "timeToFirstTokenMs", "totalResponseTimeMs",
+    "turnDurationMs", "worstItlMaxMs",
+  ]);
+  for (const key of volatile) {
+    if (key in body) body[key] = "<measurement>";
+  }
+  if (typeof body.requestId === "string") body.requestId = "<request-id>";
 }
 
 export function requestKey(request: Pick<CanonicalRequest, "method" | "path">): string {

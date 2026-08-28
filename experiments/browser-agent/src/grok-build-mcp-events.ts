@@ -1,4 +1,5 @@
 import type { McpJson, McpJsonObject } from "./grok-build-mcp-protocol.js";
+import { parseElicitationFormSchema, validateElicitationContent } from "./grok-build-mcp-elicitation.js";
 
 export const MAX_ELICIT_MESSAGE_CHARS = 4_096;
 export const MAX_ELICIT_URL_CHARS = 2_048;
@@ -81,6 +82,18 @@ export function validateElicitationResult(result: McpElicitationResult): McpElic
   if (result.content === undefined) return result;
   if (new TextEncoder().encode(JSON.stringify(result.content)).byteLength > MAX_ELICIT_SCHEMA_BYTES) return { action: "decline" };
   return result;
+}
+
+export function validateElicitationResultForRequest(request: McpElicitationRequest | undefined, result: McpElicitationResult): McpElicitationResult {
+  const bounded = validateElicitationResult(result);
+  if (bounded.action !== "accept" || request?.mode !== "form" || bounded.content === undefined) return bounded;
+  try {
+    parseElicitationFormSchema(request.requestedSchema);
+    const content = validateElicitationContent(request.requestedSchema, bounded.content);
+    return content ? { action: "accept", content } : { action: "decline" };
+  } catch {
+    return { action: "decline" };
+  }
 }
 
 function parseEventBlock(block: string): McpSseEvent | undefined {

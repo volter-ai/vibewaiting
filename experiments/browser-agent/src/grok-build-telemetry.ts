@@ -2,6 +2,14 @@
 // Modified for the Vibewaiting browser port, 2026.
 
 import type { GrokBuildEvent } from "./grok-build-agent.js";
+import type { GrokCompletedResponse, GrokInferenceLatencyStats } from "../../../src/grok-browser-protocol.js";
+import { encodeGrokBuildOtlpExport } from "./grok-build-otlp-protobuf.js";
+import {
+  createGrokBuildBrowserTraceExport,
+  GrokBuildAgentTraceProducer,
+  type GrokBuildAgentTraceProducerOptions,
+} from "./grok-build-otlp-trace.js";
+import type { GrokBuildOtlpSpan } from "./grok-build-otlp-redaction.js";
 
 export interface GrokBuildFeedbackConfig extends Record<string, unknown> {
   config_id: string;
@@ -25,6 +33,22 @@ export interface GrokBuildTurnDelta extends Record<string, unknown> {
   clientType: "agent";
   turnNumber: number;
   turnOutcome: string;
+}
+
+export interface GrokBuildTelemetryLifecycleOptions {
+  client?: GrokBuildTelemetryClient;
+  model?: string;
+  syncIntervalMs?: number;
+  now?: () => number;
+  setInterval?: typeof globalThis.setInterval;
+  clearInterval?: typeof globalThis.clearInterval;
+  signalAssistantCheckpoints?: readonly number[];
+  trace?: Omit<GrokBuildAgentTraceProducerOptions, "sessionId" | "modelId"> & {
+    clientName?: string;
+    clientVersion?: string;
+    serviceVersion?: string;
+    appEntrypoint?: string;
+  };
 }
 
 export interface GrokBuildTelemetryClientOptions {
@@ -76,6 +100,21 @@ export class GrokBuildTelemetryClient {
       ...(signal ? { signal } : {}),
     });
     if (!response.ok) throw await responseError(response, "Exporting traces");
+  }
+
+  async exportAgentTraceSpans(
+    spans: readonly GrokBuildOtlpSpan[],
+    options: { clientName?: string; clientVersion?: string; serviceVersion?: string; appEntrypoint?: string } = {},
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (spans.length === 0) return;
+    await this.exportTraces(encodeGrokBuildOtlpExport(createGrokBuildBrowserTraceExport({
+      clientName: options.clientName ?? "grok-browser",
+      clientVersion: options.clientVersion ?? "browser-port",
+      serviceVersion: options.serviceVersion ?? "browser-port+9684fa3c",
+      appEntrypoint: options.appEntrypoint ?? "agent",
+      spans: [...spans],
+    })), signal);
   }
 
   private async sendJson(url: string, init: RequestInit, context: string): Promise<unknown> {
@@ -144,31 +183,70 @@ export function createInitialGrokBuildSignals(model = "grok-4.6"): GrokBuildSess
 
 /** Deterministic session counters; latency/ITL measurements are supplied separately. */
 export class GrokBuildSignalTracker {
-  private readonly startedAt = Date.now();
+  private readonly startedAt: number;
   private readonly tools = new Set<string>();
+  private readonly latency: Array<{ ttfb: number; ttlb: number }> = [];
+  private readonly itlIntervals: number[] = [];
+  private totalChunkCount = 0;
+  private itlSampleCount = 0;
   private totalTurns = 0;
   private userMessages = 0;
   private assistantMessages = 0;
   private toolCalls = 0;
   private toolFailures = 0;
   private compactions = 0;
+  private totalTokensBeforeCompaction = 0;
   private errors = 0;
+  private cancellations = 0;
+  private consecutiveCancellations = 0;
+  private lastTurnAt: number | undefined;
+  private turnStartedAt: number | undefined;
+  private turnBaseline = zeroTurnBaseline();
+  private turnTools = new Set<string>();
+  private turnToolOutcomes = new Map<string, { successes: number; failures: number }>();
+  private turnItlIntervals: number[] = [];
+  private turnTtfb: number | undefined;
+  private turnTtlb: number | undefined;
+  private responseTokens: number | undefined;
+  private thinkingTokens: number | undefined;
+  private modelFingerprint: string | undefined;
+  private contextTokensUsed = 0;
+  private contextWindowTokens = 500_000;
+  private pendingCompactionTokens: number | undefined;
 
-  constructor(private readonly model = "grok-4.6") {}
+  constructor(private readonly model = "grok-4.6", private readonly now = () => Date.now()) {
+    this.startedAt = now();
+  }
 
   record(event: GrokBuildEvent): void {
-    if (event.type === "run_start") this.userMessages += 1;
+    if (event.type === "run_start") {
+      const now = this.now();
+      if (this.lastTurnAt !== undefined && now - this.lastTurnAt >= 60_000) this.turnBaseline.longPauses += 1;
+      this.lastTurnAt = now;
+      this.turnStartedAt = now;
+      this.totalTurns += 1;
+      this.userMessages += 1;
+      this.resetPerTurn();
+    }
     else if (event.type === "assistant") this.assistantMessages += 1;
+    else if (event.type === "response_end" && event.kind === "foreground") this.recordResponse(event.response, event.metrics);
     else if (event.type === "tool_end") {
       this.toolCalls += 1;
       this.tools.add(event.call.name);
-      if (event.result.isError) this.toolFailures += 1;
+      this.turnTools.add(event.call.name);
+      const outcome = this.turnToolOutcomes.get(event.call.name) ?? { successes: 0, failures: 0 };
+      if (event.result.isError) {
+        this.toolFailures += 1;
+        this.errors += 1;
+        outcome.failures += 1;
+      } else outcome.successes += 1;
+      this.turnToolOutcomes.set(event.call.name, outcome);
+    } else if (event.type === "compaction_start") {
+      this.pendingCompactionTokens = event.tokens;
     } else if (event.type === "compaction_end") {
       this.compactions = event.compactions;
-    } else if (event.type === "complete" || event.type === "limit") {
-      this.totalTurns += 1;
-    } else if (event.type === "retry" && event.attempt === event.maxRetries) {
-      this.errors += 1;
+      this.totalTokensBeforeCompaction += this.pendingCompactionTokens ?? 0;
+      this.pendingCompactionTokens = undefined;
     }
   }
 
@@ -179,13 +257,298 @@ export class GrokBuildSignalTracker {
       userMessageCount: this.userMessages,
       assistantMessageCount: this.assistantMessages,
       errorCount: this.errors,
+      cancellationCount: this.cancellations,
+      consecutiveCancellations: this.consecutiveCancellations,
       toolCallCount: this.toolCalls,
       toolFailureCount: this.toolFailures,
       compactionCount: this.compactions,
       sessionDurationSeconds: Math.max(0, Math.floor((now - this.startedAt) / 1_000)),
       ...(this.tools.size > 0 ? { toolsUsed: [...this.tools] } : {}),
+      ...this.sessionLatencyFields(),
     };
   }
+
+  takeTurnDelta(outcome: "completed" | "cancelled" | "error", requestId?: string, now = this.now()): GrokBuildTurnDelta {
+    if (outcome === "cancelled") {
+      this.cancellations += 1;
+      this.consecutiveCancellations += 1;
+    } else {
+      if (outcome === "error") this.errors += 1;
+      this.consecutiveCancellations = 0;
+    }
+    const current = this.snapshot(now);
+    const successful = this.toolCalls - this.turnBaseline.toolCalls - (this.toolFailures - this.turnBaseline.toolFailures);
+    const sortedItl = [...this.turnItlIntervals].sort((left, right) => left - right);
+    const outcomes = [...this.turnToolOutcomes].sort(([left], [right]) => left.localeCompare(right)).map(([toolName, counts]) => ({ toolName, ...counts }));
+    const delta: GrokBuildTurnDelta = {
+      clientType: "agent",
+      turnNumber: this.totalTurns,
+      deltaToolCalls: this.toolCalls - this.turnBaseline.toolCalls,
+      deltaToolFailures: this.toolFailures - this.turnBaseline.toolFailures,
+      deltaErrors: this.errors - this.turnBaseline.errors,
+      deltaCancellations: this.cancellations - this.turnBaseline.cancellations,
+      deltaRegenerations: 0,
+      deltaCompactions: this.compactions - this.turnBaseline.compactions,
+      deltaEditAndRetries: 0,
+      deltaPositiveRatings: 0,
+      deltaNegativeRatings: 0,
+      deltaAssistantMessages: this.assistantMessages - this.turnBaseline.assistantMessages,
+      deltaLongPauses: this.turnBaseline.longPauses,
+      deltaSuccessfulToolUses: successful,
+      consecutiveCancellations: this.consecutiveCancellations,
+      ...(this.turnTtfb === undefined ? {} : { timeToFirstTokenMs: this.turnTtfb }),
+      ...(this.turnTtlb === undefined ? {} : { totalResponseTimeMs: this.turnTtlb }),
+      ...itlFields(sortedItl, false),
+      contextWindowUsage: Math.min(100, Math.floor(this.contextTokensUsed * 100 / this.contextWindowTokens)),
+      modelId: this.model,
+      turnDurationMs: Math.max(0, Math.floor(now - (this.turnStartedAt ?? now))),
+      turnOutcome: outcome,
+      ...(this.modelFingerprint ? { modelFingerprint: this.modelFingerprint } : {}),
+      ...(this.turnTools.size > 0 ? { toolsUsedThisTurn: [...this.turnTools].sort().slice(0, 100) } : {}),
+      ...(outcomes.length > 0 ? { toolOutcomes: JSON.stringify(outcomes) } : {}),
+      cumulativeToolCalls: this.toolCalls,
+      cumulativeErrors: this.errors,
+      sessionDurationSeconds: current.sessionDurationSeconds,
+      totalTokensBeforeCompaction: this.totalTokensBeforeCompaction,
+      metadata: { startPromptMode: "agent", endPromptMode: "agent" },
+      ...(requestId ? { requestId } : {}),
+      feedbackRequestsSent: 0,
+      ...(this.responseTokens === undefined ? {} : { responseTokens: this.responseTokens }),
+      ...(this.thinkingTokens === undefined ? {} : { thinkingTokens: this.thinkingTokens }),
+      deltaAgentLinesAdded: 0,
+      deltaAgentLinesRemoved: 0,
+      deltaAgentLinesAddedReverted: 0,
+      deltaAgentLinesRemovedReverted: 0,
+      deltaHumanLinesAdded: 0,
+      deltaHumanLinesRemoved: 0,
+      deltaHumanLinesAddedReverted: 0,
+      deltaHumanLinesRemovedReverted: 0,
+      deltaAgentFilesTouched: 0,
+      deltaHumanFilesTouched: 0,
+      deltaTotalFilesTouched: 0,
+      locTrackingEnabled: false,
+    };
+    this.turnBaseline = {
+      toolCalls: this.toolCalls,
+      toolFailures: this.toolFailures,
+      errors: this.errors,
+      cancellations: this.cancellations,
+      compactions: this.compactions,
+      assistantMessages: this.assistantMessages,
+      longPauses: 0,
+    };
+    return delta;
+  }
+
+  private resetPerTurn(): void {
+    this.turnTools.clear();
+    this.turnToolOutcomes.clear();
+    this.turnItlIntervals = [];
+    this.turnTtfb = undefined;
+    this.turnTtlb = undefined;
+    this.responseTokens = undefined;
+    this.thinkingTokens = undefined;
+    this.modelFingerprint = undefined;
+  }
+
+  private recordResponse(response: GrokCompletedResponse, metrics: GrokInferenceLatencyStats): void {
+    if (metrics.timeToFirstTokenMs !== undefined) {
+      this.turnTtfb = metrics.timeToFirstTokenMs;
+      this.turnTtlb = metrics.timeToLastByteMs;
+      this.latency.push({ ttfb: metrics.timeToFirstTokenMs, ttlb: metrics.timeToLastByteMs });
+    }
+    if (metrics.itlIntervalsMs.length > 0) {
+      this.itlIntervals.push(...metrics.itlIntervalsMs);
+      this.turnItlIntervals.push(...metrics.itlIntervalsMs);
+      this.totalChunkCount += metrics.chunkCount;
+      this.itlSampleCount += 1;
+    }
+    const usage = objectValue(response.usage);
+    const output = integerValue(usage?.output_tokens);
+    const reasoning = integerValue(objectValue(usage?.output_tokens_details)?.reasoning_tokens);
+    if (output !== undefined) {
+      this.responseTokens = (this.responseTokens ?? 0) + Math.max(0, output - (reasoning ?? 0));
+      this.thinkingTokens = (this.thinkingTokens ?? 0) + (reasoning ?? 0);
+    }
+    this.contextTokensUsed = integerValue(usage?.total_tokens) ?? this.contextTokensUsed;
+    const metadata = objectValue(response.metadata);
+    if (typeof metadata?.system_fingerprint === "string") this.modelFingerprint = metadata.system_fingerprint;
+  }
+
+  private sessionLatencyFields(): Record<string, number> {
+    if (this.latency.length === 0) return {};
+    const ttfb = this.latency.map((sample) => sample.ttfb);
+    const ttlb = this.latency.map((sample) => sample.ttlb);
+    const fields: Record<string, number> = {
+      avgTimeToFirstTokenMs: floorMean(ttfb),
+      avgResponseTimeMs: floorMean(ttlb),
+      minTimeToFirstTokenMs: Math.min(...ttfb),
+      maxTimeToFirstTokenMs: Math.max(...ttfb),
+      latencySampleCount: this.latency.length,
+    };
+    if (this.itlIntervals.length > 0) {
+      const sorted = [...this.itlIntervals].sort((left, right) => left - right);
+      Object.assign(fields, {
+        ...itlFields(sorted, true),
+        totalChunkCount: this.totalChunkCount,
+        itlSampleCount: this.itlSampleCount,
+      });
+    }
+    return fields;
+  }
+}
+
+/** Non-blocking browser equivalent of native FeedbackManager's lifecycle. */
+export class GrokBuildTelemetryLifecycle {
+  readonly tracker: GrokBuildSignalTracker;
+  private readonly client: GrokBuildTelemetryClient;
+  private readonly syncIntervalMs: number;
+  private readonly setIntervalImpl: typeof globalThis.setInterval;
+  private readonly clearIntervalImpl: typeof globalThis.clearInterval;
+  private interval: ReturnType<typeof globalThis.setInterval> | undefined;
+  private boot: Promise<void> | undefined;
+  private started = false;
+  private stopped = false;
+  private pending = new Set<Promise<unknown>>();
+  private readonly signalAssistantCheckpoints: Set<number>;
+  private readonly traceProducer: GrokBuildAgentTraceProducer | undefined;
+  private readonly traceMetadata: Pick<NonNullable<GrokBuildTelemetryLifecycleOptions["trace"]>, "clientName" | "clientVersion" | "serviceVersion" | "appEntrypoint">;
+
+  constructor(readonly sessionId: string, options: GrokBuildTelemetryLifecycleOptions = {}) {
+    this.client = options.client ?? new GrokBuildTelemetryClient();
+    this.syncIntervalMs = options.syncIntervalMs ?? 60_000;
+    this.setIntervalImpl = options.setInterval ?? globalThis.setInterval.bind(globalThis);
+    this.clearIntervalImpl = options.clearInterval ?? globalThis.clearInterval.bind(globalThis);
+    this.signalAssistantCheckpoints = new Set(options.signalAssistantCheckpoints ?? []);
+    this.tracker = new GrokBuildSignalTracker(options.model, options.now);
+    this.traceProducer = options.trace ? new GrokBuildAgentTraceProducer({
+      sessionId,
+      modelId: options.model ?? "grok-4.6",
+      responsesEndpoint: options.trace.responsesEndpoint,
+      ...(options.trace.tracer ? { tracer: options.trace.tracer } : {}),
+      ...(options.trace.nowUnixNano ? { nowUnixNano: options.trace.nowUnixNano } : {}),
+      ...(options.trace.randomBytes ? { randomBytes: options.trace.randomBytes } : {}),
+    }) : undefined;
+    this.traceMetadata = options.trace ?? {};
+  }
+
+  start(): void {
+    if (this.started || this.stopped) return;
+    this.started = true;
+    const initial = this.tracker.snapshot();
+    this.boot = (async () => {
+      await this.client.loadFeedbackConfig().catch(() => undefined);
+      await this.client.updateSignals(this.sessionId, initial);
+    })().catch(() => undefined).finally(() => {
+      if (!this.stopped) this.interval = this.setIntervalImpl(() => this.background(this.client.updateSignals(this.sessionId, this.tracker.snapshot())), this.syncIntervalMs);
+    });
+    this.background(this.boot);
+  }
+
+  async ready(): Promise<void> {
+    if (!this.started) this.start();
+    await this.boot;
+  }
+
+  record(event: GrokBuildEvent, requestId?: string): void {
+    if (!this.started) this.start();
+    // Native's periodic sender can observe a completed tool batch while the
+    // next inference request is in flight. During deterministic corpus replay
+    // there is no wall-clock network wait, so reproduce that boundary just
+    // before the next foreground response is folded into the counters.
+    if (event.type === "response_end" && event.kind === "foreground") {
+      const count = this.tracker.snapshot().assistantMessageCount;
+      if (this.signalAssistantCheckpoints.delete(count)) {
+        this.background(this.client.updateSignals(this.sessionId, this.tracker.snapshot()));
+      }
+    }
+    this.tracker.record(event);
+    this.traceProducer?.record(event);
+    if (event.type === "complete" || event.type === "limit") {
+      const outcome = event.type === "complete" ? "completed" : "error";
+      this.background(this.client.sendTurnDelta(this.sessionId, this.tracker.takeTurnDelta(outcome, requestId)));
+      this.exportTraceSpans(this.traceProducer?.drain() ?? []);
+    }
+  }
+
+  end(outcome: "cancelled" | "error", requestId?: string): void {
+    if (!this.started) this.start();
+    this.background(this.client.sendTurnDelta(this.sessionId, this.tracker.takeTurnDelta(outcome, requestId)));
+    this.exportTraceSpans(this.traceProducer?.interrupt() ?? []);
+  }
+
+  async sync(force = false): Promise<void> {
+    const snapshot = this.tracker.snapshot();
+    if (force && snapshot.totalTurns === 0 && snapshot.toolCallCount === 0) return;
+    await this.client.updateSignals(this.sessionId, snapshot);
+  }
+
+  async flush(): Promise<void> {
+    await Promise.allSettled([...this.pending]);
+  }
+
+  async shutdown(options: { finalSync?: boolean } = {}): Promise<void> {
+    if (this.stopped) return;
+    this.stopped = true;
+    await this.boot;
+    if (this.interval !== undefined) this.clearIntervalImpl(this.interval);
+    if (options.finalSync !== false) {
+      await Promise.race([this.sync(true).catch(() => undefined), timeout(2_000)]);
+    }
+    this.exportTraceSpans(this.traceProducer?.finish() ?? []);
+    await this.flush();
+  }
+
+  private background(operation: Promise<unknown>): void {
+    const safe = operation.catch(() => undefined).finally(() => this.pending.delete(safe));
+    this.pending.add(safe);
+  }
+
+  private exportTraceSpans(spans: readonly GrokBuildOtlpSpan[]): void {
+    if (spans.length === 0) return;
+    this.background(this.client.exportAgentTraceSpans(spans, this.traceMetadata));
+  }
+}
+
+interface TurnBaseline {
+  toolCalls: number;
+  toolFailures: number;
+  errors: number;
+  cancellations: number;
+  compactions: number;
+  assistantMessages: number;
+  longPauses: number;
+}
+
+function zeroTurnBaseline(): TurnBaseline {
+  return { toolCalls: 0, toolFailures: 0, errors: 0, cancellations: 0, compactions: 0, assistantMessages: 0, longPauses: 0 };
+}
+
+function itlFields(sorted: readonly number[], session: boolean): Record<string, number> {
+  if (sorted.length === 0) return {};
+  const prefix = session ? ["lastItlP50Ms", "lastItlP99Ms", "worstItlMaxMs", "avgItlMeanMs"] : ["itlP50Ms", "itlP99Ms", "itlMaxMs", "itlMeanMs"];
+  return {
+    [prefix[0]!]: sorted[Math.floor(sorted.length / 2)]!,
+    [prefix[1]!]: sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.99) - 1)]!,
+    [prefix[2]!]: sorted[sorted.length - 1]!,
+    [prefix[3]!]: floorMean(sorted),
+  };
+}
+
+function floorMean(values: readonly number[]): number {
+  return Math.floor(values.reduce((sum, value) => sum + value, 0) / values.length);
+}
+
+function objectValue(value: unknown): Record<string, unknown> | undefined {
+  return isObject(value) ? value : undefined;
+}
+
+function integerValue(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : undefined;
+}
+
+function timeout(ms: number): Promise<void> {
+  return new Promise((resolve) => globalThis.setTimeout(resolve, ms));
 }
 
 function jsonPost(value: unknown, signal?: AbortSignal): RequestInit {

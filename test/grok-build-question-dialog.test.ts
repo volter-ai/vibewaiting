@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   GROK_QUESTION_CANCEL_TEXT,
+  GROK_QUESTION_EMPTY_TEXT,
+  askGrokUserQuestions,
   formatGrokQuestionOutcome,
   parseQuestions,
   type GrokQuestion,
@@ -26,10 +28,18 @@ const questions: GrokQuestion[] = [
 
 describe("Grok Build structured question UI", () => {
   it("validates and normalizes native question input", () => {
-    expect(parseQuestions([{ question: "Pick", options: [{ label: "A", description: "First" }], multiSelect: true }]))
+    expect(parseQuestions([{ question: "Pick", options: [{ label: "A", description: "First" }], multiSelect: "yes" }]))
       .toEqual([{ question: "Pick", options: [{ label: "A", description: "First" }], multi_select: true }]);
-    expect(() => parseQuestions([])).toThrow("At least one question");
+    expect(parseQuestions([{ question: "Freeform", options: [] }])).toEqual([{ question: "Freeform", options: [] }]);
+    expect(() => parseQuestions([
+      { question: "Same", options: [] },
+      { question: "Same", options: [] },
+    ])).toThrow('Duplicate question text: "Same"');
     expect(() => parseQuestions([{ question: "Pick", options: [{ label: "A" }] }])).toThrow("label and description");
+  });
+
+  it("returns the native empty-batch result without opening a dialog", async () => {
+    await expect(askGrokUserQuestions([], new AbortController().signal)).resolves.toBe(GROK_QUESTION_EMPTY_TEXT);
   });
 
   it("matches native accepted formatting with previews, multiselect, and Other notes", () => {

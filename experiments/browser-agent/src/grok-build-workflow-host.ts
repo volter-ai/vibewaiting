@@ -5,6 +5,7 @@
 import type { GrokBuildWorkflowFileSystem } from "./grok-build-workflow-registry.js";
 import type { GrokBuildWorkflowHost, GrokBuildWorkflowHostEvent, GrokBuildWorkflowHostRequest } from "./grok-build-workflow-engine.js";
 import { validateGrokBuildContract, type GrokBuildContractVerdict } from "./grok-build-rhai-wasm.js";
+import { GrokBuildSubagentAdmission } from "./grok-build-subagent-admission.js";
 
 const MAX_AGENT_PROMPT_BYTES = 1024 * 1024;
 const MAX_AGENT_RUNS = 2_048;
@@ -40,6 +41,14 @@ export interface GrokBuildWorkflowBrowserHostOptions {
   allowForkContext?: boolean;
   validateContract?: (schema: unknown, finalText?: string) => GrokBuildContractVerdict;
   onEvent?: (event: GrokBuildWorkflowHostEvent) => void;
+  maxConcurrentAgents?: number;
+  onAgentLifecycle?: (event: {
+    executionId: string;
+    phase: "queued" | "started" | "finished";
+    active: number;
+    queued: number;
+    success?: boolean;
+  }) => void;
 }
 
 function payload(request: GrokBuildWorkflowHostRequest): Record<string, unknown> {
@@ -114,14 +123,20 @@ function truncateUtf8(value: string, maximum: number, marker: string): string {
 export class GrokBuildBrowserWorkflowHost implements GrokBuildWorkflowHost {
   private readonly workspacePath: string;
   private readonly agentRuns = new Map<string, number>();
+  private readonly admissions = new Map<string, GrokBuildSubagentAdmission>();
+  private readonly executionForkContext = new Map<string, boolean>();
+  private readonly maxConcurrentAgents: number;
 
   constructor(private readonly options: GrokBuildWorkflowBrowserHostOptions) {
     this.workspacePath = options.workspacePath ?? "/";
+    const configured = options.maxConcurrentAgents ?? 32;
+    const hardware = typeof navigator === "undefined" ? 32 : Math.max(2, navigator.hardwareConcurrency || 32);
+    this.maxConcurrentAgents = Math.max(1, Math.min(configured, hardware));
   }
 
   async call(request: GrokBuildWorkflowHostRequest, signal: AbortSignal): Promise<unknown> {
     switch (request.kind) {
-      case "spawn_agent": return this.spawnAgent(request, signal);
+      case "spawn_agent": return this.admitAgent(request, signal);
       case "render_template": return this.renderTemplate(request);
       case "write_scratch_file": return this.writeScratch(request);
       case "read_scratch_file": return this.readScratch(request);
@@ -134,12 +149,51 @@ export class GrokBuildBrowserWorkflowHost implements GrokBuildWorkflowHost {
     if (event.kind === "phase" || !event.replayed) this.options.onEvent?.(event);
   }
 
+  beginExecution(executionId: string, options: { allowForkContext: boolean }): void {
+    this.executionForkContext.set(executionId, options.allowForkContext);
+  }
+
+  endExecution(executionId: string): void {
+    this.admissions.delete(executionId);
+    this.agentRuns.delete(executionId);
+    this.executionForkContext.delete(executionId);
+  }
+
+  private async admitAgent(request: GrokBuildWorkflowHostRequest, signal: AbortSignal): Promise<unknown> {
+    const executionId = request.executionId ?? "__unscoped__";
+    let admission = this.admissions.get(executionId);
+    if (!admission) {
+      admission = new GrokBuildSubagentAdmission(this.maxConcurrentAgents);
+      this.admissions.set(executionId, admission);
+    }
+    if (admission.counts().running >= admission.maxConcurrent) {
+      const counts = admission.counts();
+      this.options.onAgentLifecycle?.({ executionId, phase: "queued", active: counts.running, queued: counts.queued + 1 });
+    }
+    return admission.run(signal, async () => {
+      const started = admission!.counts();
+      this.options.onAgentLifecycle?.({ executionId, phase: "started", active: started.running, queued: started.queued });
+      let success = false;
+      try {
+        const result = await this.spawnAgent(request, signal);
+        success = Boolean(result && typeof result === "object" && (result as { success?: unknown }).success === true);
+        return result;
+      } finally {
+        const counts = admission!.counts();
+        this.options.onAgentLifecycle?.({ executionId, phase: "finished", active: Math.max(0, counts.running - 1), queued: counts.queued, success });
+      }
+    });
+  }
+
   private async spawnAgent(request: GrokBuildWorkflowHostRequest, signal: AbortSignal): Promise<unknown> {
     const input = payload(request);
     const prompt = text(input.prompt, "agent prompt");
     if (!prompt.trim()) throw new Error("agent prompt must not be empty");
     if (utf8Length(prompt) > MAX_AGENT_PROMPT_BYTES) throw new Error(`agent prompt exceeds ${MAX_AGENT_PROMPT_BYTES} bytes`);
-    if (input.fork_context === true && !this.options.allowForkContext) throw new Error("fork_context is restricted to built-in workflows");
+    const allowForkContext = request.executionId
+      ? this.executionForkContext.get(request.executionId) === true
+      : this.options.allowForkContext === true;
+    if (input.fork_context === true && !allowForkContext) throw new Error("fork_context is restricted to built-in workflows");
     for (const field of ["label", "phase"] as const) {
       if (typeof input[field] === "string" && utf8Length(input[field] as string) > MAX_PHASE_BYTES) {
         throw new Error(`agent label and phase must each be at most ${MAX_PHASE_BYTES} bytes`);

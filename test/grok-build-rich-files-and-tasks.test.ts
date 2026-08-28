@@ -18,7 +18,8 @@ describe("Grok Build rich browser file reads", () => {
       arguments: JSON.stringify({ target_file: "/notes.txt", offset: "-3", limit: 1 }),
     }, signal);
     expect(result.output).toBe("3→image [image content will be provided separately] tail");
-    expect(result.images).toEqual([`data:image/png;base64,${payload}`]);
+    expect(result.deferredImages).toEqual([`data:image/png;base64,${payload}`]);
+    expect(result.images).toBeUndefined();
   });
 
   it("keeps small and word-internal data URIs but strips PDF attachments", async () => {
@@ -94,6 +95,23 @@ describe("Grok Build rich browser file reads", () => {
     expect(result.output).toBe("1→--- Slide 2 ---\n2→Two & more\n3→Kept\n4→\n5→Speaker Notes:\n6→Remember this\n7→\n8→--- Slide 10 ---\n9→Ten");
   });
 
+  it("fails malformed slide XML but ignores malformed optional notes like native", async () => {
+    const vfs = new VirtualFS();
+    const runtime = new GrokBuildBrowserRuntime({ vfs, async run() { return { stdout: "", stderr: "", exitCode: 0 }; } });
+    vfs.writeFileSync("/bad-slide.pptx", storedZip({
+      "ppt/slides/slide1.xml": '<p:sld><a:p><a:t>broken</a:p></p:sld>',
+    }));
+    const bad = await runtime.execute({ callId: "bad-slide", name: "read_file", arguments: '{"target_file":"/bad-slide.pptx"}' }, signal);
+    expect(bad.output).toContain("Failed to extract text from PPTX: Error parsing slide 1: mismatched closing tag");
+
+    vfs.writeFileSync("/bad-notes.pptx", storedZip({
+      "ppt/slides/slide1.xml": '<p:sld><a:p><a:t>kept</a:t></a:p></p:sld>',
+      "ppt/notesSlides/notesSlide1.xml": '<p:notes><a:p><a:t>ignored</a:p></p:notes>',
+    }));
+    await expect(runtime.execute({ callId: "bad-notes", name: "read_file", arguments: '{"target_file":"/bad-notes.pptx"}' }, signal))
+      .resolves.toEqual({ output: "1→--- Slide 1 ---\n2→kept" });
+  });
+
   it("extracts PDF text with native all-line anchors", async () => {
     const vfs = new VirtualFS();
     vfs.writeFileSync("/doc.pdf", makePdf("Hello PDF"));
@@ -116,9 +134,9 @@ describe("Grok Build browser background task control", () => {
 
     const polled = await runtime.execute({ callId: "poll", name: "get_command_or_subagent_output", arguments: JSON.stringify({ task_ids: [id] }) }, signal);
     expect(polled.output).toContain(`=== Task ${id} ===\nCommand: generate\nStatus: completed`);
-    expect(polled.output).toContain(`[Output truncated - 45000 bytes total. Use read_file on /tmp/${id}.log for full content]`);
+    expect(polled.output).toContain("... (output truncated) ...");
     expect(polled.output).toContain("[truncated - use read_file on output_file for full content]");
-    expect(vfs.readFileSync(`/tmp/${id}.log`, "utf8")).toBe(full);
+    expect(vfs.readFileSync("/tmp/grok-build-session/terminal/start.log", "utf8")).toBe(full);
   });
 
   it("deduplicates multi-task polls, includes missing rows, and reports kill outcomes", async () => {
@@ -193,6 +211,42 @@ describe("Grok Build browser background task control", () => {
       vi.useRealTimers();
     }
   });
+
+  it("keeps timeout status when AlmostNode resolves cooperatively after abort", async () => {
+    vi.useFakeTimers();
+    try {
+      const runtime = new GrokBuildBrowserRuntime({
+        vfs: new VirtualFS(),
+        async run(_command, options) {
+          return new Promise((resolve) => options?.signal?.addEventListener("abort", () => resolve({ stdout: "before timeout", stderr: "", exitCode: 0 }), { once: true }));
+        },
+      });
+      const started = await runtime.execute({ callId: "timeout-call", name: "run_terminal_command", arguments: '{"command":"watch","background":true,"timeout":10}' }, signal);
+      const id = /task ID: ([0-9a-f-]+)/u.exec(started.output)?.[1] ?? "";
+      await vi.advanceTimersByTimeAsync(10);
+      const output = await runtime.execute({ callId: "timeout-poll", name: "get_command_or_subagent_output", arguments: JSON.stringify({ task_id: id }) }, signal);
+      expect(output.output).toContain("Status: timed_out");
+      expect(output.output).toContain("before timeout");
+      expect(output.output).not.toContain("Exit Code:");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("queues the native background-completion wake reminder exactly once", async () => {
+    const runtime = new GrokBuildBrowserRuntime({
+      vfs: new VirtualFS(),
+      async run() { return { stdout: "done", stderr: "", exitCode: 0 }; },
+    });
+    const started = await runtime.execute({ callId: "wake-call", name: "run_terminal_command", arguments: '{"command":"build","background":true}' }, signal);
+    const id = /task ID: ([0-9a-f-]+)/u.exec(started.output)?.[1] ?? "";
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    expect(runtime.drainSystemReminders()).toEqual([
+      `Background task "${id}" completed (exit code: 0).\nCommand: build | Duration: 0.0s\nUse get_command_or_subagent_output("${id}") to see the full output.`,
+    ]);
+    expect(runtime.drainSystemReminders()).toEqual([]);
+  });
 });
 
 function storedZip(entries: Record<string, string>): Uint8Array {
@@ -203,14 +257,15 @@ function storedZip(entries: Record<string, string>): Uint8Array {
   for (const [name, text] of Object.entries(entries)) {
     const nameBytes = encoder.encode(name);
     const data = encoder.encode(text);
+    const checksum = testCrc32(data);
     const local = new Uint8Array(30 + nameBytes.length + data.length);
     put32(local, 0, 0x04034b50); put16(local, 4, 20); put16(local, 8, 0);
-    put32(local, 18, data.length); put32(local, 22, data.length); put16(local, 26, nameBytes.length);
+    put32(local, 14, checksum); put32(local, 18, data.length); put32(local, 22, data.length); put16(local, 26, nameBytes.length);
     local.set(nameBytes, 30); local.set(data, 30 + nameBytes.length);
     locals.push(local);
     const central = new Uint8Array(46 + nameBytes.length);
     put32(central, 0, 0x02014b50); put16(central, 4, 20); put16(central, 6, 20); put16(central, 10, 0);
-    put32(central, 20, data.length); put32(central, 24, data.length); put16(central, 28, nameBytes.length); put32(central, 42, localOffset);
+    put32(central, 16, checksum); put32(central, 20, data.length); put32(central, 24, data.length); put16(central, 28, nameBytes.length); put32(central, 42, localOffset);
     central.set(nameBytes, 46); centrals.push(central); localOffset += local.length;
   }
   const centralSize = centrals.reduce((sum, entry) => sum + entry.length, 0);
@@ -247,3 +302,11 @@ function concat(chunks: Uint8Array[]): Uint8Array {
 
 function put16(bytes: Uint8Array, offset: number, value: number): void { bytes[offset] = value & 0xff; bytes[offset + 1] = value >>> 8; }
 function put32(bytes: Uint8Array, offset: number, value: number): void { put16(bytes, offset, value); put16(bytes, offset + 2, value >>> 16); }
+function testCrc32(bytes: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (const value of bytes) {
+    crc ^= value;
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}

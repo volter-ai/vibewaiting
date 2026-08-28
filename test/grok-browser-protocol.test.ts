@@ -139,4 +139,35 @@ describe("browser Grok Build Responses protocol", () => {
       reasoning: "Think",
     });
   });
+
+  it("ports native output-only chunk latency and percentile rounding", async () => {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"type":"response.reasoning_summary_text.delta","delta":"Think"}\n\n'));
+        controller.enqueue(encoder.encode('data: {"type":"response.output_text.delta","delta":"A"}\n\n'));
+        controller.enqueue(encoder.encode('data: {"type":"response.output_text.delta","delta":"B"}\n\n'));
+        controller.enqueue(encoder.encode('data: {"type":"response.output_text.delta","delta":"C"}\n\n'));
+        controller.enqueue(encoder.encode('data: {"type":"response.completed","response":{"output":[]}}\n\n'));
+        controller.close();
+      },
+    });
+    const times = [110, 130, 160, 260];
+    const result = await collectGrokResponsesStream(stream, undefined, {
+      startedAt: 100,
+      now: () => times.shift()!,
+      attempts: 2,
+    });
+    expect(result.metrics).toEqual({
+      timeToFirstTokenMs: 10,
+      timeToLastByteMs: 160,
+      chunkCount: 3,
+      itlIntervalsMs: [20, 30],
+      itlP50Ms: 30,
+      itlP99Ms: 30,
+      itlMaxMs: 30,
+      itlMeanMs: 25,
+      attempts: 2,
+    });
+  });
 });

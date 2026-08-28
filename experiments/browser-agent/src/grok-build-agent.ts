@@ -7,6 +7,7 @@ import {
   functionCallOutput,
   responseToConversationInput,
   type GrokCompletedResponse,
+  type GrokInferenceLatencyStats,
   type GrokInputItem,
   type GrokResponseOutputItem,
   type GrokTool,
@@ -61,6 +62,8 @@ export interface GrokBuildToolResult {
   isError?: boolean;
   /** Data URLs embedded as input_image parts of the function_call_output. */
   images?: readonly string[];
+  /** Text-extracted images sent as native deferred reminder messages after the tool result. */
+  deferredImages?: readonly string[];
 }
 
 export interface GrokBuildToolRuntime {
@@ -71,6 +74,7 @@ export type GrokBuildEvent =
   | { type: "run_start"; task: string }
   | { type: "turn_start"; turn: number }
   | { type: "assistant"; turn: number; text: string; reasoning: string }
+  | { type: "response_end"; kind: string; response: GrokCompletedResponse; metrics: GrokInferenceLatencyStats }
   | { type: "tool_start"; turn: number; call: GrokBuildToolCall }
   | { type: "tool_end"; turn: number; call: GrokBuildToolCall; result: GrokBuildToolResult }
   | { type: "retry"; kind: string; attempt: number; maxRetries: number; delayMs: number; status?: number }
@@ -229,6 +233,14 @@ export class GrokBuildSession {
 
       const calls = responseToolCalls(response.response.output ?? []);
       if (calls.length === 0) {
+        const midSampleReminders = this.options.drainSystemReminders?.() ?? [];
+        if (midSampleReminders.length > 0) {
+          for (const reminder of midSampleReminders) {
+            this.input.push({ type: "message", role: "user", content: reminder });
+          }
+          this.checkpoint();
+          continue;
+        }
         this.options.onEvent?.({ type: "complete", turn, text: response.text });
         if (this.options.enableTurnSummary) {
           try {
@@ -260,6 +272,16 @@ export class GrokBuildSession {
               ...result.images.map((imageUrl) => ({ type: "input_image" as const, image_url: imageUrl, detail: "auto" as const })),
             ]
           : result.output));
+        for (const imageUrl of result.deferredImages ?? []) {
+          this.input.push({
+            type: "message",
+            role: "user",
+            content: [
+              { type: "input_text", text: "[Image extracted from tool result above]" },
+              { type: "input_image", image_url: imageUrl, detail: "auto" },
+            ],
+          });
+        }
         const reminder = this.options.getPostToolSystemReminder?.(call, result);
         if (reminder) this.input.push({ type: "message", role: "user", content: reminder });
         this.checkpoint();
@@ -419,6 +441,7 @@ export class GrokBuildSession {
       ...(this.options.retryJitter ? { jitter: this.options.retryJitter } : {}),
       onRetry: (retry) => this.options.onEvent?.({ type: "retry", kind, ...retry }),
     });
+    if (result.metrics) this.options.onEvent?.({ type: "response_end", kind, response: result.response, metrics: result.metrics });
     const tokens = responseTotalTokens(result.response);
     if (tokens === undefined) this.incompleteUsageResponses += 1;
     else this.totalTokensUsed = Math.min(Number.MAX_SAFE_INTEGER, this.totalTokensUsed + tokens);
@@ -576,7 +599,7 @@ export function formatRulesSection(
   return `${output}</rules>`;
 }
 
-async function requireGrokStream(response: Response, kind: string) {
+async function requireGrokStream(response: Response, kind: string, startedAt: number, attempts: number) {
   if (!response.ok) {
     const body = await response.text().catch(() => "");
     throw new GrokHttpError(
@@ -586,7 +609,7 @@ async function requireGrokStream(response: Response, kind: string) {
     );
   }
   if (!response.body) throw new Error(`Grok ${kind} request returned no Responses stream.`);
-  return collectGrokResponsesStream(response.body);
+  return collectGrokResponsesStream(response.body, undefined, { startedAt, attempts });
 }
 
 const DEFAULT_MAX_RETRIES = 15;
@@ -617,9 +640,10 @@ async function requestGrokStream(
   let retryCount = 0;
   for (;;) {
     signal.throwIfAborted();
+    const startedAt = globalThis.performance?.now() ?? Date.now();
     try {
       const response = await fetch(endpoint, { ...init, signal });
-      return await requireGrokStream(response, kind);
+      return await requireGrokStream(response, kind, startedAt, retryCount + 1);
     } catch (error) {
       signal.throwIfAborted();
       const decision = classifyGrokRetry(error, retryCount, hooks.jitter);

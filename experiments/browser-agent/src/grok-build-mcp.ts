@@ -17,12 +17,33 @@ const TOOL_NAME_PATTERN = /^[a-zA-Z_][a-zA-Z0-9_-]{0,63}$/u;
 
 export interface GrokBuildMcpServerConfig extends GrokBuildMcpHttpConfig {
   disabledTools?: readonly string[];
+  /** Stable native telemetry label; defaults to `unknown` when not resolved. */
+  serverScope?: string;
+}
+
+export interface GrokBuildMcpTraceSink {
+  recordConnection(event: {
+    status: "connected" | "failed";
+    serverName: string;
+    transportType: "http";
+    serverScope: string;
+    durationMs: number;
+    toolCount?: number;
+    errorType?: "auth" | "timeout" | "handshake_failed";
+  }): void;
+  startToolCall(event: { serverName: string; toolName: string }): {
+    end(outcome: { reconnectAttempted: boolean; authRetryAttempted: boolean }): void;
+  } | undefined;
 }
 
 export interface GrokBuildMcpRegistryOptions {
   enabledNativeToolNames?: ReadonlySet<string>;
   nativeToolCorrection?: boolean;
   maxOutputBytes?: number;
+  /** Optional and failure-isolated: omitting it creates no spans or telemetry work. */
+  traceSink?: GrokBuildMcpTraceSink;
+  /** Monotonic clock test seam used only for connection duration spans. */
+  now?: () => number;
 }
 
 export interface GrokBuildMcpServices {
@@ -58,11 +79,15 @@ export class GrokBuildMcpRegistry {
   private readonly enabledNativeToolNames: ReadonlySet<string>;
   private readonly nativeToolCorrection: boolean;
   private readonly maxOutputBytes: number;
+  private readonly traceSink: GrokBuildMcpTraceSink | undefined;
+  private readonly now: () => number;
 
   constructor(configs: readonly GrokBuildMcpServerConfig[], options: GrokBuildMcpRegistryOptions = {}) {
     this.enabledNativeToolNames = options.enabledNativeToolNames ?? new Set();
     this.nativeToolCorrection = options.nativeToolCorrection ?? true;
     this.maxOutputBytes = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
+    this.traceSink = options.traceSink;
+    this.now = options.now ?? (() => performance.now());
     if (!Number.isSafeInteger(this.maxOutputBytes) || this.maxOutputBytes <= 0) {
       throw new Error("MCP maxOutputBytes must be a positive integer.");
     }
@@ -180,15 +205,30 @@ export class GrokBuildMcpRegistry {
     if (!tool) throw new Error(`MCP tool '${qualifiedName}' not found`);
 
     let result: McpCallToolResult;
+    let reconnectAttempted = false;
+    let authRetryAttempted = false;
+    const trace = safelyStartToolTrace(this.traceSink, {
+      serverName: tool.serverName,
+      toolName: tool.toolName,
+    });
     try {
-      result = await tool.client.callTool(tool.toolName, input as McpJsonObject, signal);
-    } catch (error) {
-      if (!shouldReconnect(error)) throw error;
-      await this.refresh(split.server, signal);
-      const refreshed = state.tools.find((candidate) => candidate.qualifiedName === qualifiedName);
-      if (!refreshed) throw new Error(`MCP tool '${qualifiedName}' disappeared after reconnect.`);
-      result = await refreshed.client.callTool(refreshed.toolName, input as McpJsonObject, signal);
-      tool = refreshed;
+      try {
+        result = await tool.client.callTool(tool.toolName, input as McpJsonObject, signal, () => {
+          authRetryAttempted = true;
+        });
+      } catch (error) {
+        if (!shouldReconnect(error)) throw error;
+        reconnectAttempted = true;
+        await this.refresh(split.server, signal);
+        const refreshed = state.tools.find((candidate) => candidate.qualifiedName === qualifiedName);
+        if (!refreshed) throw new Error(`MCP tool '${qualifiedName}' disappeared after reconnect.`);
+        result = await refreshed.client.callTool(refreshed.toolName, input as McpJsonObject, signal, () => {
+          authRetryAttempted = true;
+        });
+        tool = refreshed;
+      }
+    } finally {
+      safelyEndToolTrace(trace, { reconnectAttempted, authRetryAttempted });
     }
     const logicalError = result.isError === true || result.is_error === true;
     const text = formatCallResult(result, tool.exposeImageBase64, logicalError);
@@ -203,16 +243,33 @@ export class GrokBuildMcpRegistry {
     if (state.pending) return state.pending;
     state.status = "connecting";
     state.error = undefined;
+    const startedAt = this.now();
     state.pending = (async () => {
       try {
         const initialized = await state.client.initialize(signal);
         state.instructions = initialized.instructions;
         await this.reloadTools(state, signal);
         state.status = "ready";
+        safelyRecordConnection(this.traceSink, {
+          status: "connected",
+          serverName: state.config.name,
+          transportType: "http",
+          serverScope: state.config.serverScope ?? "unknown",
+          durationMs: elapsedMilliseconds(startedAt, this.now()),
+          toolCount: state.tools.length,
+        });
       } catch (error) {
         state.status = "failed";
         state.error = error instanceof Error ? error.message : String(error);
         state.tools = [];
+        safelyRecordConnection(this.traceSink, {
+          status: "failed",
+          serverName: state.config.name,
+          transportType: "http",
+          serverScope: state.config.serverScope ?? "unknown",
+          durationMs: elapsedMilliseconds(startedAt, this.now()),
+          errorType: mcpConnectionErrorType(error),
+        });
         throw error;
       } finally {
         state.pending = undefined;
@@ -225,6 +282,39 @@ export class GrokBuildMcpRegistry {
     const listed = await state.client.listTools(signal);
     state.tools = listed.flatMap((tool) => indexTool(state, tool));
   }
+}
+
+function safelyStartToolTrace(
+  sink: GrokBuildMcpTraceSink | undefined,
+  event: { serverName: string; toolName: string },
+): ReturnType<GrokBuildMcpTraceSink["startToolCall"]> {
+  try { return sink?.startToolCall(event); } catch { return undefined; }
+}
+
+function safelyEndToolTrace(
+  trace: ReturnType<GrokBuildMcpTraceSink["startToolCall"]>,
+  outcome: { reconnectAttempted: boolean; authRetryAttempted: boolean },
+): void {
+  try { trace?.end(outcome); } catch { /* telemetry must not affect MCP dispatch */ }
+}
+
+function safelyRecordConnection(
+  sink: GrokBuildMcpTraceSink | undefined,
+  event: Parameters<GrokBuildMcpTraceSink["recordConnection"]>[0],
+): void {
+  try { sink?.recordConnection(event); } catch { /* telemetry must not affect MCP startup */ }
+}
+
+function elapsedMilliseconds(start: number, end: number): number {
+  return Math.max(0, Math.trunc(end - start));
+}
+
+function mcpConnectionErrorType(error: unknown): "auth" | "timeout" | "handshake_failed" {
+  if (error instanceof McpHttpError && [401, 403, 407].includes(error.status)) return "auth";
+  const detail = error instanceof Error ? `${error.name} ${error.message}` : String(error);
+  if (/timed out|timeout|abort/i.test(detail)) return "timeout";
+  if (/unauthorized|forbidden|authentication|authorization|oauth/i.test(detail)) return "auth";
+  return "handshake_failed";
 }
 
 export function createGrokBuildMcpServices(

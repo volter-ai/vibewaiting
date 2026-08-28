@@ -4,6 +4,7 @@ import {
   ProtocolViolation,
   assertProtocolMatch,
   canonicalRequest,
+  normalizeTelemetryMeasurements,
   ProtocolSymbolMatcher,
   splitLanePath,
 } from "../src/grok-conformance.js";
@@ -144,6 +145,27 @@ describe("Grok Build conformance protocol", () => {
       .toBe("/v1/sessions/<identifier:uuid:1>/signals");
     expect(browserState.normalizePath("/v1/sessions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/signals"))
       .toBe("/v1/sessions/<identifier:uuid:1>/signals");
+  });
+
+  it("symbolizes only replay-volatile telemetry measurements", () => {
+    const make = (duration: number, calls: number, requestId: string) => canonicalRequest(
+      "POST",
+      new URL("http://localhost/browser/v1/sessions/11111111-1111-4111-8111-111111111111/turn-deltas"),
+      "/v1/sessions/11111111-1111-4111-8111-111111111111/turn-deltas",
+      { "content-type": "application/json" },
+      Buffer.from(JSON.stringify({ turnDurationMs: duration, requestId, deltaToolCalls: calls })),
+      new LaneProtocolState(),
+    );
+    expect(() => assertProtocolMatch(make(52_500, 6, "native"), make(183, 6, "browser"))).not.toThrow();
+    expect(() => assertProtocolMatch(make(52_500, 6, "native"), make(183, 7, "browser"))).toThrow(ProtocolViolation);
+  });
+
+  it("normalizes recorded and live telemetry clocks with the same projection", () => {
+    const recorded = { sessionDurationSeconds: 0, avgResponseTimeMs: 0, totalTurns: 0 };
+    const live = { sessionDurationSeconds: 9, avgResponseTimeMs: 211, totalTurns: 0 };
+    normalizeTelemetryMeasurements("/v1/sessions/native/signals", recorded);
+    normalizeTelemetryMeasurements("/v1/sessions/browser/signals", live);
+    expect(recorded).toEqual(live);
   });
 
   it("fails on one request-body field difference", () => {

@@ -87,6 +87,20 @@ export interface GrokStreamResult {
   response: GrokCompletedResponse;
   text: string;
   reasoning: string;
+  metrics?: GrokInferenceLatencyStats;
+}
+
+/** Browser translation of xai-grok-sampler's InferenceLatencyStats. */
+export interface GrokInferenceLatencyStats {
+  timeToFirstTokenMs?: number;
+  timeToLastByteMs: number;
+  chunkCount: number;
+  itlIntervalsMs: number[];
+  itlP50Ms?: number;
+  itlP99Ms?: number;
+  itlMaxMs?: number;
+  itlMeanMs?: number;
+  attempts: number;
 }
 
 const SESSION_TITLE_SYSTEM_PROMPT = `You are tasked with generating the session title. The user is asking almost always software engineering related questions on their codebase.
@@ -324,13 +338,24 @@ export async function* parseGrokResponsesSse(
 export async function collectGrokResponsesStream(
   stream: ReadableStream<Uint8Array>,
   onEvent?: (event: GrokSseEvent) => void,
+  timing?: { startedAt: number; now?: () => number; attempts?: number },
 ): Promise<GrokStreamResult> {
   let text = "";
   let reasoning = "";
   let completed: GrokCompletedResponse | undefined;
+  const now = timing?.now ?? monotonicNow;
+  let firstTokenAt: number | undefined;
+  const contentChunkTimes: number[] = [];
   for await (const event of parseGrokResponsesSse(stream)) {
     onEvent?.(event);
-    if (event.type === "response.output_text.delta" && typeof event.delta === "string") text += event.delta;
+    if (event.type === "response.output_text.delta" && typeof event.delta === "string") {
+      text += event.delta;
+      if (event.delta.length > 0 && timing) {
+        const at = now();
+        firstTokenAt ??= at;
+        contentChunkTimes.push(at);
+      }
+    }
     if (event.type === "response.reasoning_summary_text.delta" && typeof event.delta === "string") {
       reasoning += event.delta;
     }
@@ -338,7 +363,42 @@ export async function collectGrokResponsesStream(
     if (event.type === "error") throw new Error(errorMessage(event));
   }
   if (!completed) throw new Error("Grok Responses stream ended without response.completed.");
-  return { response: completed, text, reasoning };
+  return {
+    response: completed,
+    text,
+    reasoning,
+    ...(timing ? { metrics: inferenceLatencyStats(timing.startedAt, firstTokenAt, contentChunkTimes, now(), timing.attempts ?? 1) } : {}),
+  };
+}
+
+function inferenceLatencyStats(
+  startedAt: number,
+  firstTokenAt: number | undefined,
+  contentChunkTimes: readonly number[],
+  endedAt: number,
+  attempts: number,
+): GrokInferenceLatencyStats {
+  const intervals = contentChunkTimes.slice(1).map((at, index) => Math.max(0, Math.floor(at - contentChunkTimes[index]!)));
+  const sorted = [...intervals].sort((left, right) => left - right);
+  const sum = sorted.reduce((total, value) => total + value, 0);
+  const p99Index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * 0.99) - 1));
+  return {
+    ...(firstTokenAt === undefined ? {} : { timeToFirstTokenMs: Math.max(0, Math.floor(firstTokenAt - startedAt)) }),
+    timeToLastByteMs: Math.max(0, Math.floor(endedAt - startedAt)),
+    chunkCount: Math.min(0xffff_ffff, contentChunkTimes.length),
+    itlIntervalsMs: intervals,
+    ...(sorted.length === 0 ? {} : {
+      itlP50Ms: sorted[Math.floor(sorted.length / 2)],
+      itlP99Ms: sorted[p99Index],
+      itlMaxMs: sorted[sorted.length - 1],
+      itlMeanMs: Math.floor(sum / sorted.length),
+    }),
+    attempts,
+  };
+}
+
+function monotonicNow(): number {
+  return globalThis.performance?.now() ?? Date.now();
 }
 
 function patchReasoningTextTypes(items: GrokInputItem[]): void {

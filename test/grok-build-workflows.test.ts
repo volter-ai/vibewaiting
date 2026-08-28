@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import deepResearchWorkflow from "../experiments/browser-agent/src/builtin-workflows/deep-research.rhai?raw";
 import { loadGrokBuildRhaiWasmSync } from "../experiments/browser-agent/src/grok-build-rhai-wasm.js";
+import { GrokBuildVfsWorkflowJournalStorage } from "../experiments/browser-agent/src/grok-build-workflow-persistence.js";
 import {
   GrokBuildBrowserWorkflowManager,
   GrokBuildBrowserWorkflowHost,
@@ -11,6 +12,7 @@ import {
   extractGrokBuildWorkflowMeta,
   formatGrokBuildWorkflowListing,
   mergeGrokBuildExtensionListings,
+  managedGrokBuildBundledWorkflowPaths,
   normalizeGrokBuildWorkflowInput,
   type GrokBuildRhaiContinuationModule,
   type GrokBuildWorkflowEngine,
@@ -64,6 +66,31 @@ describe("Grok Build browser workflows", () => {
     expect(registry.resolveByName("deep-research").meta.description).toBe("Published update");
     expect(() => registry.resolveByName("Unknown")).toThrow("invalid workflow name");
     expect(() => registry.resolveByName("missing")).toThrow("unknown workflow");
+  });
+
+  it("discovers project workflows from the git root and only privileges checksum-managed builtin updates", async () => {
+    const vfs = new VirtualFS();
+    vfs.mkdirSync("/repo/.git", { recursive: true });
+    write(vfs, "/repo/.grok/workflows/root-flow.rhai", workflow("root-flow"));
+    const published = workflow("deep-research", "Managed update");
+    write(vfs, "/.grok/bundled/workflows/deep-research.rhai", published);
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(published));
+    const checksum = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    write(vfs, "/.grok/bundled/manifest.json", JSON.stringify({
+      version: "test", checksums: { "workflows/deep-research.rhai": checksum },
+    }));
+    const managed = await managedGrokBuildBundledWorkflowPaths(vfs);
+    const registry = new GrokBuildWorkflowRegistry(vfs, {
+      workspacePath: "/repo/packages/app",
+      builtins: [{ script: workflow("deep-research", "Compiled fallback") }],
+      managedBundledWorkflowPaths: managed,
+    });
+    expect(registry.projectWorkflowPath).toBe("/repo/.grok/workflows");
+    expect(registry.resolveByName("root-flow").source).toBe("project");
+    expect(registry.resolveByName("deep-research").source).toBe("builtin");
+
+    vfs.writeFileSync("/.grok/bundled/workflows/deep-research.rhai", workflow("deep-research", "Locally edited"));
+    expect(await managedGrokBuildBundledWorkflowPaths(vfs)).toEqual([]);
   });
 
   it("formats and merges the native model-facing workflow listing", () => {
@@ -316,8 +343,126 @@ describe("Grok Build browser workflows", () => {
     expect(calls).toHaveLength(2);
     expect(calls[1]).toMatchObject({
       args: { immutable: true },
-      options: { executionId: first.run_id, resume: true, agentBudget: 9 },
+      options: { executionId: first.run_id, resume: true, agentBudget: 99 },
     });
     await expect(manager.run({ resume_from_run_id: first.run_id }, signal)).rejects.toThrow("cannot be resumed");
+  });
+
+  it("durably resumes the real Rhai journal after a browser-manager reload", async () => {
+    const wasmFile = readFileSync(new URL("../experiments/browser-agent/src/generated-rhai-wasm/grok_workflow_rhai_wasm_bg.wasm", import.meta.url));
+    const wasmBytes = wasmFile.buffer.slice(wasmFile.byteOffset, wasmFile.byteOffset + wasmFile.byteLength) as ArrayBuffer;
+    const module = loadGrokBuildRhaiWasmSync(wasmBytes);
+    const vfs = new VirtualFS();
+    const source = `let meta = #{ name: "durable", description: "durable" };
+      let result = agent("inspect");
+      await_user("back_off", "continue later");
+      complete(result.output);`;
+    write(vfs, "/.grok/bundled/workflows/durable.rhai", source);
+    const host: GrokBuildWorkflowHost = { call: vi.fn(async () => ({ output: "journal replayed" })) };
+    const storage = new GrokBuildVfsWorkflowJournalStorage(vfs);
+    const firstManager = new GrokBuildBrowserWorkflowManager(vfs, new GrokBuildJournalRhaiEngine(module, host, storage));
+    const launched = JSON.parse(await firstManager.run({ name: "durable" }, new AbortController().signal)) as { run_id: string; script_path: string };
+    await vi.waitFor(() => expect(firstManager.outcome(launched.run_id)).toMatchObject({ status: "paused", kind: "back_off" }));
+    expect(vfs.readFileSync(launched.script_path.replace("script.rhai", "journal.jsonl"), "utf8")).toContain('"kind":"spawn_agent"');
+
+    // The editable projection is deliberately not the immutable revision used by resume.
+    vfs.writeFileSync(launched.script_path, workflow("edited"));
+    const secondManager = new GrokBuildBrowserWorkflowManager(vfs, new GrokBuildJournalRhaiEngine(module, host, new GrokBuildVfsWorkflowJournalStorage(vfs)));
+    await secondManager.run({ resume_from_run_id: launched.run_id }, new AbortController().signal);
+    await vi.waitFor(() => expect(secondManager.outcome(launched.run_id)).toEqual({ status: "completed", result: "journal replayed" }));
+    expect(host.call).toHaveBeenCalledTimes(1);
+  });
+
+  it("marks an active persisted run interrupted on reload and never makes it resumable", async () => {
+    const vfs = new VirtualFS();
+    write(vfs, "/.grok/bundled/workflows/active.rhai", workflow("active"));
+    const never = new Promise<never>(() => {});
+    const engine: GrokBuildWorkflowEngine = { async validate() { throw new Error("unused"); }, async run() { return never; } };
+    const first = new GrokBuildBrowserWorkflowManager(vfs, engine);
+    const launched = JSON.parse(await first.run({ name: "active" }, new AbortController().signal)) as { run_id: string };
+    const restored = new GrokBuildBrowserWorkflowManager(vfs, engine);
+    expect(restored.outcome(launched.run_id)).toMatchObject({ status: "failed", error: expect.stringContaining("reload interrupted") });
+    await expect(restored.run({ resume_from_run_id: launched.run_id }, new AbortController().signal)).rejects.toThrow("not resumable");
+    const manifest = JSON.parse(vfs.readFileSync(`/.grok/workflow-runs/${launched.run_id}/state.json`, "utf8")) as { state: { status: string } };
+    expect(manifest.state.status).toBe("interrupted");
+    const restoredAgain = new GrokBuildBrowserWorkflowManager(vfs, engine);
+    await expect(restoredAgain.run({ resume_from_run_id: launched.run_id }, new AbortController().signal)).rejects.toThrow("not resumable");
+  });
+
+  it("keeps cancelled runs resumable and ignores their late stale outcome", async () => {
+    const vfs = new VirtualFS();
+    write(vfs, "/.grok/bundled/workflows/cancellable.rhai", workflow("cancellable"));
+    let finish!: (value: { status: "completed"; result: unknown }) => void;
+    const pending = new Promise<{ status: "completed"; result: unknown }>((resolve) => { finish = resolve; });
+    const firstEngine: GrokBuildWorkflowEngine = { async validate() { throw new Error("unused"); }, async run() { return pending; } };
+    const first = new GrokBuildBrowserWorkflowManager(vfs, firstEngine);
+    const launched = JSON.parse(await first.run({ name: "cancellable" }, new AbortController().signal)) as { run_id: string };
+    expect(first.stop(launched.run_id)).toBe(true);
+    finish({ status: "completed", result: "late" });
+    await pending;
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    expect(first.outcome(launched.run_id)).toEqual({ status: "cancelled" });
+
+    const secondEngine: GrokBuildWorkflowEngine = {
+      async validate() { throw new Error("unused"); },
+      async run(_script, _args, options) {
+        expect(options.resume).toBe(true);
+        return { status: "completed", result: "fresh" };
+      },
+    };
+    const second = new GrokBuildBrowserWorkflowManager(vfs, secondEngine);
+    await second.run({ resume_from_run_id: launched.run_id }, new AbortController().signal);
+    await vi.waitFor(() => expect(second.outcome(launched.run_id)).toEqual({ status: "completed", result: "fresh" }));
+  });
+
+  it("queues agent panels independently per workflow execution and tears down episode state", async () => {
+    const releases: Array<() => void> = [];
+    const started: string[] = [];
+    const lifecycle = vi.fn();
+    const host = new GrokBuildBrowserWorkflowHost({
+      vfs: new VirtualFS(), maxConcurrentAgents: 1, onAgentLifecycle: lifecycle,
+      async spawnSubagent(_input, _signal, id) {
+        started.push(id);
+        await new Promise<void>((resolve) => releases.push(resolve));
+        return { childSessionId: id, success: true, output: id, totalTokensUsed: 1, durationMs: 1 };
+      },
+    });
+    const request = (executionId: string, seq: number) => host.call({
+      executionId, seq, kind: "spawn_agent", requestHash: `${executionId}-${seq}`, payload: { prompt: "work" },
+    }, new AbortController().signal);
+    const first = request("wf_one", 0);
+    const queued = request("wf_one", 1);
+    const independent = request("wf_two", 0);
+    await vi.waitFor(() => expect(started).toHaveLength(2));
+    expect(lifecycle).toHaveBeenCalledWith(expect.objectContaining({ executionId: "wf_one", phase: "queued" }));
+    releases.shift()!();
+    await vi.waitFor(() => expect(started).toHaveLength(3));
+    releases.shift()!();
+    releases.shift()!();
+    await Promise.all([first, queued, independent]);
+    host.endExecution("wf_one");
+    host.endExecution("wf_two");
+  });
+
+  it("scopes built-in fork-context privilege to one workflow execution", async () => {
+    const spawned = vi.fn(async (_input: Record<string, unknown>, _signal: AbortSignal, id: string): Promise<GrokBuildWorkflowSubagentResult> => ({
+      childSessionId: id, success: true, output: "ok", totalTokensUsed: 1, durationMs: 1,
+    }));
+    const host = new GrokBuildBrowserWorkflowHost({ vfs: new VirtualFS(), spawnSubagent: spawned });
+    host.beginExecution("wf_builtin", { allowForkContext: true });
+    host.beginExecution("wf_file", { allowForkContext: false });
+    await expect(host.call({
+      executionId: "wf_builtin", seq: 0, kind: "spawn_agent", requestHash: "builtin",
+      payload: { prompt: "inspect", fork_context: true },
+    }, new AbortController().signal)).resolves.toMatchObject({ success: true });
+    await expect(host.call({
+      executionId: "wf_file", seq: 0, kind: "spawn_agent", requestHash: "file",
+      payload: { prompt: "inspect", fork_context: true },
+    }, new AbortController().signal)).rejects.toThrow("restricted to built-in workflows");
+    host.endExecution("wf_builtin");
+    await expect(host.call({
+      executionId: "wf_builtin", seq: 1, kind: "spawn_agent", requestHash: "retired",
+      payload: { prompt: "inspect", fork_context: true },
+    }, new AbortController().signal)).rejects.toThrow("restricted to built-in workflows");
   });
 });

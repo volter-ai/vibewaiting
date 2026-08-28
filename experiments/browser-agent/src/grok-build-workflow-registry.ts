@@ -4,7 +4,10 @@
 //
 // Browser-VFS port of Grok Build's workflow registry and model-facing listing.
 
-import type { GrokBuildBundleFileSystem } from "./grok-build-bundle.js";
+import {
+  readGrokBuildBundleManifest,
+  type GrokBuildBundleFileSystem,
+} from "./grok-build-bundle.js";
 
 const MAX_WORKFLOW_SOURCE_BYTES = 1024 * 1024;
 const MAX_WORKFLOW_NAME_BYTES = 64;
@@ -48,6 +51,8 @@ export interface GrokBuildWorkflowRegistryOptions {
   workspacePath?: string;
   userWorkflowPath?: string;
   builtins?: readonly GrokBuildBuiltinWorkflow[];
+  /** Bundle paths whose current bytes match the signed manifest checksum. */
+  managedBundledWorkflowPaths?: readonly string[];
 }
 
 type RhaiLiteral = null | boolean | number | string | RhaiLiteral[] | { [key: string]: RhaiLiteral };
@@ -261,6 +266,34 @@ function isFile(vfs: GrokBuildWorkflowFileSystem, path: string): boolean {
   try { return vfs.existsSync(path) && vfs.statSync(path).isFile(); } catch { return false; }
 }
 
+function projectRoot(vfs: GrokBuildWorkflowFileSystem, cwd: string): string {
+  let candidate = normalizeGrokBuildWorkflowPath(cwd);
+  while (true) {
+    if (vfs.existsSync(`${candidate === "/" ? "" : candidate}/.git`)) return candidate;
+    if (candidate === "/") return normalizeGrokBuildWorkflowPath(cwd);
+    candidate = candidate.slice(0, candidate.lastIndexOf("/")) || "/";
+  }
+}
+
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const data = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+/** Mirrors native `is_managed_bundle_file`: manifest membership alone is not privilege. */
+export async function managedGrokBuildBundledWorkflowPaths(vfs: GrokBuildWorkflowFileSystem): Promise<string[]> {
+  const manifest = readGrokBuildBundleManifest(vfs);
+  if (!manifest) return [];
+  const paths = await Promise.all(Object.entries(manifest.checksums).flatMap(([relative, checksum]) => {
+    if (!/^workflows\/[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.rhai$/u.test(relative)) return [];
+    const path = `/.grok/bundled/${relative}`;
+    if (!isFile(vfs, path)) return [];
+    return [sha256Hex(vfs.readFileSync(path)).then((actual) => actual === checksum.toLowerCase() ? path : undefined)];
+  }));
+  return paths.filter((path): path is string => path !== undefined);
+}
+
 function readDefinition(
   vfs: GrokBuildWorkflowFileSystem,
   path: string,
@@ -302,22 +335,30 @@ export class GrokBuildWorkflowRegistry {
   private readonly entries: GrokBuildWorkflowDefinition[];
   private readonly duplicateNames = new Map<string, string>();
   readonly workspacePath: string;
-  readonly userWorkflowPath: string | undefined;
+  readonly projectWorkflowPath: string;
+  readonly userWorkflowPath: string;
 
   constructor(private readonly vfs: GrokBuildWorkflowFileSystem, options: GrokBuildWorkflowRegistryOptions = {}) {
     this.workspacePath = normalizeGrokBuildWorkflowPath(options.workspacePath ?? "/");
-    this.userWorkflowPath = options.userWorkflowPath ? normalizeGrokBuildWorkflowPath(options.userWorkflowPath) : undefined;
+    this.projectWorkflowPath = normalizeGrokBuildWorkflowPath(".grok/workflows", projectRoot(vfs, this.workspacePath));
+    this.userWorkflowPath = normalizeGrokBuildWorkflowPath(options.userWorkflowPath ?? "/.grok/workflows");
     this.entries = [];
-    this.addScope(scanDirectory(vfs, "/.grok/bundled/workflows", "bundled"), "bundled");
     const builtins = (options.builtins ?? []).flatMap((builtin) => {
       try {
         const meta = extractGrokBuildWorkflowMeta(builtin.script);
         return [{ meta, script: builtin.script, source: "builtin" as const, ...(builtin.path ? { path: builtin.path } : {}) }];
       } catch { return []; }
     });
+    const compiledNames = new Set(builtins.map((entry) => entry.meta.name));
+    const managedPaths = new Set((options.managedBundledWorkflowPaths ?? []).map((path) => normalizeGrokBuildWorkflowPath(path)));
+    const bundled = scanDirectory(vfs, "/.grok/bundled/workflows", "bundled");
+    bundled.entries = bundled.entries.map((entry) => compiledNames.has(entry.meta.name) && entry.path && managedPaths.has(entry.path)
+      ? { ...entry, source: "builtin" }
+      : entry);
+    this.addScope(bundled, "bundled");
     this.merge(builtins);
-    this.addScope(scanDirectory(vfs, normalizeGrokBuildWorkflowPath(".grok/workflows", this.workspacePath), "project"), "project");
-    if (this.userWorkflowPath && this.userWorkflowPath !== normalizeGrokBuildWorkflowPath(".grok/workflows", this.workspacePath)) {
+    this.addScope(scanDirectory(vfs, this.projectWorkflowPath, "project"), "project");
+    if (this.userWorkflowPath !== this.projectWorkflowPath) {
       this.addScope(scanDirectory(vfs, this.userWorkflowPath, "user"), "user");
     }
   }
@@ -340,7 +381,7 @@ export class GrokBuildWorkflowRegistry {
 
   resolveByPath(path: string, runRoot = "/.grok/workflow-runs"): GrokBuildWorkflowDefinition {
     const candidate = normalizeGrokBuildWorkflowPath(path, this.workspacePath);
-    const roots = [this.workspacePath, runRoot, ...(this.userWorkflowPath ? [this.userWorkflowPath] : [])].map((root) => normalizeGrokBuildWorkflowPath(root));
+    const roots = [projectRoot(this.vfs, this.workspacePath), runRoot, this.userWorkflowPath].map((root) => normalizeGrokBuildWorkflowPath(root));
     if (!roots.some((root) => under(candidate, root))) {
       throw new Error(`workflow path is not trusted: ${candidate} (outside the project, grok home, and session workflow runs)`);
     }

@@ -38,7 +38,7 @@ import {
 import { GrokBuildWebFetchClient } from "./grok-build-web-fetch.js";
 import { GrokBuildMediaClient } from "./grok-build-media.js";
 import {
-  fetchGrokBuildStartupProfile,
+  GrokBuildStartupCoordinator,
   type GrokBuildStartupProfile,
 } from "./grok-build-bootstrap.js";
 import { syncGrokBuildBundle } from "./grok-build-bundle.js";
@@ -47,23 +47,23 @@ import {
   formatGrokBuildSkillListing,
 } from "./grok-build-skills.js";
 import { GrokBuildSkillManager } from "./grok-build-skill-manager.js";
-import {
-  discoverGrokBuildAgents,
-  renderGrokBuildAgentPrompt,
-} from "./grok-build-agents.js";
 import { askGrokUserQuestions } from "./grok-build-question-dialog.js";
 import { approveGrokPlanEntry, approveGrokPlanExit } from "./grok-build-plan-dialog.js";
 import { createGrokBuildMcpServices } from "./grok-build-mcp.js";
-import { GrokBuildSubagentAdmission } from "./grok-build-subagent-admission.js";
 import {
   createGrokBuildBrowserWorkflowManager,
   GrokBuildBrowserWorkflowHost,
   mergeGrokBuildExtensionListings,
   type GrokBuildBrowserWorkflowManager,
   type GrokBuildWorkflowOutcome,
-  type GrokBuildWorkflowSubagentResult,
 } from "./grok-build-workflows.js";
 import deepResearchWorkflow from "./builtin-workflows/deep-research.rhai?raw";
+import { GrokBuildTelemetryLifecycle } from "./grok-build-telemetry.js";
+import { createGrokBuildMcpOtlpTraceSink, GrokBuildBrowserOtlpTracer } from "./grok-build-otlp-trace.js";
+import { GrokBuildBrowserSubagentRunner } from "./grok-build-subagent-runner.js";
+import {
+  GrokBuildLivePromptCoordinator,
+} from "./grok-build-prompt-queue.js";
 
 const VIRTUAL_PORT = 4176;
 const THREE_VERSION = "0.180.0";
@@ -95,11 +95,12 @@ const container = createContainer();
 const server = new ViteDevServer(container.vfs, { port: VIRTUAL_PORT, root: "/" });
 const bridge = container.serverBridge;
 const webFetchClient = new GrokBuildWebFetchClient(container.vfs);
+const rootOtlpTracer = new GrokBuildBrowserOtlpTracer();
 const mcpRuntime = createGrokBuildMcpServices([], {
   enabledNativeToolNames: new Set<string>(GROK_BUILD_TOOLS.flatMap((tool): string[] =>
     tool.type === "function" && "name" in tool && typeof tool.name === "string" ? [tool.name] : [tool.type])),
+  traceSink: createGrokBuildMcpOtlpTraceSink(rootOtlpTracer),
 });
-const subagentAdmission = new GrokBuildSubagentAdmission();
 let workflowManager: GrokBuildBrowserWorkflowManager | undefined;
 const workflowCompletionReminders: string[] = [];
 
@@ -109,22 +110,28 @@ let iframeLoadCount = 0;
 let runtimeReady = false;
 let authReady = false;
 const conformanceOrigin = new URLSearchParams(location.search).get("conformance");
+const startupCoordinator = new GrokBuildStartupCoordinator({
+  tools: GROK_BUILD_TOOLS,
+  ...(conformanceOrigin ? {
+    storage: { getItem: () => null, setItem: () => undefined, removeItem: () => undefined },
+  } : {}),
+});
 let conformanceProfile: GrokConformanceDriverProfile | undefined;
 let scheduleProjectSave: (() => void) | undefined;
 let restoredAgentSession: import("./grok-build-agent.js").GrokBuildSessionSnapshot | undefined;
 let agentSession: GrokBuildSession | undefined;
+let telemetryLifecycle: GrokBuildTelemetryLifecycle | undefined;
 let liveStartupProfile: GrokBuildStartupProfile | undefined;
 let bundleSync: Promise<void> | undefined;
 const mediaClient = new GrokBuildMediaClient(container.vfs, (input, init) => fetch(input, init), () => agentSession?.snapshot().sessionId);
 let conformanceRuntime: GrokConformanceToolRuntime | undefined;
 let recordedRuntime: GrokRecordedToolRuntime | undefined;
+let rootBrowserRuntime: GrokBuildBrowserRuntime | undefined;
+let rootSkillManager: GrokBuildSkillManager | undefined;
 const agentIdleWaiters = new Set<() => void>();
+const livePrompts = new GrokBuildLivePromptCoordinator();
 let scheduledForegroundQueue: Promise<void> = Promise.resolve();
-const subagentSessions = new Map<string, {
-  type: string;
-  snapshot: import("./grok-build-agent.js").GrokBuildSessionSnapshot;
-  status: "running" | "completed";
-}>();
+let subagentRunner: GrokBuildBrowserSubagentRunner;
 const configuredSandboxOrigin = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env?.VITE_SANDBOX_ORIGIN;
 const sandboxOrigin = resolveSandboxOrigin(location, configuredSandboxOrigin);
 const sandboxNonce = crypto.randomUUID();
@@ -159,11 +166,14 @@ if (import.meta.hot) import.meta.hot.accept();
 `;
 
 function syncRunAvailability(): void {
-  runButton.disabled = Boolean(activeRun) || !runtimeReady || (!conformanceOrigin && !authReady);
+  runButton.disabled = Boolean(activeRun && conformanceOrigin) || !runtimeReady || (!conformanceOrigin && !authReady);
+  runButton.textContent = activeRun && !conformanceOrigin ? "Send now" : "Run browser agent";
+  runButton.title = activeRun && !conformanceOrigin ? "Send now; Shift-click to queue as the next turn" : "";
 }
 
-function startBundleSync(): void {
-  if (conformanceOrigin || bundleSync || !authReady) return;
+function startBundleSync(): Promise<void> {
+  if (bundleSync) return bundleSync;
+  if (!conformanceOrigin && !authReady) return Promise.resolve();
   bundleSync = syncGrokBuildBundle(container.vfs)
     .then((result) => {
       if (result.updated) {
@@ -175,6 +185,7 @@ function startBundleSync(): void {
       console.warn("Grok Build bundle sync failed", error);
     })
     .finally(() => { bundleSync = undefined; });
+  return bundleSync;
 }
 
 function currentCompactionReminder(runtime: GrokBuildBrowserRuntime): string | undefined {
@@ -220,6 +231,7 @@ const authController = new BrowserGrokAuthController({
   },
   onAuthenticated() {
     if (runtimeReady) startBundleSync();
+    void startupCoordinator.refreshAfterAuth().then((profile) => { liveStartupProfile = profile; }).catch(() => undefined);
   },
 });
 
@@ -291,6 +303,7 @@ function eventItem(kind: string, label: string, body: string, output?: string): 
 }
 
 function eventHandler(event: GrokBuildEvent): void {
+  telemetryLifecycle?.record(event, agentSession?.snapshot().requestId);
   switch (event.type) {
     case "run_start":
       eventItem("", "Task", event.task);
@@ -301,6 +314,8 @@ function eventHandler(event: GrokBuildEvent): void {
       break;
     case "assistant":
       eventItem("", `Grok · turn ${event.turn}`, event.text || event.reasoning || "Calling tools.");
+      break;
+    case "response_end":
       break;
     case "tool_start":
       agentState.textContent = `Running ${event.call.name}`;
@@ -360,6 +375,15 @@ const browserServices: GrokBuildBrowserServices = {
   approvePlanModeExit: (plan, signal) => approveGrokPlanExit(plan, signal),
   onMonitorEvent: (reminder) => eventItem("command", "Monitor event", reminder),
 };
+subagentRunner = new GrokBuildBrowserSubagentRunner({
+  container,
+  services: browserServices,
+  endpoint: () => relayEndpoint.value.trim() || "/api/grok/responses",
+  startupModel: () => liveStartupProfile?.model,
+  rootRuntime: () => rootBrowserRuntime,
+  rootSkillManager: () => rootSkillManager,
+  parentSnapshot: () => agentSession?.snapshot(),
+});
 
 function runScheduledForeground(prompt: string, signal: AbortSignal): Promise<string> {
   let resolveResult!: (value: string) => void;
@@ -417,145 +441,55 @@ function notifyAgentIdle(): void {
   agentIdleWaiters.clear();
 }
 
-async function runBrowserSubagent(input: Record<string, unknown>, signal: AbortSignal, subagentId: string): Promise<string> {
-  const result = await subagentAdmission.run(signal, () => runAdmittedBrowserSubagent(input, signal, subagentId));
-  if (!result.success) throw new Error(result.error ?? result.output);
-  return result.output || `Subagent ${subagentId} completed.`;
-}
-
-async function runAdmittedBrowserSubagent(
+function runBrowserSubagent(
   input: Record<string, unknown>,
   signal: AbortSignal,
   subagentId: string,
-): Promise<GrokBuildWorkflowSubagentResult> {
-  const type = typeof input.subagent_type === "string" ? input.subagent_type : "general-purpose";
-  const definition = discoverGrokBuildAgents(container.vfs).find((candidate) => candidate.name === type);
-  if (!definition) throw new Error(`Unknown subagent type: ${type}`);
-  const requestedModel = typeof input.model === "string" ? input.model : undefined;
-  if (requestedModel && !["grok-4.5", "grok-4.6"].includes(requestedModel)) {
-    throw new Error(`Unsupported subagent model: ${requestedModel}`);
-  }
-  const resumeFrom = typeof input.resume_from === "string" ? input.resume_from : undefined;
-  const prior = resumeFrom ? subagentSessions.get(resumeFrom) : undefined;
-  if (resumeFrom && !prior) throw new Error(`Unknown completed subagent: ${resumeFrom}`);
-  if (prior?.status !== undefined && prior.status !== "completed") throw new Error(`Subagent ${resumeFrom} is still running.`);
-  if (prior && prior.type !== type) throw new Error(`Resumed subagent type must remain ${prior.type}.`);
-  const cwd = typeof input.cwd === "string" ? normalizeBrowserPath(input.cwd) : "/";
-  if (!container.vfs.existsSync(cwd) || !container.vfs.statSync(cwd).isDirectory()) throw new Error(`Subagent cwd is not a directory: ${cwd}`);
-  if (input.isolation === "worktree") throw new Error("Browser projects do not have a host Git worktree; use isolation=none.");
-
-  const allowed = subagentToolNames(type, typeof input.capability_mode === "string" ? input.capability_mode : undefined);
-  const tools = GROK_BUILD_TOOLS.filter((tool) => tool.type === "function"
-    ? typeof tool.name === "string" && allowed.has(tool.name)
-    : allowed.has(tool.type));
-  const runtime = new GrokBuildBrowserRuntime(container, cwd, browserServices, allowed);
-  const skillManager = new GrokBuildSkillManager(container.vfs, cwd);
-  const startupSkillReminder = startupExtensionReminder(skillManager);
-  let latest = prior?.snapshot;
-  const session = new GrokBuildSession({
-    endpoint: relayEndpoint.value.trim() || "/api/grok/responses",
-    environment: {
-      ...(definition.promptMode === "full" && renderGrokBuildAgentPrompt(definition)
-        ? { systemPrompt: renderGrokBuildAgentPrompt(definition)! }
-        : {}),
-      os: `${navigator.platform || "Browser"} (browser sandbox subagent)`,
-      shell: "/bin/sh",
-      workspacePath: cwd,
-      today: new Date().toISOString().slice(0, 10),
-      ...(startupSkillReminder ? { startupReminders: [startupSkillReminder] } : {}),
-    },
-    runtime,
-    tools,
-    sessionId: subagentId,
-    enableSessionTitle: false,
-    getPostToolSystemReminder: (call, result) => skillManager.afterToolCall(call, result),
-    drainSystemReminders: () => runtime.drainSystemReminders(),
-    ...(requestedModel ?? liveStartupProfile?.model ? { model: requestedModel ?? liveStartupProfile!.model } : {}),
-    ...(prior ? { restore: prior.snapshot } : {}),
-    onCheckpoint(snapshot) {
-      latest = snapshot;
-      subagentSessions.set(subagentId, { type, snapshot, status: "running" });
-    },
-  });
-  if (!latest) latest = session.snapshot();
-  subagentSessions.set(subagentId, { type, snapshot: latest, status: "running" });
-  const started = performance.now();
-  try {
-    const result = await session.run(String(input.prompt ?? ""), signal);
-    subagentSessions.set(subagentId, { type, snapshot: session.snapshot(), status: "completed" });
-    const usage = session.usage();
-    const output = result.text || `Subagent ${subagentId} completed.`;
-    return {
-      childSessionId: subagentId,
-      success: result.status === "complete",
-      output,
-      ...(result.status === "limit" ? { error: "Subagent reached its maximum turn limit." } : {}),
-      totalTokensUsed: usage.totalTokensUsed,
-      durationMs: Math.max(0, Math.round(performance.now() - started)),
-      ...(usage.incomplete ? { usageIncomplete: true } : {}),
-    };
-  } catch (error) {
-    if (signal.aborted) throw error;
-    subagentSessions.set(subagentId, { type, snapshot: session.snapshot(), status: "completed" });
-    const usage = session.usage();
-    const message = error instanceof Error ? error.message : String(error);
-    return {
-      childSessionId: subagentId,
-      success: false,
-      output: message,
-      error: message,
-      totalTokensUsed: usage.totalTokensUsed,
-      durationMs: Math.max(0, Math.round(performance.now() - started)),
-      ...(usage.incomplete ? { usageIncomplete: true } : {}),
-    };
-  }
+  parentRuntime = rootBrowserRuntime,
+): Promise<string> {
+  return subagentRunner.run(input, signal, subagentId, parentRuntime);
 }
-
-function subagentToolNames(type: string, capabilityMode?: string): Set<string> {
-  const read = ["read_file", "list_dir", "grep", "search_tool", "use_tool"];
-  const write = ["search_replace", "write", "todo_write"];
-  const execute = ["run_terminal_command", "monitor", "get_command_or_subagent_output", "kill_command_or_subagent"];
-  if (capabilityMode === "read-only") return new Set(read);
-  if (capabilityMode === "read-write") return new Set([...read, ...write]);
-  if (capabilityMode === "execute") return new Set([...read, ...execute]);
-  if (capabilityMode === "all") return new Set([...read, ...write, ...execute, "web_search", "x_search"]);
-  if (type === "explore") return new Set(["read_file", "list_dir", "grep"]);
-  if (type === "plan") return new Set(["read_file", "list_dir", "grep", "todo_write", "web_search"]);
-  return new Set([...read, ...write, ...execute, "web_search", "x_search"]);
-}
-
-function normalizeBrowserPath(path: string): string {
-  const parts: string[] = [];
-  for (const part of path.replaceAll("\\", "/").split("/")) {
-    if (!part || part === ".") continue;
-    if (part === "..") parts.pop(); else parts.push(part);
+async function runAgent(mode: "send-now" | "queue" = "send-now"): Promise<void> {
+  const submitted = taskInput.value.trim();
+  if (activeRun) {
+    if (conformanceOrigin || !submitted) return;
+    if (mode === "queue") {
+      livePrompts.queue(submitted);
+      eventItem("", "Follow-up queued", submitted);
+    } else {
+      livePrompts.sendNow(submitted);
+      eventItem("", "Message sent", submitted);
+    }
+    return;
   }
-  return `/${parts.join("/")}`;
-}
-
-async function runAgent(): Promise<void> {
-  if (activeRun) return;
   trajectory.replaceChildren();
   turnCount.textContent = "0";
   agentState.textContent = "Starting";
-  runButton.disabled = true;
   resetButton.disabled = true;
   stopButton.disabled = false;
   activeRun = new AbortController();
+  syncRunAvailability();
 
   try {
     const profile = conformanceProfile ?? (conformanceOrigin ? await loadConformanceProfile(conformanceOrigin) : undefined);
     if (profile) taskInput.value = profile.task;
-    if (!profile && !liveStartupProfile) {
+    if (!liveStartupProfile) {
       agentState.textContent = "Loading native Grok settings";
-      liveStartupProfile = await fetchGrokBuildStartupProfile({
-        tools: GROK_BUILD_TOOLS,
-        signal: activeRun.signal,
-      });
+      liveStartupProfile = await startupCoordinator.snapshot();
     }
+    if (profile?.bundleArchiveRequests) await startBundleSync();
     if (!agentSession) {
+      const sessionId = restoredAgentSession?.sessionId ?? crypto.randomUUID();
+      telemetryLifecycle = new GrokBuildTelemetryLifecycle(sessionId, {
+        model: liveStartupProfile?.model ?? "grok-4.6",
+        ...(profile?.periodicSignalAssistantCounts ? { signalAssistantCheckpoints: profile.periodicSignalAssistantCounts } : {}),
+        ...(!profile ? { trace: { responsesEndpoint: relayEndpoint.value.trim() || "/api/grok/responses", tracer: rootOtlpTracer } } : {}),
+      });
+      telemetryLifecycle.start();
       const browserRuntime = new GrokBuildBrowserRuntime(container, "/", browserServices);
+      rootBrowserRuntime = browserRuntime;
       const skillManager = new GrokBuildSkillManager(container.vfs, "/");
+      rootSkillManager = skillManager;
       const startupSkillReminder = startupExtensionReminder(skillManager);
       conformanceRuntime = profile?.initialFiles?.length || profile?.fixture === "three-pong-starter-v1"
         ? new GrokConformanceToolRuntime(browserRuntime, profile.toolResults, profile.nativeWorkspacePath, "/")
@@ -578,6 +512,7 @@ async function runAgent(): Promise<void> {
           }],
         },
         runtime: conformanceRuntime ?? recordedRuntime ?? browserRuntime,
+        sessionId,
         tools: profile?.tools ?? liveStartupProfile?.tools ?? GROK_BUILD_TOOLS,
         maxTurns: profile?.foregroundRequests ?? 100,
         ...(!profile && liveStartupProfile ? {
@@ -594,7 +529,11 @@ async function runAgent(): Promise<void> {
         ...(profile?.compactionSystemReminder ? { compactionSystemReminder: profile.compactionSystemReminder } : {}),
         ...(!profile ? { getCompactionSystemReminder: () => currentCompactionReminder(browserRuntime) } : {}),
         ...(!profile ? { getPostToolSystemReminder: (call, result) => skillManager.afterToolCall(call, result) } : {}),
-        ...(!profile ? { drainSystemReminders: () => [...browserRuntime.drainSystemReminders(), ...workflowCompletionReminders.splice(0)] } : {}),
+        ...(!profile ? { drainSystemReminders: () => [
+          ...browserRuntime.drainSystemReminders(),
+          ...workflowCompletionReminders.splice(0),
+          ...livePrompts.drainInterjections().map((entry) => entry.text),
+        ] } : {}),
         persistCompactionSegment(segment) {
           const directory = segment.location;
           container.vfs.mkdirSync(directory, { recursive: true });
@@ -627,18 +566,34 @@ async function runAgent(): Promise<void> {
           },
         } : {}),
       });
+      if (!profile && restoredAgentSession) {
+        const resumedPlanTurn = await browserRuntime.resumePendingPlanApproval(activeRun.signal);
+        if (resumedPlanTurn) agentSession.enqueueSystemReminder(resumedPlanTurn);
+      }
     }
-    const result = await agentSession.run(taskInput.value.trim(), activeRun.signal);
+    await telemetryLifecycle?.ready();
+    let nextPrompt = submitted;
+    let result: Awaited<ReturnType<GrokBuildSession["run"]>>;
+    while (true) {
+      result = await agentSession.run(nextPrompt, activeRun.signal);
+      if (profile || !livePrompts.hasQueued()) break;
+      nextPrompt = livePrompts.takeQueuedPrefix() ?? "";
+      if (!nextPrompt) break;
+    }
     if (result.status === "limit") agentState.textContent = "Stopped";
     if (profile) {
+      await telemetryLifecycle?.flush();
+      await telemetryLifecycle?.sync(true).catch(() => undefined);
+      await telemetryLifecycle?.shutdown({ finalSync: false });
       (conformanceRuntime ?? recordedRuntime)?.assertComplete();
-      const assertion = await fetch(`${conformanceOrigin}/__conformance__/assert-model-complete`);
+      const assertion = await fetch(`${conformanceOrigin}/__conformance__/assert-control-plane-complete`);
       if (!assertion.ok) throw new Error(await assertion.text());
       const sideCalls = profile.modelRequests - profile.foregroundRequests;
       eventItem("", "Conformance", `${profile.modelRequests} native model requests matched with zero drift (${profile.foregroundRequests} foreground + ${sideCalls} side calls); ${profile.toolResults.length} browser tool outputs matched native output exactly.`);
     }
   } catch (error) {
     const aborted = activeRun.signal.aborted;
+    telemetryLifecycle?.end(aborted ? "cancelled" : "error", agentSession?.snapshot().requestId);
     agentState.textContent = aborted ? "Stopped" : "Failed";
     eventItem("error", aborted ? "Stopped" : "Run failed", aborted ? "The run was cancelled." : error instanceof Error ? error.message : String(error));
   } finally {
@@ -658,10 +613,16 @@ async function loadConformanceProfile(origin: string): Promise<GrokConformanceDr
 
 async function resetProject(): Promise<void> {
   activeRun?.abort();
+  await telemetryLifecycle?.shutdown();
+  telemetryLifecycle = undefined;
   agentSession = undefined;
+  void startupCoordinator.refreshForNewSession().then((profile) => { liveStartupProfile = profile; }).catch(() => undefined);
   restoredAgentSession = undefined;
   conformanceRuntime = undefined;
   recordedRuntime = undefined;
+  rootBrowserRuntime = undefined;
+  rootSkillManager = undefined;
+  livePrompts.clear();
   clearVirtualFileSystem(container.vfs, "/", ["/.grok/bundled"]);
   seedProject(conformanceProfile);
   if (!conformanceOrigin) {
@@ -675,9 +636,10 @@ async function resetProject(): Promise<void> {
   renderedRevision.textContent = "Starter project restored";
 }
 
-runButton.addEventListener("click", () => void runAgent());
+runButton.addEventListener("click", (event) => void runAgent(event.shiftKey ? "queue" : "send-now"));
 stopButton.addEventListener("click", () => activeRun?.abort());
 resetButton.addEventListener("click", () => void resetProject());
+addEventListener("pagehide", () => { void telemetryLifecycle?.shutdown(); });
 connectGrokButton.addEventListener("click", () => void authController.startDeviceAuth());
 disconnectGrokButton.addEventListener("click", () => void authController.disconnect());
 
@@ -708,7 +670,7 @@ async function start(): Promise<void> {
     const workflowHost = new GrokBuildBrowserWorkflowHost({
       vfs: container.vfs,
       workspacePath: "/",
-      spawnSubagent: (input, signal, id) => runAdmittedBrowserSubagent(input, signal, id),
+      spawnSubagent: (input, signal, id) => subagentRunner.runAdmitted(input, signal, id),
       runCommand: (command, options) => container.run(command, options),
     });
     workflowManager = await createGrokBuildBrowserWorkflowManager(container.vfs, workflowHost, {
@@ -759,7 +721,7 @@ async function start(): Promise<void> {
     runtimeStatus.textContent = "Browser sandbox ready";
     runtimeDot.classList.add("ready");
     runtimeReady = true;
-    startBundleSync();
+    if (!conformanceOrigin) void startBundleSync();
     syncRunAvailability();
     resetButton.disabled = false;
     if (conformanceOrigin) {

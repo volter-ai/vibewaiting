@@ -161,6 +161,74 @@ describe("Grok Build published bundle source port", () => {
     expect(unauthorized).toHaveBeenCalledTimes(1);
   });
 
+  it("falls back on any non-success archive status but not on transport or successful-decode failure", async () => {
+    const legacyPayload = JSON.stringify({ version: "legacy", personas: {}, roles: {}, agents: {} });
+    const unavailable = vi.fn()
+      .mockResolvedValueOnce(new Response("unavailable", { status: 503 }))
+      .mockResolvedValueOnce(new Response(legacyPayload));
+    await expect(syncGrokBuildBundle(new VirtualFS(), { fetch: unavailable, force: true }))
+      .resolves.toMatchObject({ source: "legacy", manifest: { version: "legacy" } });
+
+    const malformedArchive = vi.fn().mockResolvedValue(new Response("not a gzip archive", { status: 200 }));
+    await expect(syncGrokBuildBundle(new VirtualFS(), { fetch: malformedArchive, force: true })).rejects.toThrow();
+    expect(malformedArchive).toHaveBeenCalledTimes(1);
+
+    const transportFailure = vi.fn().mockRejectedValue(new TypeError("network down"));
+    await expect(syncGrokBuildBundle(new VirtualFS(), { fetch: transportFailure, force: true })).rejects.toThrow("network down");
+    expect(transportFailure).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses native manifest parse/freshness semantics and sanitizes only before cache mutation", async () => {
+    const vfs = new VirtualFS();
+    vfs.mkdirSync("/.grok/bundled", { recursive: true });
+    vfs.writeFileSync(GROK_BUILD_BUNDLE_MANIFEST, JSON.stringify({
+      version: "v1",
+      checksums: { "agents/good.md": "abc", "../outside": "unsafe-but-parseable" },
+    }));
+    expect(readGrokBuildBundleManifest(vfs)?.checksums).toHaveProperty("../outside");
+    expect(isGrokBuildBundleCacheFresh(vfs)).toBe(true);
+
+    vfs.writeFileSync(GROK_BUILD_BUNDLE_MANIFEST, JSON.stringify({ version: "v1", checksums: { "agents/good.md": 1 } }));
+    expect(readGrokBuildBundleManifest(vfs)).toBeUndefined();
+    expect(isGrokBuildBundleCacheFresh(vfs)).toBe(false);
+
+    vfs.writeFileSync(GROK_BUILD_BUNDLE_MANIFEST, "{broken");
+    expect(isGrokBuildBundleCacheFresh(vfs)).toBe(false);
+    await expect(extractGrokBuildBundleArchive(vfs, archive([
+      ["bundle.json", JSON.stringify({ version: "v2" })],
+      ["subagents/agents/new.md", "new"],
+    ]))).rejects.toThrow(`failed to parse ${GROK_BUILD_BUNDLE_MANIFEST}`);
+    expect(vfs.existsSync("/.grok/bundled/agents/new.md")).toBe(false);
+  });
+
+  it("validates every legacy bundle name before writing any entry", async () => {
+    const vfs = new VirtualFS();
+    await expect(writeGrokBuildLegacyBundle(vfs, {
+      version: "v1",
+      personas: { valid: "valid", "../invalid": "invalid" },
+      roles: {},
+      agents: {},
+      skills: {},
+    })).rejects.toThrow("invalid bundled personas name");
+    expect(vfs.existsSync("/.grok/bundled/personas/valid.toml")).toBe(false);
+  });
+
+  it("streams archive entries so a later tar failure preserves native partial-write ordering", async () => {
+    const vfs = new VirtualFS();
+    const corrupt = tarEntry("subagents/agents/bad.md", "bad");
+    corrupt[0] = corrupt[0]! ^ 1; // invalidate the already-computed header checksum
+    const bytes = gzipSync(Buffer.concat([
+      tarEntry("bundle.json", JSON.stringify({ version: "v1" })),
+      tarEntry("subagents/agents/first.md", "first"),
+      corrupt,
+      Buffer.alloc(1024),
+    ]));
+
+    await expect(extractGrokBuildBundleArchive(vfs, bytes)).rejects.toThrow("invalid tar checksum");
+    expect(vfs.readFileSync("/.grok/bundled/agents/first.md", "utf8")).toBe("first");
+    expect(vfs.existsSync(GROK_BUILD_BUNDLE_MANIFEST)).toBe(false);
+  });
+
   it("accepts only the native cache path shapes", () => {
     expect(sanitizeGrokBuildBundlePath("agents/reviewer.md")).toBe("agents/reviewer.md");
     expect(sanitizeGrokBuildBundlePath("skills/game-dev/references/guide.md")).toBe("skills/game-dev/references/guide.md");

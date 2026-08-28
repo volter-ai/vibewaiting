@@ -12,6 +12,8 @@ export interface GrokConformanceDriverProfile {
   toolResults: Array<{ callId: string; output: string }>;
   foregroundRequests: number;
   modelRequests: number;
+  bundleArchiveRequests?: number;
+  periodicSignalAssistantCounts?: number[];
   turnSummaryRequests?: number;
   reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
   nativeWorkspacePath: string;
@@ -113,11 +115,26 @@ function remapPathText(value: string, nativeRoot: string, browserRoot: string): 
 function validateEffect(call: GrokBuildToolCall, actual: string, expected: string, nativeRoot: string, browserRoot: string): void {
   const normalizedExpected = remapPathText(expected, nativeRoot, browserRoot);
   const [comparableActual, comparableExpected] = isLongListingCall(call)
-    ? [normalizeLongListing(actual), normalizeLongListing(normalizedExpected)]
+    ? normalizeLongListingPair(actual, normalizedExpected)
     : [actual, normalizedExpected];
   if (comparableActual !== comparableExpected) {
     throw new Error(`${call.name} output drifted from native Grok Build.\nExpected:\n${normalizedExpected}\nActual:\n${actual}`);
   }
+}
+
+function normalizeLongListingPair(actual: string, expected: string): [string, string] {
+  const comparableExpected = normalizeLongListing(expected);
+  let comparableActual = normalizeLongListing(actual);
+  // Browser-only bundled extensions live in the port's private VFS namespace.
+  // Native stores the same bundle outside the workspace, so it cannot appear
+  // in a workspace `ls -la`. Exclude that mount point from the conformance
+  // observation only when the native output proves no project .grok exists.
+  if (!comparableExpected.includes("name=.grok>")) {
+    comparableActual = comparableActual.split("\n")
+      .filter((line) => line !== "<ls-entry type=d size=directory name=.grok>")
+      .join("\n");
+  }
+  return [comparableActual, comparableExpected];
 }
 
 function isLongListingCall(call: GrokBuildToolCall): boolean {

@@ -6,6 +6,12 @@
 
 import type { GrokBuildBundleFileSystem } from "./grok-build-bundle.js";
 
+/** Browser VFS contract. `realpathSync` is optional because Almostnode has no symlink nodes. */
+export type GrokBuildSkillFileSystem = GrokBuildBundleFileSystem & {
+  readdirSync(path: string): string[];
+  realpathSync?(path: string): string;
+};
+
 const MAX_NAME_BYTES = 64;
 const MAX_DESCRIPTION_BYTES = 1024;
 const MAX_BODY_PEEK_BYTES = 2048;
@@ -32,6 +38,16 @@ export interface GrokBuildSkillInfo {
   disableModelInvocation: boolean;
   enabled: boolean;
   paths?: string[];
+}
+
+/** The two native compatibility cells which govern vendor skill discovery. */
+export interface GrokBuildSkillDiscoveryOptions {
+  cursorSkills?: boolean;
+  claudeSkills?: boolean;
+  workingDirectory?: string;
+  gitRootPath?: string;
+  /** Native `[skills].paths`: a direct SKILL.md file or recursively walked directory. */
+  paths?: readonly string[];
 }
 
 function utf8Length(value: string): number {
@@ -108,6 +124,45 @@ function parseTopLevelFrontmatter(source: string): Record<string, string> {
   return values;
 }
 
+function splitPathPatterns(value: string): string[] {
+  value = unquoteScalar(value).trim();
+  const patterns: string[] = [];
+  let current = "";
+  let braceDepth = 0;
+  for (const character of value) {
+    if (character === "{") braceDepth += 1;
+    else if (character === "}") braceDepth -= 1;
+    if (character === "," && braceDepth <= 0) {
+      if (current.trim()) patterns.push(current.trim());
+      current = "";
+    } else current += character;
+  }
+  if (current.trim()) patterns.push(current.trim());
+  return patterns;
+}
+
+function splitInlineYamlSequence(value: string): string[] {
+  const items: string[] = [];
+  let current = "";
+  let quote: "\"" | "'" | undefined;
+  let braceDepth = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index]!;
+    if (character === "\\" && quote === "\"") { current += character + (value[++index] ?? ""); continue; }
+    if ((character === "\"" || character === "'") && (!quote || quote === character)) quote = quote ? undefined : character;
+    if (!quote && character === "{") braceDepth += 1;
+    else if (!quote && character === "}") braceDepth -= 1;
+    if (!quote && braceDepth <= 0 && character === ",") { items.push(current); current = ""; } else current += character;
+  }
+  items.push(current);
+  return items;
+}
+
+function normalizePathPatterns(patterns: string[]): string[] | undefined {
+  const cleaned = patterns.map((pattern) => pattern.endsWith("/**") ? pattern.slice(0, -3) : pattern).filter(Boolean);
+  return !cleaned.length || cleaned.every((pattern) => pattern === "**") ? undefined : cleaned;
+}
+
 function parsePathsFrontmatter(content: string): string[] | undefined {
   const trimmed = content.trimStart();
   if (!trimmed.startsWith("---")) return;
@@ -121,25 +176,20 @@ function parsePathsFrontmatter(content: string): string[] | undefined {
     if (!match) continue;
     const inline = match[1]?.trim() ?? "";
     if (inline.startsWith("[") && inline.endsWith("]")) {
-      for (const value of inline.slice(1, -1).split(",")) {
-        const path = unquoteScalar(value).trim();
-        if (path) paths.push(path);
-      }
+      paths.push(...splitInlineYamlSequence(inline.slice(1, -1)).flatMap(splitPathPatterns));
     } else if (inline) {
-      const path = unquoteScalar(inline).trim();
-      if (path) paths.push(path);
+      paths.push(...splitPathPatterns(inline));
     } else {
       while (index + 1 < lines.length) {
         const item = /^\s+-\s+(.+)$/u.exec(lines[index + 1] ?? "");
         if (!item) break;
-        const path = unquoteScalar(item[1] ?? "").trim();
-        if (path) paths.push(path);
+        paths.push(...splitPathPatterns(item[1] ?? ""));
         index += 1;
       }
     }
     break;
   }
-  return paths.length ? paths : undefined;
+  return normalizePathPatterns(paths);
 }
 
 export function parseGrokBuildFrontmatterDocument(content: string): { frontmatter?: Record<string, string>; body: string } {
@@ -216,7 +266,7 @@ function isFile(vfs: GrokBuildBundleFileSystem, path: string): boolean {
   try { return vfs.existsSync(path) && vfs.statSync(path).isFile(); } catch { return false; }
 }
 
-function walkSkillFiles(vfs: GrokBuildBundleFileSystem & { readdirSync(path: string): string[] }, directory: string, depth = 0): string[] {
+function walkSkillFiles(vfs: GrokBuildSkillFileSystem, directory: string, depth = 0): string[] {
   if (depth > MAX_SKILL_WALK_DEPTH || !isDirectory(vfs, directory)) return [];
   const output: string[] = [];
   for (const name of [...vfs.readdirSync(directory)].sort()) {
@@ -229,7 +279,18 @@ function walkSkillFiles(vfs: GrokBuildBundleFileSystem & { readdirSync(path: str
   return output;
 }
 
-function commandFiles(vfs: GrokBuildBundleFileSystem & { readdirSync(path: string): string[] }, directory: string): string[] {
+/** Native `find_skill_md_paths`: include a directory's own SKILL.md, then walk children. */
+function skillFilesFromDirectPath(
+  vfs: GrokBuildSkillFileSystem,
+  path: string,
+): string[] {
+  if (isFile(vfs, path)) return path.endsWith("/SKILL.md") ? [path] : [];
+  if (!isDirectory(vfs, path)) return [];
+  const ownSkill = `${path}/SKILL.md`;
+  return [...(isFile(vfs, ownSkill) ? [ownSkill] : []), ...walkSkillFiles(vfs, path)];
+}
+
+function commandFiles(vfs: GrokBuildSkillFileSystem, directory: string): string[] {
   if (!isDirectory(vfs, directory)) return [];
   return [...vfs.readdirSync(directory)].sort().flatMap((name) => {
     const path = `${directory}/${name}`;
@@ -238,15 +299,37 @@ function commandFiles(vfs: GrokBuildBundleFileSystem & { readdirSync(path: strin
 }
 
 export function discoverGrokBuildSkills(
-  vfs: GrokBuildBundleFileSystem & { readdirSync(path: string): string[] },
+  vfs: GrokBuildSkillFileSystem,
+  options: GrokBuildSkillDiscoveryOptions = {},
 ): GrokBuildSkillInfo[] {
-  const sources: Array<{ config: string; scope: GrokBuildSkillInfo["scope"] }> = [
-    { config: "/.grok", scope: "local" },
-    { config: "/.agents", scope: "local" },
-    { config: "/.claude", scope: "local" },
-    { config: "/.cursor", scope: "local" },
-    { config: "/.grok/bundled", scope: "bundled" },
+  const configNames = [
+    ".grok", ".agents",
+    ...(options.claudeSkills === false ? [] : [".claude"]),
+    ...(options.cursorSkills === false ? [] : [".cursor"]),
   ];
+  const normalize = (path: string): string => `/${path.replaceAll("\\", "/").split("/").filter((part) => part && part !== ".").reduce<string[]>((parts, part) => {
+    if (part === "..") parts.pop(); else parts.push(part);
+    return parts;
+  }, []).join("/")}`;
+  const sourceConfigs: string[] = [];
+  const addConfigRoots = (directory: string): void => {
+    for (const name of configNames) sourceConfigs.push(directory === "/" ? `/${name}` : `${directory}/${name}`);
+  };
+  if (options.workingDirectory) {
+    let directory = normalize(options.workingDirectory);
+    const gitRoot = options.gitRootPath ? normalize(options.gitRootPath) : undefined;
+    addConfigRoots(directory);
+    if (gitRoot && (directory === gitRoot || directory.startsWith(`${gitRoot}/`))) {
+      while (directory !== gitRoot) {
+        directory = directory.slice(0, directory.lastIndexOf("/")) || "/";
+        addConfigRoots(directory);
+      }
+    }
+  }
+  // Browser VFS home. Dedup also covers cwd `/`.
+  addConfigRoots("/");
+  const sources: Array<{ config: string; scope: GrokBuildSkillInfo["scope"] }> = [...new Set(sourceConfigs)]
+    .map((config) => ({ config, scope: "local" }));
   const result: GrokBuildSkillInfo[] = [];
   const seenPaths = new Set<string>();
   const seenNames = new Set<string>();
@@ -256,22 +339,59 @@ export function discoverGrokBuildSkills(
       ...commandFiles(vfs, `${source.config}/commands`),
     ];
     for (const path of paths) {
-      if (seenPaths.has(path)) continue;
-      seenPaths.add(path);
+      const canonical = canonicalGrokBuildSkillPath(vfs, path);
+      if (seenPaths.has(canonical)) continue;
+      seenPaths.add(canonical);
       const skill = parseSkill(path, vfs.readFileSync(path, "utf8"), source.scope);
       if (!skill || seenNames.has(skill.name)) continue;
       seenNames.add(skill.name);
       result.push(skill);
     }
   }
+  // Native config paths are below the standard local/user roots but above the
+  // published bundle. A directory may itself be a skill.
+  for (const configured of options.paths ?? []) {
+    const configuredPath = configured.startsWith("/") ? normalize(configured) : normalize(`${options.workingDirectory ?? "/"}/${configured}`);
+    for (const path of skillFilesFromDirectPath(vfs, configuredPath)) {
+      const canonical = canonicalGrokBuildSkillPath(vfs, path);
+      if (seenPaths.has(canonical)) continue;
+      seenPaths.add(canonical);
+      const skill = parseSkill(path, vfs.readFileSync(path, "utf8"), "local");
+      if (!skill || seenNames.has(skill.name)) continue;
+      seenNames.add(skill.name);
+      result.push(skill);
+    }
+  }
+  for (const path of walkSkillFiles(vfs, "/.grok/bundled/skills")) {
+    const canonical = canonicalGrokBuildSkillPath(vfs, path);
+    if (seenPaths.has(canonical)) continue;
+    seenPaths.add(canonical);
+    const skill = parseSkill(path, vfs.readFileSync(path, "utf8"), "bundled");
+    if (!skill || seenNames.has(skill.name)) continue;
+    seenNames.add(skill.name);
+    result.push(skill);
+  }
   return result;
+}
+
+/** Parse a just-read/written SKILL.md under one of the four native config roots. */
+export function discoverGrokBuildSkillAtPath(
+  vfs: GrokBuildSkillFileSystem,
+  path: string,
+): GrokBuildSkillInfo | undefined {
+  const normalized = path.replaceAll("\\", "/");
+  if (!normalized.endsWith("/SKILL.md") || !isFile(vfs, normalized)) return;
+  const supported = [".grok", ".agents", ".claude", ".cursor"].some((config) =>
+    normalized.includes(`/${config}/skills/`));
+  return supported ? parseSkill(normalized, vfs.readFileSync(normalized, "utf8"), "local") : undefined;
 }
 
 /** Discover skill config directories encountered while walking from a touched path to the workspace root. */
 export function discoverGrokBuildSkillsNearPath(
-  vfs: GrokBuildBundleFileSystem & { readdirSync(path: string): string[] },
+  vfs: GrokBuildSkillFileSystem,
   touchedPath: string,
   workspacePath = "/",
+  options: Pick<GrokBuildSkillDiscoveryOptions, "claudeSkills" | "gitRootPath"> & { checkedDirectories?: Set<string> } = {},
 ): GrokBuildSkillInfo[] {
   const normalize = (value: string): string => {
     const parts: string[] = [];
@@ -282,14 +402,27 @@ export function discoverGrokBuildSkillsNearPath(
     return `/${parts.join("/")}`;
   };
   const root = normalize(workspacePath);
+  const rootCanonical = canonicalGrokBuildSkillPath(vfs, root);
   let directory = normalize(touchedPath);
-  if (isFile(vfs, directory) || /\.[^/]+$/u.test(directory.split("/").at(-1) ?? "")) {
+  if (!isDirectory(vfs, directory)) {
     directory = directory.slice(0, directory.lastIndexOf("/")) || "/";
   }
   const result: GrokBuildSkillInfo[] = [];
   const seen = new Set<string>();
-  while (directory === root || directory.startsWith(`${root === "/" ? "" : root}/`)) {
-    for (const configName of [".grok", ".agents", ".claude", ".cursor"]) {
+  const gitRoot = options.gitRootPath ? canonicalGrokBuildSkillPath(vfs, normalize(options.gitRootPath)) : undefined;
+  // Native startup already scans cwd, so the dynamic walk stops before it.
+  while (true) {
+    const directoryCanonical = canonicalGrokBuildSkillPath(vfs, directory);
+    if (directoryCanonical === rootCanonical) break;
+    if (rootCanonical !== "/" && directoryCanonical !== rootCanonical && !directoryCanonical.startsWith(`${rootCanonical}/`)) break;
+    if (gitRoot && directoryCanonical !== gitRoot && !directoryCanonical.startsWith(`${gitRoot}/`)) break;
+    if (options.checkedDirectories?.has(directoryCanonical)) {
+      directory = directory.slice(0, directory.lastIndexOf("/")) || "/";
+      continue;
+    }
+    options.checkedDirectories?.add(directoryCanonical);
+    const configNames = [".grok", ".agents", ...(options.claudeSkills === false ? [] : [".claude"])] as const;
+    for (const configName of configNames) {
       const config = directory === "/" ? `/${configName}` : `${directory}/${configName}`;
       const paths = [...walkSkillFiles(vfs, `${config}/skills`), ...commandFiles(vfs, `${config}/commands`)];
       for (const path of paths) {
@@ -299,10 +432,15 @@ export function discoverGrokBuildSkillsNearPath(
         if (skill) result.push(skill);
       }
     }
-    if (directory === root || directory === "/") break;
+    if (directory === "/") break;
     directory = directory.slice(0, directory.lastIndexOf("/")) || "/";
   }
   return result;
+}
+
+/** Native uses `dunce::canonicalize`; VFSes without symlinks fall back to the lexical path. */
+export function canonicalGrokBuildSkillPath(vfs: GrokBuildSkillFileSystem, path: string): string {
+  try { return vfs.realpathSync?.(path) ?? path; } catch { return path; }
 }
 
 function triggerSuffix(description: string): { description: string; trigger: string } | undefined {

@@ -6,20 +6,83 @@ const LINE_LIMIT = 500;
 const BATCH_LIMIT = 3_000;
 const BUFFER_LIMIT = 1_048_576;
 const DEBOUNCE_MS = 200;
+const RATE_LIMIT_CAPACITY = 10;
+const RATE_LIMIT_REFILL_MS = 2_000;
+const AUTO_STOP_THRESHOLD_MS = 30_000;
+
+export type MonitorRateLimitOutcome =
+  | { type: "allowed"; catchUpNotice?: string }
+  | { type: "suppressed" }
+  | { type: "auto_stop"; message: string };
+
+/** Source-equivalent token bucket and sustained-suppression tracker. */
+export class GrokBuildMonitorRateLimiter {
+  private tokens: number;
+  private lastRefill: number;
+  private suppressedCount = 0;
+  private lastSuppression: number | undefined;
+  private suppressionStart: number | undefined;
+  private stopped = false;
+
+  constructor(
+    private readonly now: () => number = Date.now,
+    private readonly capacity = RATE_LIMIT_CAPACITY,
+    private readonly refillMs = RATE_LIMIT_REFILL_MS,
+    private readonly killToolName = "kill_command_or_subagent",
+  ) {
+    this.tokens = capacity;
+    this.lastRefill = now();
+  }
+
+  process(): MonitorRateLimitOutcome {
+    if (this.stopped) return { type: "suppressed" };
+    const now = this.now();
+    const refills = Math.floor((now - this.lastRefill) / this.refillMs);
+    if (refills > 0) {
+      this.tokens = Math.min(this.capacity, this.tokens + refills);
+      this.lastRefill += refills * this.refillMs;
+    }
+    if (this.tokens > 0) {
+      this.tokens -= 1;
+      if (this.suppressedCount === 0) return { type: "allowed" };
+      const notice = `[${this.suppressedCount} events suppressed -- output rate too high. Consider using ${this.killToolName} to restart this monitor with a more selective filter.]`;
+      this.suppressedCount = 0;
+      if (this.lastSuppression !== undefined && now - this.lastSuppression > this.refillMs * 3) {
+        this.suppressionStart = undefined;
+      }
+      return { type: "allowed", catchUpNotice: notice };
+    }
+    this.suppressedCount += 1;
+    this.lastSuppression = now;
+    this.suppressionStart ??= now;
+    const elapsed = now - this.suppressionStart;
+    if (elapsed > AUTO_STOP_THRESHOLD_MS) {
+      this.stopped = true;
+      return {
+        type: "auto_stop",
+        message: `[Monitor stopped -- your script produced too much output (${this.suppressedCount} events suppressed over ${Math.floor(elapsed / 1_000)}s). Write a new monitor command that filters more aggressively -- pipe through grep --line-buffered, awk, or a wrapper script that only emits the specific events you need.]`,
+      };
+    }
+    return { type: "suppressed" };
+  }
+}
 
 /** Browser port of native monitor line framing, batching, and XML notification wrapping. */
 export class GrokBuildMonitorEventStream {
   private buffer = "";
   private pending: string[] = [];
   private timer: ReturnType<typeof setTimeout> | undefined;
+  private stopped = false;
 
   constructor(
     private readonly taskId: string,
     private readonly description: string,
     private readonly emit: (reminder: string) => void,
+    private readonly rateLimiter = new GrokBuildMonitorRateLimiter(),
   ) {}
 
   push(chunk: string): void {
+    if (this.stopped) return;
     this.buffer += chunk;
     if (new TextEncoder().encode(this.buffer).length > BUFFER_LIMIT) this.buffer = utf8Tail(this.buffer, BUFFER_LIMIT);
     const lines = this.buffer.split("\n");
@@ -43,8 +106,17 @@ export class GrokBuildMonitorEventStream {
     this.timer = undefined;
     if (!this.pending.length) return;
     const text = truncate(this.pending.splice(0).join("\n"), BATCH_LIMIT, "\n...(truncated)");
+    const outcome = this.rateLimiter.process();
+    if (outcome.type === "suppressed") return;
     const description = this.description.replaceAll('"', "'").replace(/[\r\n]/gu, " ");
-    this.emit(`<monitor-event description="${description}" task_id="${this.taskId}">\n${text}\n</monitor-event>`);
+    const wrap = (body: string): string => `<monitor-event description="${description}" task_id="${this.taskId}">\n${body}\n</monitor-event>`;
+    if (outcome.type === "auto_stop") {
+      this.stopped = true;
+      this.emit(wrap(outcome.message));
+      return;
+    }
+    if (outcome.catchUpNotice) this.emit(wrap(outcome.catchUpNotice));
+    this.emit(wrap(text));
   }
 }
 

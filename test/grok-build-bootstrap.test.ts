@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   fetchGrokBuildStartupProfile,
+  GrokBuildStartupCoordinator,
   parseGrokBuildRemoteModel,
   resolveGrokBuildStartupProfile,
 } from "../experiments/browser-agent/src/grok-build-bootstrap.js";
@@ -96,5 +97,48 @@ describe("native Grok Build startup port", () => {
 
     expect(profile.model).toBe("grok-4.5");
     expect(profile.contextWindow).toBe(500_000);
+  });
+
+  it("uses only a fresh version/auth/origin-matched five-minute model cache", async () => {
+    const values = new Map<string, string>();
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => { values.set(key, value); },
+      removeItem: (key: string) => { values.delete(key); },
+    };
+    let now = 1_000;
+    const firstFetch = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json({ data: [{ model: "cached-model", context_window: 321_000 }] }, { headers: { ETag: "catalog-v1" } }))
+      .mockResolvedValue(Response.json({ default_model: "cached-model" }));
+    await fetchGrokBuildStartupProfile({ fetch: firstFetch, tools, storage, now: () => now });
+    expect(firstFetch).toHaveBeenCalledTimes(3);
+
+    const cachedFetch = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ default_model: "cached-model" }));
+    now += 299_999;
+    const cached = await fetchGrokBuildStartupProfile({ fetch: cachedFetch, tools, storage, now: () => now });
+    expect(cached.model).toBe("cached-model");
+    expect(cachedFetch).toHaveBeenCalledTimes(2);
+
+    const staleFetch = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json({ data: [{ model: "renewed-model" }] }))
+      .mockResolvedValue(Response.json({ default_model: "renewed-model" }));
+    now += 1;
+    expect((await fetchGrokBuildStartupProfile({ fetch: staleFetch, tools, storage, now: () => now })).model).toBe("renewed-model");
+    expect(staleFetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("coalesces new-session refreshes and keeps previously returned snapshots stable", async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json({ data: [{ model: "grok-4.6", context_window: 500_000 }] }))
+      .mockResolvedValueOnce(Response.json({ default_model: "grok-4.6", web_fetch_enabled: true }))
+      .mockResolvedValueOnce(Response.json({ default_model: "grok-4.6", web_fetch_enabled: true }))
+      .mockResolvedValueOnce(Response.json({ default_model: "grok-4.6", web_fetch_enabled: false }));
+    const coordinator = new GrokBuildStartupCoordinator({ fetch: fetchMock, tools });
+    const original = await coordinator.snapshot();
+    const [left, right] = await Promise.all([coordinator.refreshForNewSession(), coordinator.refreshForNewSession()]);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(original.tools.some((tool) => tool.name === "web_fetch")).toBe(true);
+    expect(left.tools.some((tool) => tool.name === "web_fetch")).toBe(false);
+    expect(right).toEqual(left);
   });
 });

@@ -13,8 +13,13 @@ import {
   McpSseDecoder,
   validateElicitationRequest,
 } from "../experiments/browser-agent/src/grok-build-mcp-events.js";
-import type { McpOAuthCredentials } from "../experiments/browser-agent/src/grok-build-mcp-oauth.js";
+import { isPublicIpAddress, type McpOAuthCredentials } from "../experiments/browser-agent/src/grok-build-mcp-oauth.js";
 import { searchMcpDocuments } from "../experiments/browser-agent/src/grok-build-mcp-search.js";
+import {
+  ELICITATION_LIMITS,
+  parseElicitationFormSchema,
+  validateElicitationForm,
+} from "../experiments/browser-agent/src/grok-build-mcp-elicitation.js";
 import { loadGrokBuildRhaiWasmSync } from "../experiments/browser-agent/src/grok-build-rhai-wasm.js";
 
 beforeAll(() => {
@@ -26,8 +31,9 @@ beforeAll(() => {
 type WireRequest = {
   jsonrpc: "2.0";
   id?: number | string;
-  method: string;
+  method?: string;
   params?: Record<string, unknown>;
+  result?: unknown;
 };
 
 describe("Grok Build browser MCP protocol", () => {
@@ -225,6 +231,28 @@ describe("Grok Build browser MCP protocol", () => {
     });
   });
 
+  it("cancels an older pending elicitation when a newer request replaces it", async () => {
+    const responses: WireRequest[] = [];
+    const fetchImpl = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body)) as WireRequest;
+      if (request.method === "initialize") return jsonResponse({ jsonrpc: "2.0", id: request.id, result: { protocolVersion: "2025-11-25", capabilities: {} } });
+      if (request.method === "notifications/initialized") return new Response(null, { status: 202 });
+      if (request.method === "tools/list") return new Response([
+        `data: ${JSON.stringify({ jsonrpc: "2.0", id: "old", method: "elicitation/create", params: { message: "Old", requestedSchema: { properties: { value: { type: "string" } } } } })}\n\n`,
+        `data: ${JSON.stringify({ jsonrpc: "2.0", id: "new", method: "elicitation/create", params: { message: "New", requestedSchema: { properties: { value: { type: "string" } } } } })}\n\n`,
+        `data: ${JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { tools: [] } })}\n\n`,
+      ].join(""), { headers: { "Content-Type": "text/event-stream" } });
+      responses.push(request); return new Response(null, { status: 202 });
+    }) as unknown as typeof fetch;
+    const client = new GrokBuildMcpHttpClient({ name: "replace", url: "https://mcp.example.test", fetchImpl, events: {
+      onElicitation: async (request, signal) => request.message === "New" ? { action: "accept", content: { value: "new" } } : await new Promise((resolve) => signal.addEventListener("abort", () => resolve({ action: "accept", content: { value: "old" } }), { once: true })),
+    } });
+    await client.listTools(new AbortController().signal);
+    await vi.waitFor(() => expect(responses.filter((response) => response.id === "old" || response.id === "new")).toHaveLength(2));
+    expect(responses.find((response) => response.id === "old")?.result).toEqual({ action: "cancel" });
+    expect(responses.find((response) => response.id === "new")?.result).toEqual({ action: "accept", content: { value: "new" } });
+  });
+
   it("refreshes expiring OAuth credentials and preserves a refresh token omitted by the token response", async () => {
     let saved: McpOAuthCredentials | undefined;
     const expired: McpOAuthCredentials = {
@@ -259,6 +287,7 @@ describe("Grok Build browser MCP protocol", () => {
           save: async (_key, value) => { saved = value; },
           clear: async () => undefined,
         },
+        resolveAuthorizationHostname: async () => ["8.8.8.8"],
       },
     });
     await client.initialize(new AbortController().signal);
@@ -336,6 +365,7 @@ describe("Grok Build browser MCP protocol", () => {
           const parsed = new URL(url);
           return { code: "issued-code", state: parsed.searchParams.get("state")!, issuer: "https://auth.example.test" };
         },
+        resolveAuthorizationHostname: async () => ["8.8.8.8"],
       },
     });
     await client.initialize(new AbortController().signal);
@@ -346,6 +376,165 @@ describe("Grok Build browser MCP protocol", () => {
     expect(authorization.searchParams.get("code_challenge")).toMatch(/^[A-Za-z0-9_-]+$/u);
     expect(discoveryHeaders.every((headers) => headers.get("MCP-Protocol-Version") === "2024-11-05")).toBe(true);
     expect(saved).toMatchObject({ clientId: "dynamic-browser-client", accessToken: "issued-access", refreshToken: "issued-refresh" });
+  });
+
+  it("rejects private/reserved authorization addresses and supports client_credentials through a DNS-validating relay", async () => {
+    for (const address of ["127.0.0.1", "10.1.2.3", "100.64.1.1", "169.254.1.1", "172.16.0.1", "192.168.1.1", "192.0.2.1", "198.51.100.1", "203.0.113.1", "::1", "fd00::1", "fe80::1", "2001:db8::1"]) expect(isPublicIpAddress(address)).toBe(false);
+    for (const address of ["8.8.8.8", "1.1.1.1", "2606:4700:4700::1111"]) expect(isPublicIpAddress(address)).toBe(true);
+
+    let stored: McpOAuthCredentials | undefined;
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "https://mcp.example.test/") {
+        if (init?.method === "POST") { const request = JSON.parse(String(init.body)) as WireRequest; return request.method === "initialize" ? jsonResponse({ jsonrpc: "2.0", id: request.id, result: { protocolVersion: "2025-11-25", capabilities: {} } }) : new Response(null, { status: 202 }); }
+        return new Response(null, { status: 404 });
+      }
+      if (url.endsWith("/.well-known/oauth-protected-resource")) return jsonResponse({ resource: "https://mcp.example.test/", authorization_servers: ["https://auth.example.test"] });
+      if (url === "https://auth.example.test/.well-known/oauth-authorization-server") return jsonResponse({ authorization_endpoint: "https://auth.example.test/authorize", token_endpoint: "https://auth.example.test/token", token_endpoint_auth_methods_supported: ["client_secret_post"] });
+      if (url === "https://auth.example.test/token") {
+        const body = new URLSearchParams(String(init?.body));
+        expect(Object.fromEntries(body)).toMatchObject({ grant_type: "client_credentials", scope: "mcp", resource: "https://mcp.example.test/" });
+        if (body.has("client_assertion")) {
+          expect(body.get("client_id")).toBe("jwt-client");
+          expect(body.get("client_assertion_type")).toBe("urn:ietf:params:oauth:client-assertion-type:jwt-bearer");
+          const [header, payload, signature] = body.get("client_assertion")!.split(".");
+          expect(JSON.parse(Buffer.from(header!, "base64url").toString())).toMatchObject({ alg: "RS256", typ: "JWT" });
+          expect(JSON.parse(Buffer.from(payload!, "base64url").toString())).toMatchObject({ iss: "jwt-client", sub: "jwt-client", aud: "https://auth.example.test/token" });
+          expect(signature).toMatch(/^[A-Za-z0-9_-]+$/u);
+          expect(body.has("client_secret")).toBe(false);
+        } else expect(Object.fromEntries(body)).toMatchObject({ client_id: "service-client", client_secret: "secret" });
+        return jsonResponse({ access_token: "service-token", expires_in: 3600, scope: "mcp" });
+      }
+      throw new Error(`Unexpected URL ${url}`);
+    }) as unknown as typeof fetch;
+    const client = new GrokBuildMcpHttpClient({ name: "service", url: "https://mcp.example.test/", fetchImpl, oauth: {
+      credentialStore: { load: async () => undefined, save: async (_key, value) => { stored = value; }, clear: async () => undefined },
+      clientCredentials: { clientId: "service-client", clientSecret: "secret", scopes: ["mcp"] },
+      resolveAuthorizationHostname: async () => ["8.8.8.8"],
+    } });
+    await client.initialize(new AbortController().signal);
+    expect(stored).toMatchObject({ clientId: "service-client", accessToken: "service-token" });
+
+    const signingKey = await crypto.subtle.generateKey({ name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" }, false, ["sign", "verify"]);
+    const jwtClient = new GrokBuildMcpHttpClient({ name: "jwt-service", url: "https://mcp.example.test/", fetchImpl, oauth: {
+      credentialStore: { load: async () => undefined, save: async () => undefined, clear: async () => undefined },
+      clientCredentials: { method: "private_key_jwt", clientId: "jwt-client", signingKey: signingKey.privateKey, algorithm: "RS256", scopes: ["mcp"] },
+      resolveAuthorizationHostname: async () => ["8.8.8.8"],
+    } });
+    await jwtClient.initialize(new AbortController().signal);
+  });
+
+  it("coordinates authorization and upgrades scopes after an insufficient_scope challenge", async () => {
+    const stored: McpOAuthCredentials = {
+      clientId: "interactive-client", accessToken: "read-token", grantedScopes: ["read"], redirectUri: "https://app.example.test/callback",
+      metadata: {
+        issuer: "https://auth.example.test", authorizationEndpoint: "https://auth.example.test/authorize", tokenEndpoint: "https://auth.example.test/token",
+        scopesSupported: ["read", "write"], authorizationResponseIssParameterSupported: true,
+      },
+    };
+    let initializeCalls = 0;
+    let coordinated = 0;
+    let authorizedScopes = "";
+    let saved: McpOAuthCredentials | undefined;
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === "https://auth.example.test/token") return jsonResponse({ access_token: "write-token", expires_in: 3600, scope: "read write" });
+      const request = JSON.parse(String(init?.body)) as WireRequest;
+      if (request.method === "initialize") {
+        initializeCalls += 1;
+        if (initializeCalls === 1) return new Response(null, { status: 403, headers: { "WWW-Authenticate": 'Bearer error="insufficient_scope", scope="write"' } });
+        expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer write-token");
+        return jsonResponse({ jsonrpc: "2.0", id: request.id, result: { protocolVersion: "2025-11-25", capabilities: {} } });
+      }
+      return new Response(null, { status: 202 });
+    }) as unknown as typeof fetch;
+    const client = new GrokBuildMcpHttpClient({ name: "scopes", url: "https://mcp.example.test/", fetchImpl, oauth: {
+      credentialStore: { load: async () => stored, save: async (_key, value) => { saved = value; }, clear: async () => undefined },
+      redirectUri: stored.redirectUri,
+      resolveAuthorizationHostname: async () => ["8.8.8.8"],
+      coordinateAuthorization: async (_key, _signal, operation) => { coordinated += 1; return operation(); },
+      authorize: async (url) => {
+        const parsed = new URL(url);
+        authorizedScopes = parsed.searchParams.get("scope") ?? "";
+        return { code: "scope-code", state: parsed.searchParams.get("state")!, issuer: "https://auth.example.test" };
+      },
+    } });
+    await client.initialize(new AbortController().signal);
+    expect(authorizedScopes.split(" ")).toEqual(["read", "write"]);
+    expect(saved).toMatchObject({ accessToken: "write-token", grantedScopes: ["read", "write"] });
+    expect(coordinated).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("Grok Build elicitation schema and value port", () => {
+  it("parses ordered scalar/select/multi-select fields and native defaults", () => {
+    const specs = parseElicitationFormSchema({
+      type: "object",
+      properties: {
+        email: { type: "string", title: "Email", format: "email", minLength: 3, default: "a@b.co" },
+        color: { type: "string", enum: ["red", "blue"], enumNames: ["Red label", "Blue label"], default: "blue" },
+        countries: { type: "array", items: { anyOf: [{ const: "US", title: "United States" }, { const: "DE" }] }, minItems: 1, maxItems: 2, default: ["DE"] },
+        enabled: { type: "boolean", default: true },
+      },
+      required: ["email", "color", "countries"],
+    });
+    expect(specs.map((spec) => spec.name)).toEqual(["email", "color", "countries", "enabled"]);
+    expect(specs[1]?.kind).toMatchObject({ type: "single-select", defaultIndex: 1, options: [{ value: "red", label: "Red label" }, { value: "blue", label: "Blue label" }] });
+    expect(specs[2]?.kind).toMatchObject({ type: "multi-select", minItems: 1, maxItems: 2, defaultIndexes: [1] });
+    expect(specs[3]?.kind).toEqual({ type: "boolean", default: true });
+  });
+
+  it("enforces native form caps and schema shape", () => {
+    expect(() => parseElicitationFormSchema([])).toThrow("must be a JSON object");
+    expect(() => parseElicitationFormSchema({ type: "string", properties: {} })).toThrow('type must be "object"');
+    expect(() => parseElicitationFormSchema({ type: "object" })).toThrow("properties is required");
+    expect(() => parseElicitationFormSchema({ properties: Object.fromEntries(Array.from({ length: ELICITATION_LIMITS.fields + 1 }, (_, index) => [`p${index}`, {}])) })).toThrow("exceeds 32 fields");
+    expect(() => parseElicitationFormSchema({ properties: { x: { title: "x".repeat(ELICITATION_LIMITS.titleChars + 1) } } })).toThrow("title exceeds 128");
+    expect(() => parseElicitationFormSchema({ properties: { x: { enum: Array.from({ length: ELICITATION_LIMITS.enumValues + 1 }, (_, index) => index) } } })).toThrow("enum exceeds 32 values");
+  });
+
+  it("validates native string, format, numeric, selection, unsupported, and omission semantics", () => {
+    const specs = parseElicitationFormSchema({ properties: {
+      note: { type: "string", minLength: 6 },
+      email: { type: "string", format: "email" },
+      uri: { type: "string", format: "uri" },
+      date: { type: "string", format: "date" },
+      time: { type: "string", format: "date-time" },
+      ratio: { type: "number", minimum: 0.5, maximum: 2.5 },
+      age: { type: "integer", minimum: 0.5, maximum: 120.9 },
+      color: { enum: ["red", "blue"] },
+      countries: { type: "array", items: { enum: ["US", "UK", "DE"] }, minItems: 1, maxItems: 2 },
+      optionalTags: { type: "array", items: { enum: ["a"] } },
+      unsupported: { type: "object" },
+    }, required: ["note", "email", "uri", "date", "time", "ratio", "age", "color", "countries", "unsupported"] });
+    const valid = validateElicitationForm(specs, [
+      { type: "draft", value: "  ab  " }, { type: "draft", value: "a.b+c@sub.example.co" },
+      { type: "draft", value: "urn:isbn:0451450523" }, { type: "draft", value: "2024-02-29" },
+      { type: "draft", value: "2026-08-19T10:00:00.123+02:00" }, { type: "draft", value: "1.25" },
+      { type: "draft", value: "30" }, { type: "choice", index: 1 }, { type: "multi-choice", indexes: [0, 2] },
+      { type: "multi-choice", indexes: [] }, { type: "draft", value: "" },
+    ]);
+    expect(valid).toEqual({ errors: [{ field: "unsupported", message: "unsupported field type" }] });
+    const optional = parseElicitationFormSchema({ properties: { tags: { type: "array", items: { enum: ["x"] } }, blob: { type: "object" } } });
+    expect(validateElicitationForm(optional, [{ type: "multi-choice", indexes: [] }, { type: "draft", value: "" }])).toEqual({ content: {} });
+  });
+
+  it.each([
+    ["bad email", { type: "string", format: "email" }, "user@nodot", "invalid email"],
+    ["relative URI", { type: "string", format: "uri" }, "/relative", "invalid URI"],
+    ["invalid leap day", { type: "string", format: "date" }, "2023-02-29", "use YYYY-MM-DD"],
+    ["invalid date-time", { type: "string", format: "date-time" }, "2026-08-19T25:00:00Z", "use RFC 3339 date-time"],
+    ["number below min", { type: "number", minimum: 0.5 }, "0.1", "min 0.5"],
+    ["fractional integer", { type: "integer" }, "30.5", "must be an integer"],
+    ["i64 overflow", { type: "integer" }, "9223372036854775808", "must be an integer"],
+  ])("rejects %s", (_label, property, draft, message) => {
+    const specs = parseElicitationFormSchema({ properties: { value: property as never }, required: ["value"] });
+    expect(validateElicitationForm(specs, [{ type: "draft", value: draft }])).toEqual({ errors: [{ field: "value", message }] });
+  });
+
+  it("serializes native lossless i64 elicitation values with JSON raw numbers", () => {
+    const specs = parseElicitationFormSchema({ properties: { id: { type: "integer" } }, required: ["id"] });
+    const result = validateElicitationForm(specs, [{ type: "draft", value: "9007199254740993" }]);
+    expect(JSON.stringify(result)).toBe('{"content":{"id":9007199254740993}}');
   });
 });
 
@@ -364,6 +553,49 @@ describe("Grok Build browser MCP registry", () => {
     const duplicate = (await searchMcpDocuments(documents, "create issue create issue", 3))[0]?.score ?? 0;
     expect(withStopWords).toBe(once);
     expect(duplicate).toBeCloseTo(once * 2, 5);
+  });
+
+  it("passes the native 55+ production haystack exact-match and fuzzy-ranking corpus", async () => {
+    const corpus = NATIVE_PRODUCTION_HAYSTACK.map((tool) => ({ ...tool, parameters: [...tool.parameters] }));
+    expect(corpus.length).toBeGreaterThanOrEqual(55);
+    const exactCases = [
+      ["grok_com_slack__slack_search_public", "grok_com_slack__slack_search_public"],
+      ["slack_search_public", "grok_com_slack__slack_search_public"],
+      ["notion-search", "notion__notion-search"],
+      ["SearchDashboards", "grafana-ai__SearchDashboards"],
+    ] as const;
+    for (const [query, expected] of exactCases) {
+      const results = await searchMcpDocuments(corpus, query, 5);
+      expect(results).toHaveLength(1);
+      expect(results[0]?.qualifiedName).toBe(expected);
+    }
+    const fuzzyCases = [
+      ["search public slack messages", "grok_com_slack__slack_search_public", 3],
+      ["send a message in slack", "grok_com_slack__slack_send_message", 3],
+      ["read thread replies slack", "grok_com_slack__slack_read_thread", 3],
+      ["search notion pages", "notion__notion-search", 3],
+      ["create a new notion page", "notion__notion-create-pages", 3],
+      ["search grafana dashboards", "grafana-ai__SearchDashboards", 3],
+      ["delete alert rule grafana", "grafana-ai__DeleteAlertRule", 3],
+      ["create a linear issue", "linear__save_issue", 3],
+      ["create pull request github", "github__create_pull_request", 3],
+      ["search code in github repos", "github__search_code", 3],
+      ["wrong_server__SearchDashboards", "grafana-ai__SearchDashboards", 3],
+      ["search_public", "grok_com_slack__slack_search_public", 3],
+      ["getDashboardByUID", "grafana-ai__GetDashboardByUID", 2],
+      ["slack__slack_read_thread", "grok_com_slack__slack_read_thread", 3],
+      ["add comment notion page", "notion__notion-create-comment", 3],
+    ] as const;
+    for (const [query, expected, top] of fuzzyCases) {
+      const names = (await searchMcpDocuments(corpus, query, 5)).slice(0, top).map((tool) => tool.qualifiedName);
+      expect(names, query).toContain(expected);
+    }
+    const publicNames = (await searchMcpDocuments(corpus, "search public channels only", 5)).map((tool) => tool.qualifiedName);
+    expect(publicNames.indexOf("grok_com_slack__slack_search_public")).toBeGreaterThanOrEqual(0);
+    const privatePosition = publicNames.indexOf("grok_com_slack__slack_search_public_and_private");
+    if (privatePosition >= 0) expect(publicNames.indexOf("grok_com_slack__slack_search_public")).toBeLessThan(privatePosition);
+    const notionCreates = (await searchMcpDocuments(corpus, "notion-create", 5)).filter((tool) => tool.qualifiedName.includes("notion-create"));
+    expect(notionCreates.length).toBeGreaterThanOrEqual(2);
   });
 
   it("preserves native no-config output", async () => {
@@ -506,6 +738,546 @@ describe("Grok Build browser MCP registry", () => {
     expect({ initializeCalls, toolCalls }).toEqual({ initializeCalls: 2, toolCalls: 2 });
   });
 });
+
+const NATIVE_PRODUCTION_HAYSTACK = [
+  {
+    "qualifiedName": "grok_com_slack__slack_create_canvas",
+    "serverName": "grok_com_slack",
+    "toolName": "slack_create_canvas",
+    "description": "Create a new Slack canvas in a channel",
+    "parameters": [
+      "channel_id",
+      "content"
+    ]
+  },
+  {
+    "qualifiedName": "grok_com_slack__slack_get_reactions",
+    "serverName": "grok_com_slack",
+    "toolName": "slack_get_reactions",
+    "description": "Retrieves all reactions (emoji) on a specific Slack message",
+    "parameters": [
+      "channel_id",
+      "message_ts"
+    ]
+  },
+  {
+    "qualifiedName": "grok_com_slack__slack_list_channel_members",
+    "serverName": "grok_com_slack",
+    "toolName": "slack_list_channel_members",
+    "description": "List members of a Slack channel",
+    "parameters": [
+      "channel_id"
+    ]
+  },
+  {
+    "qualifiedName": "grok_com_slack__slack_read_canvas",
+    "serverName": "grok_com_slack",
+    "toolName": "slack_read_canvas",
+    "description": "Read a Slack canvas by ID",
+    "parameters": [
+      "canvas_id"
+    ]
+  },
+  {
+    "qualifiedName": "grok_com_slack__slack_read_channel",
+    "serverName": "grok_com_slack",
+    "toolName": "slack_read_channel",
+    "description": "Reads messages from a Slack channel in reverse chronological order",
+    "parameters": [
+      "channel_id",
+      "limit"
+    ]
+  },
+  {
+    "qualifiedName": "grok_com_slack__slack_read_file",
+    "serverName": "grok_com_slack",
+    "toolName": "slack_read_file",
+    "description": "Reads a Slack file's content by file ID",
+    "parameters": [
+      "file_id"
+    ]
+  },
+  {
+    "qualifiedName": "grok_com_slack__slack_read_thread",
+    "serverName": "grok_com_slack",
+    "toolName": "slack_read_thread",
+    "description": "Reads messages from a specific Slack thread (parent message + all replies)",
+    "parameters": [
+      "channel_id",
+      "message_ts"
+    ]
+  },
+  {
+    "qualifiedName": "grok_com_slack__slack_read_user_profile",
+    "serverName": "grok_com_slack",
+    "toolName": "slack_read_user_profile",
+    "description": "Read a Slack user's profile information",
+    "parameters": [
+      "user_id"
+    ]
+  },
+  {
+    "qualifiedName": "grok_com_slack__slack_schedule_message",
+    "serverName": "grok_com_slack",
+    "toolName": "slack_schedule_message",
+    "description": "Schedule a message to be sent at a specific time",
+    "parameters": [
+      "channel_id",
+      "text",
+      "post_at"
+    ]
+  },
+  {
+    "qualifiedName": "grok_com_slack__slack_search_channels",
+    "serverName": "grok_com_slack",
+    "toolName": "slack_search_channels",
+    "description": "Search for Slack channels by name or topic",
+    "parameters": [
+      "query"
+    ]
+  },
+  {
+    "qualifiedName": "grok_com_slack__slack_search_emojis",
+    "serverName": "grok_com_slack",
+    "toolName": "slack_search_emojis",
+    "description": "Search for custom emoji in the Slack workspace",
+    "parameters": [
+      "query"
+    ]
+  },
+  {
+    "qualifiedName": "grok_com_slack__slack_search_public",
+    "serverName": "grok_com_slack",
+    "toolName": "slack_search_public",
+    "description": "Searches for messages and files in public Slack channels only",
+    "parameters": [
+      "query",
+      "sort",
+      "sort_dir"
+    ]
+  },
+  {
+    "qualifiedName": "grok_com_slack__slack_search_public_and_private",
+    "serverName": "grok_com_slack",
+    "toolName": "slack_search_public_and_private",
+    "description": "Searches for messages and files in both public and private Slack channels",
+    "parameters": [
+      "query",
+      "sort",
+      "sort_dir"
+    ]
+  },
+  {
+    "qualifiedName": "grok_com_slack__slack_search_users",
+    "serverName": "grok_com_slack",
+    "toolName": "slack_search_users",
+    "description": "Search for users in the Slack workspace by name or email",
+    "parameters": [
+      "query"
+    ]
+  },
+  {
+    "qualifiedName": "grok_com_slack__slack_send_message",
+    "serverName": "grok_com_slack",
+    "toolName": "slack_send_message",
+    "description": "Send a message in a Slack channel or thread",
+    "parameters": [
+      "channel_id",
+      "text",
+      "thread_ts"
+    ]
+  },
+  {
+    "qualifiedName": "grok_com_slack__slack_send_message_draft",
+    "serverName": "grok_com_slack",
+    "toolName": "slack_send_message_draft",
+    "description": "Create a draft message for user review before sending",
+    "parameters": [
+      "channel_id",
+      "text"
+    ]
+  },
+  {
+    "qualifiedName": "grok_com_slack__slack_update_canvas",
+    "serverName": "grok_com_slack",
+    "toolName": "slack_update_canvas",
+    "description": "Update the content of an existing Slack canvas",
+    "parameters": [
+      "canvas_id",
+      "content"
+    ]
+  },
+  {
+    "qualifiedName": "notion__notion-create-comment",
+    "serverName": "notion",
+    "toolName": "notion-create-comment",
+    "description": "Create a comment on a Notion page or discussion",
+    "parameters": [
+      "page_id",
+      "text"
+    ]
+  },
+  {
+    "qualifiedName": "notion__notion-create-database",
+    "serverName": "notion",
+    "toolName": "notion-create-database",
+    "description": "Create a new Notion database with specified properties",
+    "parameters": [
+      "parent_id",
+      "title",
+      "properties"
+    ]
+  },
+  {
+    "qualifiedName": "notion__notion-create-pages",
+    "serverName": "notion",
+    "toolName": "notion-create-pages",
+    "description": "Create one or more new Notion pages",
+    "parameters": [
+      "parent_id",
+      "title",
+      "content"
+    ]
+  },
+  {
+    "qualifiedName": "notion__notion-create-view",
+    "serverName": "notion",
+    "toolName": "notion-create-view",
+    "description": "Create a new view for a Notion database",
+    "parameters": [
+      "database_id",
+      "type"
+    ]
+  },
+  {
+    "qualifiedName": "notion__notion-duplicate-page",
+    "serverName": "notion",
+    "toolName": "notion-duplicate-page",
+    "description": "Duplicate an existing Notion page",
+    "parameters": [
+      "page_id"
+    ]
+  },
+  {
+    "qualifiedName": "notion__notion-fetch",
+    "serverName": "notion",
+    "toolName": "notion-fetch",
+    "description": "Fetch the content of a Notion page or block by URL or ID",
+    "parameters": [
+      "url"
+    ]
+  },
+  {
+    "qualifiedName": "notion__notion-get-comments",
+    "serverName": "notion",
+    "toolName": "notion-get-comments",
+    "description": "Get comments on a Notion page or discussion",
+    "parameters": [
+      "page_id"
+    ]
+  },
+  {
+    "qualifiedName": "notion__notion-get-teams",
+    "serverName": "notion",
+    "toolName": "notion-get-teams",
+    "description": "Get the list of teams in the Notion workspace",
+    "parameters": []
+  },
+  {
+    "qualifiedName": "notion__notion-get-users",
+    "serverName": "notion",
+    "toolName": "notion-get-users",
+    "description": "Get the list of users in the Notion workspace",
+    "parameters": []
+  },
+  {
+    "qualifiedName": "notion__notion-move-pages",
+    "serverName": "notion",
+    "toolName": "notion-move-pages",
+    "description": "Move Notion pages to a different parent",
+    "parameters": [
+      "page_ids",
+      "target_parent_id"
+    ]
+  },
+  {
+    "qualifiedName": "notion__notion-search",
+    "serverName": "notion",
+    "toolName": "notion-search",
+    "description": "Search Notion pages and databases by title or content",
+    "parameters": [
+      "query"
+    ]
+  },
+  {
+    "qualifiedName": "notion__notion-update-data-source",
+    "serverName": "notion",
+    "toolName": "notion-update-data-source",
+    "description": "Update the data source configuration for a Notion database",
+    "parameters": [
+      "database_id"
+    ]
+  },
+  {
+    "qualifiedName": "notion__notion-update-page",
+    "serverName": "notion",
+    "toolName": "notion-update-page",
+    "description": "Update properties or content of an existing Notion page",
+    "parameters": [
+      "page_id",
+      "properties"
+    ]
+  },
+  {
+    "qualifiedName": "notion__notion-update-view",
+    "serverName": "notion",
+    "toolName": "notion-update-view",
+    "description": "Update a view configuration for a Notion database",
+    "parameters": [
+      "view_id"
+    ]
+  },
+  {
+    "qualifiedName": "grafana-ai__SearchDashboards",
+    "serverName": "grafana-ai",
+    "toolName": "SearchDashboards",
+    "description": "Search for Grafana dashboards by query string. Returns matching dashboards with title, UID, folder, tags, and full URL.",
+    "parameters": [
+      "query",
+      "limit",
+      "page"
+    ]
+  },
+  {
+    "qualifiedName": "grafana-ai__GetDashboardByUID",
+    "serverName": "grafana-ai",
+    "toolName": "GetDashboardByUID",
+    "description": "Get a complete Grafana dashboard by its UID. Returns full dashboard JSON including panels, variables, and settings.",
+    "parameters": [
+      "uid"
+    ]
+  },
+  {
+    "qualifiedName": "grafana-ai__GenerateDeeplink",
+    "serverName": "grafana-ai",
+    "toolName": "GenerateDeeplink",
+    "description": "Generate a direct URL to a Grafana resource (dashboard, panel, explore page, or alert rule).",
+    "parameters": [
+      "resource_type",
+      "uid"
+    ]
+  },
+  {
+    "qualifiedName": "grafana-ai__GetDashboardProperty",
+    "serverName": "grafana-ai",
+    "toolName": "GetDashboardProperty",
+    "description": "Get a specific property value from a Grafana dashboard by JSONPath.",
+    "parameters": [
+      "uid",
+      "property"
+    ]
+  },
+  {
+    "qualifiedName": "grafana-ai__DeleteAlertRule",
+    "serverName": "grafana-ai",
+    "toolName": "DeleteAlertRule",
+    "description": "Delete a Grafana alert rule by UID. This action cannot be undone.",
+    "parameters": [
+      "uid"
+    ]
+  },
+  {
+    "qualifiedName": "grafana-ai__SearchFolders",
+    "serverName": "grafana-ai",
+    "toolName": "SearchFolders",
+    "description": "Search for Grafana folders by query string. Returns matching folders with title, UID, and URL.",
+    "parameters": [
+      "query"
+    ]
+  },
+  {
+    "qualifiedName": "grafana-ai__ListDatasources",
+    "serverName": "grafana-ai",
+    "toolName": "ListDatasources",
+    "description": "List all configured datasources in Grafana. Returns datasource summaries with UID, name, type.",
+    "parameters": [
+      "type"
+    ]
+  },
+  {
+    "qualifiedName": "grafana-ai__ListContactPoints",
+    "serverName": "grafana-ai",
+    "toolName": "ListContactPoints",
+    "description": "List Grafana notification contact points. Returns summaries including UID, name, and type.",
+    "parameters": [
+      "name",
+      "limit"
+    ]
+  },
+  {
+    "qualifiedName": "grafana-ai__GetDashboardPanelQueries",
+    "serverName": "grafana-ai",
+    "toolName": "GetDashboardPanelQueries",
+    "description": "Get panel queries from a Grafana dashboard. Returns an array of panel queries with title, query expression, and datasource info.",
+    "parameters": [
+      "uid"
+    ]
+  },
+  {
+    "qualifiedName": "linear__save_issue",
+    "serverName": "linear",
+    "toolName": "save_issue",
+    "description": "Create or update a Linear issue",
+    "parameters": [
+      "title",
+      "team",
+      "description",
+      "assignee",
+      "priority"
+    ]
+  },
+  {
+    "qualifiedName": "linear__list_issues",
+    "serverName": "linear",
+    "toolName": "list_issues",
+    "description": "List issues in the user's Linear workspace",
+    "parameters": [
+      "assignee",
+      "project",
+      "state",
+      "team",
+      "query"
+    ]
+  },
+  {
+    "qualifiedName": "linear__get_issue",
+    "serverName": "linear",
+    "toolName": "get_issue",
+    "description": "Retrieve detailed information about a Linear issue by ID",
+    "parameters": [
+      "id"
+    ]
+  },
+  {
+    "qualifiedName": "linear__list_projects",
+    "serverName": "linear",
+    "toolName": "list_projects",
+    "description": "List projects in the user's Linear workspace",
+    "parameters": [
+      "query",
+      "team"
+    ]
+  },
+  {
+    "qualifiedName": "linear__create_comment",
+    "serverName": "linear",
+    "toolName": "create_comment",
+    "description": "Add a comment to a Linear issue",
+    "parameters": [
+      "issue_id",
+      "body"
+    ]
+  },
+  {
+    "qualifiedName": "linear__list_teams",
+    "serverName": "linear",
+    "toolName": "list_teams",
+    "description": "List teams in the user's Linear workspace",
+    "parameters": []
+  },
+  {
+    "qualifiedName": "linear__search_issues",
+    "serverName": "linear",
+    "toolName": "search_issues",
+    "description": "Search for Linear issues by keyword",
+    "parameters": [
+      "query"
+    ]
+  },
+  {
+    "qualifiedName": "linear__get_user",
+    "serverName": "linear",
+    "toolName": "get_user",
+    "description": "Get information about a Linear user",
+    "parameters": [
+      "id"
+    ]
+  },
+  {
+    "qualifiedName": "github__create_pull_request",
+    "serverName": "github",
+    "toolName": "create_pull_request",
+    "description": "Create a new GitHub pull request",
+    "parameters": [
+      "repo",
+      "title",
+      "head",
+      "base",
+      "body"
+    ]
+  },
+  {
+    "qualifiedName": "github__list_pull_requests",
+    "serverName": "github",
+    "toolName": "list_pull_requests",
+    "description": "List pull requests in a GitHub repository",
+    "parameters": [
+      "repo",
+      "state"
+    ]
+  },
+  {
+    "qualifiedName": "github__get_file_contents",
+    "serverName": "github",
+    "toolName": "get_file_contents",
+    "description": "Get the contents of a file from a GitHub repository",
+    "parameters": [
+      "repo",
+      "path",
+      "ref"
+    ]
+  },
+  {
+    "qualifiedName": "github__search_code",
+    "serverName": "github",
+    "toolName": "search_code",
+    "description": "Search for code across GitHub repositories",
+    "parameters": [
+      "query"
+    ]
+  },
+  {
+    "qualifiedName": "github__create_issue",
+    "serverName": "github",
+    "toolName": "create_issue",
+    "description": "Create a new GitHub issue",
+    "parameters": [
+      "repo",
+      "title",
+      "body"
+    ]
+  },
+  {
+    "qualifiedName": "github__list_commits",
+    "serverName": "github",
+    "toolName": "list_commits",
+    "description": "List commits in a GitHub repository",
+    "parameters": [
+      "repo",
+      "sha"
+    ]
+  },
+  {
+    "qualifiedName": "github__get_pull_request",
+    "serverName": "github",
+    "toolName": "get_pull_request",
+    "description": "Get details about a specific GitHub pull request",
+    "parameters": [
+      "repo",
+      "pull_number"
+    ]
+  }
+] as const;
 
 function catalogFetch(
   tools: Array<Record<string, unknown>>,

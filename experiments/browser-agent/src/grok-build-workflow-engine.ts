@@ -11,6 +11,7 @@ export interface GrokBuildWorkflowJournalEntry {
   kind: string;
   requestHash: string;
   value: unknown;
+  atMs?: number;
 }
 
 export interface GrokBuildWorkflowHostRequest {
@@ -26,6 +27,12 @@ export interface GrokBuildWorkflowHostEvent {
   payload: unknown;
   replayed: boolean;
   executionId?: string;
+}
+
+export interface GrokBuildWorkflowJournalStorage {
+  load(executionId: string): GrokBuildWorkflowJournalEntry[];
+  save(executionId: string, journal: readonly GrokBuildWorkflowJournalEntry[]): void;
+  pruneTrailingHostError?(executionId: string, failureDetail: string): void;
 }
 
 export type GrokBuildRhaiStep = (
@@ -54,6 +61,8 @@ export interface GrokBuildRhaiContinuationModule {
 export interface GrokBuildWorkflowHost {
   call(request: GrokBuildWorkflowHostRequest, signal: AbortSignal): Promise<unknown>;
   event?(event: GrokBuildWorkflowHostEvent): void | Promise<void>;
+  beginExecution?(executionId: string, options: { allowForkContext: boolean }): void | Promise<void>;
+  endExecution?(executionId: string): void | Promise<void>;
 }
 
 export type GrokBuildWorkflowOutcome =
@@ -75,6 +84,8 @@ export interface GrokBuildWorkflowEngine {
     signal: AbortSignal;
     executionId?: string;
     resume?: boolean;
+    resumeFailureDetail?: string;
+    allowForkContext?: boolean;
   }): Promise<GrokBuildWorkflowOutcome>;
   validate(script: string, args: unknown, options: { agentBudget: number; signal: AbortSignal }): Promise<GrokBuildWorkflowValidationReport>;
 }
@@ -96,15 +107,27 @@ const DEFAULT_PROBE_ARGS = {
 export class GrokBuildJournalRhaiEngine implements GrokBuildWorkflowEngine {
   private readonly journals = new Map<string, GrokBuildWorkflowJournalEntry[]>();
 
-  constructor(private readonly module: GrokBuildRhaiContinuationModule, private readonly host: GrokBuildWorkflowHost) {}
+  constructor(
+    private readonly module: GrokBuildRhaiContinuationModule,
+    private readonly host: GrokBuildWorkflowHost,
+    private readonly storage?: GrokBuildWorkflowJournalStorage,
+  ) {}
 
   async run(script: string, args: unknown, options: {
     agentBudget: number;
     signal: AbortSignal;
     executionId?: string;
     resume?: boolean;
+    resumeFailureDetail?: string;
+    allowForkContext?: boolean;
   }): Promise<GrokBuildWorkflowOutcome> {
-    return this.drive(script, args, options);
+    if (options.executionId) {
+      await this.host.beginExecution?.(options.executionId, { allowForkContext: options.allowForkContext === true });
+    }
+    try { return await this.drive(script, args, options); }
+    finally {
+      if (options.executionId) await this.host.endExecution?.(options.executionId);
+    }
   }
 
   async validate(script: string, args: unknown, options: { agentBudget: number; signal: AbortSignal }): Promise<GrokBuildWorkflowValidationReport> {
@@ -123,15 +146,29 @@ export class GrokBuildJournalRhaiEngine implements GrokBuildWorkflowEngine {
   private async drive(
     script: string,
     args: unknown,
-    options: { agentBudget: number; signal: AbortSignal; executionId?: string; resume?: boolean },
+    options: { agentBudget: number; signal: AbortSignal; executionId?: string; resume?: boolean; resumeFailureDetail?: string },
     canned = false,
   ): Promise<GrokBuildWorkflowOutcome> {
+    if (options.executionId && options.resume && options.resumeFailureDetail !== undefined) {
+      this.storage?.pruneTrailingHostError?.(options.executionId, options.resumeFailureDetail);
+      const memory = this.journals.get(options.executionId);
+      const value = memory?.at(-1)?.value;
+      const message = value && typeof value === "object"
+        ? (value as { __xai_workflow_host_error?: unknown }).__xai_workflow_host_error
+        : undefined;
+      if (typeof message === "string" && message && options.resumeFailureDetail.includes(message)) {
+        memory!.pop();
+      }
+    }
     const journal = options.executionId && options.resume
-      ? [...(this.journals.get(options.executionId) ?? [])]
+      ? [...(this.journals.get(options.executionId) ?? this.storage?.load(options.executionId) ?? [])]
       : [];
     let spent = journal.filter((entry) => entry.kind === "spawn_agent").length;
     const persist = (): void => {
-      if (options.executionId) this.journals.set(options.executionId, [...journal]);
+      if (options.executionId) {
+        this.storage?.save(options.executionId, journal);
+        this.journals.set(options.executionId, [...journal]);
+      }
     };
     while (journal.length <= MAX_HOST_CALLS) {
       if (options.signal.aborted) return { status: "cancelled" };
@@ -144,7 +181,7 @@ export class GrokBuildJournalRhaiEngine implements GrokBuildWorkflowEngine {
       }
       for (const entry of step.journalEntries ?? []) {
         if (entry.seq !== journal.length) return { status: "failed", error: `workflow journal is not dense: expected sequence ${journal.length}, found ${entry.seq}` };
-        journal.push({ ...entry });
+        journal.push({ ...entry, atMs: entry.atMs ?? Date.now() });
       }
       if (step.journalEntries?.length) persist();
       if (step.type === "completed") return { status: "completed", result: step.result };
@@ -193,7 +230,7 @@ export class GrokBuildJournalRhaiEngine implements GrokBuildWorkflowEngine {
       }
       for (let index = 0; index < step.requests.length; index += 1) {
         const request = step.requests[index]!;
-        journal.push({ seq: request.seq, kind: request.kind, requestHash: request.requestHash, value: values[index] });
+        journal.push({ seq: request.seq, kind: request.kind, requestHash: request.requestHash, value: values[index], atMs: Date.now() });
       }
       persist();
     }

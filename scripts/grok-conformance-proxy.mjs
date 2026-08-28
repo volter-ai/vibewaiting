@@ -12,6 +12,7 @@ import {
   ProtocolSymbolMatcher,
   canonicalRequest,
   filterForwardHeaders,
+  normalizeTelemetryMeasurements,
   requestKey,
   safeResponseHeaders,
   sha256,
@@ -38,6 +39,7 @@ const browserState = new LaneProtocolState();
 const symbolMatcher = new ProtocolSymbolMatcher();
 let sequence = 0;
 const expectedByKey = new Map();
+const expectedControlPlaneOrder = [];
 let driverProfile;
 
 if (mode === "record") {
@@ -54,6 +56,10 @@ if (mode === "record") {
   writeFileSync(corpusPath, `${JSON.stringify(manifest)}\n`, { encoding: "utf8", mode: 0o600 });
 } else {
   loadCorpus(corpusPath, expectedByKey);
+  expectedControlPlaneOrder.push(...[...expectedByKey.values()]
+    .flat()
+    .filter((exchange) => exchange.key !== "POST /v1/traces")
+    .sort((left, right) => left.sequence - right.sequence));
   driverProfile = buildDriverProfile(corpusPath);
 }
 
@@ -87,6 +93,11 @@ const server = createServer(async (request, response) => {
       assertQueuesComplete(response, (exchange) => exchange.key === "POST /v1/responses", "model-request corpus");
       return;
     }
+    if (localUrl.pathname === "/__conformance__/assert-control-plane-complete") {
+      if (mode === "record") throw new ProtocolViolation("Completion assertions are available only in replay modes.");
+      assertQueuesComplete(response, (exchange) => exchange.key !== "POST /v1/traces", "non-OTLP control-plane corpus");
+      return;
+    }
     if (localUrl.pathname === "/__conformance__/assert-complete") {
       if (mode === "record") throw new ProtocolViolation("Completion assertions are available only in replay modes.");
       assertQueuesComplete(response, () => true, "complete native corpus");
@@ -101,10 +112,18 @@ const server = createServer(async (request, response) => {
 
     if (mode !== "record") {
       const queue = expectedByKey.get(requestKey(canonical));
-      const expected = queue?.[0];
+      const expected = requestKey(canonical) === "POST /v1/traces"
+        ? queue?.[0]
+        : expectedControlPlaneOrder[0];
       if (!expected) throw new ProtocolViolation(`No native exchange remains for ${requestKey(canonical)}.`);
+      if (expected.key !== requestKey(canonical)) {
+        throw new ProtocolViolation(
+          `Browser Grok reordered the native control plane: expected ${expected.key} (sequence ${expected.sequence}) before ${requestKey(canonical)}.`,
+        );
+      }
       symbolMatcher.assertMatch(expected.request, canonical);
       queue.shift();
+      if (expected.key !== "POST /v1/traces") expectedControlPlaneOrder.shift();
       if (mode === "replay") {
         sendRecorded(response, expected.response);
         log("replay_match", { sequence: expected.sequence, key: expected.key });
@@ -223,6 +242,17 @@ function loadCorpus(path, output) {
     if (exchange.kind !== "exchange") usage("Corpus contains an invalid record.");
     const actualHash = sha256(stableJson(exchange.request));
     if (actualHash !== exchange.requestSha256) usage(`Corpus request integrity check failed at sequence ${exchange.sequence}.`);
+    // Recorded format-v2 requests predate replay-time clock abstraction. Keep
+    // the signed corpus bytes intact for integrity verification, then apply
+    // the same canonical projection used for the live browser lane.
+    normalizeTelemetryMeasurements(exchange.request?.path ?? "", exchange.request?.body);
+    // Early format-v2 corpora predate path UUID symbolization for turn deltas.
+    // Normalize after integrity verification so those recordings remain strict-
+    // replayable against the current lane relationship matcher.
+    if (/^\/v1\/sessions\/[0-9a-f-]{36}\/turn-deltas$/iu.test(exchange.request?.path ?? "")) {
+      exchange.request.path = exchange.request.path.replace(/(?<=\/sessions\/)[^/]+(?=\/turn-deltas$)/u, "<identifier:uuid:1>");
+      exchange.key = requestKey(exchange.request);
+    }
     // Early format-v2 corpora kept this UUID literal even though the same
     // session identity was symbolized in headers. Normalize that relationship.
     if (typeof exchange.request?.body?.prompt_cache_key === "string"
@@ -302,6 +332,12 @@ function buildDriverProfile(path) {
     && exchange.request?.headers?.["x-grok-turn-idx"] === undefined
     && exchange !== compaction
   ).length;
+  const signalExchanges = exchanges.filter((exchange) => exchange.key.includes("/signals"));
+  const periodicSignalAssistantCounts = signalExchanges.slice(1, -1).flatMap((exchange) =>
+    Number.isSafeInteger(exchange.request?.body?.assistantMessageCount)
+      ? [exchange.request.body.assistantMessageCount]
+      : []
+  );
   const nativeWorkspacePath = extractWorkspacePath(initial.input);
   const initialFiles = extractInitialWorkspaceFiles(foreground, nativeWorkspacePath);
   return {
@@ -312,6 +348,8 @@ function buildDriverProfile(path) {
     toolResults,
     foregroundRequests: foreground.length,
     modelRequests: exchanges.filter((exchange) => exchange.key === "POST /v1/responses").length,
+    bundleArchiveRequests: exchanges.filter((exchange) => exchange.key === "GET /v1/bundle/archive").length,
+    ...(periodicSignalAssistantCounts.length > 0 ? { periodicSignalAssistantCounts } : {}),
     turnSummaryRequests,
     reasoningEffort: initial.reasoning?.effort,
     nativeWorkspacePath,

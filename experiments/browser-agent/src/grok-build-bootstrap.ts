@@ -9,6 +9,9 @@ import type { GrokTool } from "../../../src/grok-browser-protocol.js";
 const DEFAULT_CONTEXT_WINDOW = 256_000;
 const DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT = 80;
 const SETTINGS_FETCH_MAX_ATTEMPTS = 3;
+const MODELS_CACHE_TTL_MS = 300_000;
+const MODELS_CACHE_VERSION = "1.0.5";
+const MODELS_CACHE_KEY = "vibewaiting:grok-build:models-cache:v1";
 const BUNDLED_MODELS = {
   data: [{
     id: "grok-4.6",
@@ -64,6 +67,19 @@ export interface GrokBuildStartupOptions {
   tools: readonly GrokTool[];
   signal?: AbortSignal;
   sleep?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
+  storage?: Pick<Storage, "getItem" | "setItem" | "removeItem">;
+  now?: () => number;
+  remoteFetchEnabled?: boolean;
+  authMethod?: string;
+}
+
+interface ModelsCacheRecord {
+  fetchedAt: number;
+  grokVersion: string;
+  authMethod: string;
+  origin: string;
+  etag?: string;
+  payload: unknown;
 }
 
 /** Parse the aliases and defaults accepted by native `parse_remote_model_value`. */
@@ -189,28 +205,149 @@ export function applyGrokBuildRemoteToolGates(
 export async function fetchGrokBuildStartupProfile(options: GrokBuildStartupOptions): Promise<GrokBuildStartupProfile> {
   const fetchImpl = options.fetch ?? ((input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init));
   const base = (options.baseUrl ?? "/api/grok").replace(/\/$/u, "");
-  let models: unknown = BUNDLED_MODELS;
-  try {
-    const modelsResponse = await fetchWithTimeout(fetchImpl, `${base}/models`, options.signal, 5_000);
-    if (modelsResponse.ok) models = await modelsResponse.json() as unknown;
-  } catch {
-    options.signal?.throwIfAborted();
-    // Native keeps its embedded catalog when the optional remote prefetch misses.
+  const modelsUrl = `${base}/models`;
+  const cache = readModelsCache(options, modelsUrl);
+  let models: unknown = cache?.payload ?? BUNDLED_MODELS;
+  if (!cache && options.remoteFetchEnabled !== false) {
+    try {
+      const modelsResponse = await fetchWithTimeout(fetchImpl, modelsUrl, options.signal, 5_000);
+      if (modelsResponse.ok) {
+        models = await modelsResponse.json() as unknown;
+        writeModelsCache(options, modelsUrl, models, modelsResponse.headers.get("ETag") ?? undefined);
+      }
+    } catch {
+      options.signal?.throwIfAborted();
+      // Native keeps its embedded catalog when the optional remote prefetch misses.
+    }
   }
   let settings: unknown = {};
-  try {
-    settings = await fetchSettings(fetchImpl, `${base}/settings`, options);
-  } catch {
-    options.signal?.throwIfAborted();
-    // Native starts with client defaults when early remote settings are absent.
-  }
-  try {
-    settings = await fetchSettings(fetchImpl, `${base}/settings`, options);
-  } catch {
-    options.signal?.throwIfAborted();
-    // A failed later re-apply leaves the already-resolved settings untouched.
+  if (options.remoteFetchEnabled !== false) {
+    try {
+      settings = await fetchSettings(fetchImpl, `${base}/settings`, options);
+    } catch {
+      options.signal?.throwIfAborted();
+      // Native starts with client defaults when early remote settings are absent.
+    }
+    try {
+      settings = await fetchSettings(fetchImpl, `${base}/settings`, options);
+    } catch {
+      options.signal?.throwIfAborted();
+      // A failed later re-apply leaves the already-resolved settings untouched.
+    }
   }
   return resolveGrokBuildStartupProfile(models, settings, options.tools);
+}
+
+/**
+ * Source-shaped startup owner: one early prefetch, a separate post-auth guard,
+ * and a coalesced refresh for later sessions. Returned profiles are immutable
+ * snapshots, so an in-flight session never observes a settings replacement.
+ */
+export class GrokBuildStartupCoordinator {
+  private profile: GrokBuildStartupProfile | undefined;
+  private prefetching: Promise<GrokBuildStartupProfile> | undefined;
+  private reapplying: Promise<GrokBuildStartupProfile> | undefined;
+  private postAuthRefreshing: Promise<GrokBuildStartupProfile> | undefined;
+
+  constructor(private readonly options: GrokBuildStartupOptions) {}
+
+  prefetch(): Promise<GrokBuildStartupProfile> {
+    this.prefetching ??= fetchGrokBuildStartupProfile(this.options)
+      .then((profile) => (this.profile = cloneProfile(profile)))
+      .finally(() => { this.prefetching = undefined; });
+    return this.prefetching.then(cloneProfile);
+  }
+
+  async snapshot(): Promise<GrokBuildStartupProfile> {
+    if (this.profile) return cloneProfile(this.profile);
+    return this.prefetch();
+  }
+
+  refreshForNewSession(): Promise<GrokBuildStartupProfile> {
+    if (this.postAuthRefreshing) return this.postAuthRefreshing.then(cloneProfile);
+    this.reapplying ??= this.refreshSettings().finally(() => { this.reapplying = undefined; });
+    return this.reapplying.then(cloneProfile);
+  }
+
+  refreshAfterAuth(): Promise<GrokBuildStartupProfile> {
+    if (!this.profile) return this.prefetch();
+    this.postAuthRefreshing ??= this.refreshSettings().finally(() => { this.postAuthRefreshing = undefined; });
+    return this.postAuthRefreshing.then(cloneProfile);
+  }
+
+  current(): GrokBuildStartupProfile | undefined {
+    return this.profile ? cloneProfile(this.profile) : undefined;
+  }
+
+  private async refreshSettings(): Promise<GrokBuildStartupProfile> {
+    const current = this.profile ?? await this.prefetch();
+    if (this.options.remoteFetchEnabled === false) return cloneProfile(current);
+    const fetchImpl = this.options.fetch ?? ((input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init));
+    const base = (this.options.baseUrl ?? "/api/grok").replace(/\/$/u, "");
+    let settings: unknown;
+    try {
+      settings = await fetchSettings(fetchImpl, `${base}/settings`, this.options);
+    } catch {
+      this.options.signal?.throwIfAborted();
+      return cloneProfile(current);
+    }
+    this.profile = resolveGrokBuildStartupProfile({ data: current.models.map((model) => model.raw) }, settings, this.options.tools);
+    return cloneProfile(this.profile);
+  }
+}
+
+function cloneProfile(profile: GrokBuildStartupProfile): GrokBuildStartupProfile {
+  return structuredClone(profile);
+}
+
+function modelsCacheStorage(options: GrokBuildStartupOptions): Pick<Storage, "getItem" | "setItem" | "removeItem"> | undefined {
+  if (options.storage) return options.storage;
+  try {
+    return globalThis.localStorage;
+  } catch {
+    return;
+  }
+}
+
+function readModelsCache(options: GrokBuildStartupOptions, origin: string): ModelsCacheRecord | undefined {
+  const storage = modelsCacheStorage(options);
+  if (!storage) return;
+  try {
+    const raw = storage.getItem(MODELS_CACHE_KEY);
+    if (!raw) return;
+    const parsed: unknown = JSON.parse(raw);
+    if (!isObject(parsed)) return;
+    const record = parsed as unknown as ModelsCacheRecord;
+    const now = (options.now ?? Date.now)();
+    const valid = record.grokVersion === MODELS_CACHE_VERSION
+      && record.authMethod === (options.authMethod ?? "session")
+      && record.origin === origin
+      && Number.isFinite(record.fetchedAt)
+      && now >= record.fetchedAt
+      && now - record.fetchedAt < MODELS_CACHE_TTL_MS;
+    if (valid) return record;
+    storage.removeItem(MODELS_CACHE_KEY);
+  } catch {
+    return;
+  }
+}
+
+function writeModelsCache(options: GrokBuildStartupOptions, origin: string, payload: unknown, etag?: string): void {
+  const storage = modelsCacheStorage(options);
+  if (!storage) return;
+  const record: ModelsCacheRecord = {
+    fetchedAt: (options.now ?? Date.now)(),
+    grokVersion: MODELS_CACHE_VERSION,
+    authMethod: options.authMethod ?? "session",
+    origin,
+    ...(etag ? { etag } : {}),
+    payload,
+  };
+  try {
+    storage.setItem(MODELS_CACHE_KEY, JSON.stringify(record));
+  } catch {
+    // Native cache persistence is best-effort and never blocks readiness.
+  }
 }
 
 async function fetchSettings(
