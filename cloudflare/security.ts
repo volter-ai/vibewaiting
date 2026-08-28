@@ -314,3 +314,34 @@ export function normalizeWebFetchRedirectUrl(raw: unknown): URL {
 export function sameWebFetchHost(left: URL, right: URL): boolean {
   return left.hostname === right.hostname;
 }
+
+/** Validate an xAI-issued media URL before the relay performs a server-side download. */
+export function normalizeVideoDownloadUrl(raw: unknown): URL {
+  if (typeof raw !== "string" || raw.length === 0 || raw.length > MAX_WEB_FETCH_URL_BYTES) {
+    throw new Error("Video download URL is invalid");
+  }
+  const url = new URL(raw);
+  if (url.protocol !== "https:" || url.username || url.password || url.port) {
+    throw new Error("Video download URL must use credential-free HTTPS");
+  }
+  const host = url.hostname.toLowerCase().replace(/\.+$/u, "");
+  if (!host.includes(".") || host.includes(":")
+    || /(?:^|\.)(?:localhost|local|internal|home\.arpa)$/u.test(host)) {
+    throw new Error("Video download URL host is not public");
+  }
+  const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/u.exec(host);
+  if (ipv4) {
+    const octets = ipv4.slice(1).map(Number);
+    if (octets.some((octet) => octet > 255)) throw new Error("Video download URL host is invalid");
+    const [first = 0, second = 0] = octets;
+    if (first === 0 || first === 10 || first === 127 || first >= 224
+      || (first === 100 && second >= 64 && second <= 127)
+      || (first === 169 && second === 254)
+      || (first === 172 && second >= 16 && second <= 31)
+      || (first === 192 && second === 168)
+      || (first === 198 && (second === 18 || second === 19))) {
+      throw new Error("Video download URL host is not public");
+    }
+  }
+  return url;
+}

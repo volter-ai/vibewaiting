@@ -2,7 +2,7 @@
 
 // Kept outside the Node/DOM typecheck graph because Workers and DOM both declare Element.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { GrokSession } from "../cloudflare/worker.js";
+import worker, { GrokSession, RateGate, SECURITY_LIMITS } from "../cloudflare/worker.js";
 
 class MemoryStorage {
   readonly values = new Map<string, unknown>();
@@ -38,6 +38,7 @@ function request(path: string, method = "GET"): Request {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -89,6 +90,31 @@ describe("Grok encrypted device-auth sessions", () => {
     const credentialEnvelope = String(storage.values.get("session"));
     expect(credentialEnvelope).not.toContain("initial-access");
     expect(credentialEnvelope).not.toContain("initial-refresh");
+
+    expect((await session.fetch(new Request("https://durable.internal/video/register", {
+      method: "POST",
+      body: JSON.stringify({ requestId: "video-1" }),
+    }))).status).toBe(200);
+    expect((await session.fetch(new Request("https://durable.internal/video/check", {
+      method: "POST",
+      body: JSON.stringify({ requestId: "video-1" }),
+    }))).status).toBe(200);
+    expect((await session.fetch(new Request("https://durable.internal/video/claim", {
+      method: "POST",
+      body: JSON.stringify({ requestId: "video-1" }),
+    }))).status).toBe(200);
+    expect((await session.fetch(new Request("https://durable.internal/video/check", {
+      method: "POST",
+      body: JSON.stringify({ requestId: "video-1" }),
+    }))).status).toBe(409);
+    expect((await session.fetch(new Request("https://durable.internal/video/complete", {
+      method: "POST",
+      body: JSON.stringify({ requestId: "video-1" }),
+    }))).status).toBe(200);
+    expect((await session.fetch(new Request("https://durable.internal/video/check", {
+      method: "POST",
+      body: JSON.stringify({ requestId: "video-1" }),
+    }))).status).toBe(410);
 
     const first = session.fetch(request("/credential"));
     const second = session.fetch(request("/credential"));
@@ -175,5 +201,64 @@ describe("Grok encrypted device-auth sessions", () => {
     now += 1_000;
     expect((await session.fetch(request("/poll", "POST"))).status).toBe(403);
     expect((await session.fetch(request("/poll", "POST"))).status).toBe(409);
+  });
+});
+
+describe("distributed relay budgets", () => {
+  it("enforces concurrency globally and releases reservations", async () => {
+    const storage = new MemoryStorage();
+    const gate = new RateGate(state(storage));
+    const acquire = (userKey: string, reservationId: string) => gate.fetch(new Request("https://durable.internal/acquire-chat", {
+      method: "POST",
+      body: JSON.stringify({ userKey, reservationId }),
+    }));
+    const release = (reservationId: string) => gate.fetch(new Request("https://durable.internal/release-chat", {
+      method: "POST",
+      body: JSON.stringify({ reservationId }),
+    }));
+
+    for (let index = 0; index < SECURITY_LIMITS.globalConcurrency; index += 1) {
+      expect((await acquire(`user-${index}`, `reservation-${index}`)).status).toBe(200);
+    }
+    expect((await acquire("overflow", "overflow-reservation")).status).toBe(429);
+    expect((await acquire("user-0", "duplicate-user")).status).toBe(429);
+    expect((await release("reservation-0")).status).toBe(200);
+    expect((await acquire("replacement", "replacement-reservation")).status).toBe(200);
+  });
+
+  it("enforces per-user and global daily web_fetch budgets and resets on a new UTC day", async () => {
+    let now = 1_800_000_000_000;
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const storage = new MemoryStorage();
+    const gate = new RateGate(state(storage));
+    const acquire = (userKey: string) => gate.fetch(new Request("https://durable.internal/acquire-web-fetch", {
+      method: "POST",
+      body: JSON.stringify({ userKey }),
+    }));
+
+    for (let index = 0; index < SECURITY_LIMITS.userDailyWebFetches; index += 1) {
+      expect((await acquire("single-user")).status).toBe(200);
+    }
+    expect((await acquire("single-user")).status).toBe(429);
+
+    const remainingGlobal = SECURITY_LIMITS.globalDailyWebFetches - SECURITY_LIMITS.userDailyWebFetches;
+    for (let index = 0; index < remainingGlobal; index += 1) {
+      expect((await acquire(`distributed-${index}`)).status).toBe(200);
+    }
+    expect((await acquire("global-overflow")).status).toBe(429);
+
+    now += 24 * 60 * 60 * 1_000;
+    vi.setSystemTime(now);
+    expect((await acquire("single-user")).status).toBe(200);
+  });
+
+  it("fails closed when the global relay kill switch is off", async () => {
+    const response = await worker.fetch(
+      new Request("https://agent.example/api/grok/models"),
+      { RELAY_ENABLED: "false" } as never,
+    );
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ error: { message: "The Grok relay is temporarily disabled." } });
   });
 });

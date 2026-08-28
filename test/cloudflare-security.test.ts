@@ -6,6 +6,7 @@ import {
   normalizeWebFetchUrl,
   normalizeImageMediaRequest,
   normalizeVideoMediaRequest,
+  normalizeVideoDownloadUrl,
   normalizeGrokResponsesRequest,
   normalizeGrokTelemetryRoute,
   sameWebFetchHost,
@@ -142,6 +143,11 @@ describe("Cloudflare browser-agent security boundary", () => {
       resolution: "480p",
       image: "https://example.com/a.png",
     })).toThrow(/6 or 10/u);
+
+    expect(normalizeVideoDownloadUrl("https://media.example.com/result.mp4").hostname).toBe("media.example.com");
+    expect(() => normalizeVideoDownloadUrl("https://127.0.0.1/private.mp4")).toThrow(/not public/u);
+    expect(() => normalizeVideoDownloadUrl("https://metadata.internal/video.mp4")).toThrow(/not public/u);
+    expect(() => normalizeVideoDownloadUrl("https://user:secret@media.example/video.mp4")).toThrow(/credential-free/u);
   });
 
   it("allows only fixed telemetry endpoints with valid Grok session UUIDs", () => {

@@ -9,6 +9,7 @@ import {
   normalizeWebFetchUrl,
   normalizeImageMediaRequest,
   normalizeVideoMediaRequest,
+  normalizeVideoDownloadUrl,
   normalizeGrokTelemetryRoute,
   normalizeGrokResponsesRequest,
   positiveTurn,
@@ -23,6 +24,9 @@ import {
   createGrokSessionTitleHeaders,
   createGrokSideCallHeaders,
 } from "../src/grok-browser-protocol.js";
+import { RATE_GATE_LIMITS } from "./rate-gate.js";
+
+export { RateGate } from "./rate-gate.js";
 
 const AUTH_ORIGIN = "https://auth.x.ai";
 const DEVICE_URL = `${AUTH_ORIGIN}/oauth2/device/code`;
@@ -47,16 +51,9 @@ const OAUTH_SCOPES = [
 const SESSION_COOKIE = "__Host-vw_session";
 const SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
 const SESSION_ALARM_MS = SESSION_MAX_AGE_SECONDS * 1_000;
-const GLOBAL_DAILY_CHAT_LIMIT = 100;
-const USER_DAILY_CHAT_LIMIT = 40;
-const GLOBAL_CONCURRENCY_LIMIT = 5;
-const USER_CONCURRENCY_LIMIT = 1;
-const AUTH_START_DAILY_GLOBAL_LIMIT = 50;
-const AUTH_START_DAILY_IP_LIMIT = 5;
-const RESERVATION_LEASE_MS = 3 * 60 * 1_000;
-const GLOBAL_DAILY_MEDIA_LIMIT = 20;
-const USER_DAILY_MEDIA_LIMIT = 5;
 const VIDEO_REQUEST_TOKEN_MAX_AGE_MS = 10 * 60 * 1_000;
+const VIDEO_DOWNLOAD_CLAIM_MS = 2 * 60 * 1_000;
+const MAX_VIDEO_REQUESTS_PER_SESSION = 10;
 const MAX_IMAGE_RESPONSE_BYTES = 12 * 1024 * 1024;
 const MAX_VIDEO_RESPONSE_BYTES = 100 * 1024 * 1024;
 const MAX_BOOTSTRAP_RESPONSE_BYTES = 1024 * 1024;
@@ -81,7 +78,10 @@ interface Env {
   AUTH_RATE_LIMITER: RateLimit;
   CHAT_IP_RATE_LIMITER: RateLimit;
   CHAT_USER_RATE_LIMITER: RateLimit;
+  RELAY_ENABLED: string;
   INFERENCE_ENABLED: string;
+  MEDIA_ENABLED: string;
+  WEB_FETCH_ENABLED: string;
   XAI_CLIENT_VERSION: string;
   XAI_OAUTH_CLIENT_ID: string;
   SESSION_ENCRYPTION_KEY: string;
@@ -111,6 +111,7 @@ interface CredentialState {
 interface SessionState {
   device?: DeviceState;
   credential?: CredentialState;
+  videoRequests?: Record<string, { expiresAt: number; claimedAt?: number }>;
 }
 
 interface TokenResponse {
@@ -120,22 +121,6 @@ interface TokenResponse {
   id_token?: unknown;
   error?: unknown;
   error_description?: unknown;
-}
-
-interface RateReservation {
-  userKey: string;
-  expiresAt: number;
-}
-
-interface GateState {
-  day: string;
-  globalChats: number;
-  userChats: Record<string, number>;
-  reservations: Record<string, RateReservation>;
-  authStarts: number;
-  authStartsByIp: Record<string, number>;
-  globalMediaStarts: number;
-  userMediaStarts: Record<string, number>;
 }
 
 interface InternalCredential {
@@ -385,6 +370,10 @@ async function mediaSigningKey(env: Env): Promise<CryptoKey> {
   return crypto.subtle.importKey("raw", raw.buffer as ArrayBuffer, { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
 }
 
+function validVideoRequestId(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{1,256}$/u.test(value);
+}
+
 async function createVideoRequestToken(env: Env, requestId: string, userId: string): Promise<string> {
   const payload = base64Url(new TextEncoder().encode(JSON.stringify({ requestId, userId, expiresAt: Date.now() + VIDEO_REQUEST_TOKEN_MAX_AGE_MS })));
   const signature = await crypto.subtle.sign("HMAC", await mediaSigningKey(env), new TextEncoder().encode(payload));
@@ -404,8 +393,7 @@ async function verifyVideoRequestToken(env: Env, token: unknown, userId: string)
     );
     if (!valid) return undefined;
     const value = JSON.parse(new TextDecoder().decode(fromBase64Url(payload))) as Record<string, unknown>;
-    return typeof value.requestId === "string"
-      && /^[A-Za-z0-9_-]{1,256}$/u.test(value.requestId)
+    return validVideoRequestId(value.requestId)
       && value.userId === userId
       && typeof value.expiresAt === "number"
       && value.expiresAt > Date.now()
@@ -498,6 +486,11 @@ async function requireEdgeLimit(limiter: RateLimit, key: string): Promise<boolea
   return result.success;
 }
 
+async function acquireDailyGate(env: Env, path: string, userKey: string): Promise<Response | undefined> {
+  const gate = await internalJson(gateStub(env), path, { userKey });
+  return gate.ok ? undefined : new Response(gate.body, gate);
+}
+
 async function routeDeviceStart(request: Request, env: Env): Promise<Response> {
   const ipHash = await sha256(clientIp(request));
   if (!(await requireEdgeLimit(env.AUTH_RATE_LIMITER, `start:${ipHash}`))) {
@@ -532,6 +525,7 @@ async function routeSession(request: Request, env: Env, action: "poll" | "status
 }
 
 async function routeWebFetch(request: Request, env: Env): Promise<Response> {
+  if (env.WEB_FETCH_ENABLED !== "true") return error("Grok web_fetch is temporarily disabled.", 503);
   const sessionId = cookieValue(request.headers.get("Cookie"), SESSION_COOKIE);
   if (!validSessionId(sessionId)) return error("Connect a Grok subscription before using web_fetch.", 401);
   let current: URL;
@@ -557,6 +551,8 @@ async function routeWebFetch(request: Request, env: Env): Promise<Response> {
   if (!(await requireEdgeLimit(env.CHAT_USER_RATE_LIMITER, `fetch:${userKey}`))) {
     return error("This Grok account has reached the per-minute web_fetch limit.", 429, 60);
   }
+  const dailyLimit = await acquireDailyGate(env, "/acquire-web-fetch", userKey);
+  if (dailyLimit) return dailyLimit;
 
   const originalHost = current.hostname;
   try {
@@ -610,7 +606,9 @@ async function requireMediaCredential(request: Request, env: Env): Promise<{
   session: DurableObjectStub;
   credential: InternalCredential;
 } | Response> {
-  if (env.INFERENCE_ENABLED !== "true") return error("Grok inference is temporarily disabled.", 503);
+  if (env.INFERENCE_ENABLED !== "true" || env.MEDIA_ENABLED !== "true") {
+    return error("Grok media generation is temporarily disabled.", 503);
+  }
   const sessionId = cookieValue(request.headers.get("Cookie"), SESSION_COOKIE);
   if (!validSessionId(sessionId)) return error("Connect a Grok subscription before using Imagine.", 401);
   const session = sessionStub(env, sessionId);
@@ -749,35 +747,59 @@ async function routeVideoStart(request: Request, env: Env): Promise<Response> {
     const text = new TextDecoder().decode(raw);
     if (!upstream.ok) return error(`Video generation failed with HTTP ${upstream.status}: ${[...text].slice(0, 500).join("")}`, upstream.status);
     const parsed = JSON.parse(text) as { request_id?: unknown };
-    if (typeof parsed.request_id !== "string" || !parsed.request_id) return error("No request_id received from the video generation API.", 502);
-    return json({ requestToken: await createVideoRequestToken(env, parsed.request_id, credential.userId) });
+    const requestId = parsed.request_id;
+    if (!validVideoRequestId(requestId)) return error("No valid request_id received from the video generation API.", 502);
+    const registered = await internalJson(session, "/video/register", { requestId });
+    if (!registered.ok) return new Response(registered.body, registered);
+    return json({ requestToken: await createVideoRequestToken(env, requestId, credential.userId) });
   } catch (cause) {
     console.error("imagine_video_start_failed", cause instanceof Error ? cause.message : "unknown");
     return error(cause instanceof Error ? cause.message : "Video generation failed.", 502);
   }
 }
 
-function boundedResponseStream(response: Response, maximum: number): ReadableStream<Uint8Array> {
-  if (!response.body) return new ReadableStream({ start(controller) { controller.close(); } });
+function boundedResponseStream(
+  response: Response,
+  maximum: number,
+  settle: (completed: boolean) => Promise<void>,
+): ReadableStream<Uint8Array> {
+  if (!response.body) return new ReadableStream({
+    async start(controller) {
+      await settle(true);
+      controller.close();
+    },
+  });
   const reader = response.body.getReader();
   let received = 0;
+  let settled = false;
+  const finish = async (completed: boolean): Promise<void> => {
+    if (settled) return;
+    settled = true;
+    await settle(completed);
+  };
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
       try {
         const { done, value } = await reader.read();
-        if (done) return controller.close();
+        if (done) {
+          await finish(true);
+          return controller.close();
+        }
         received += value.byteLength;
         if (received > maximum) {
           await reader.cancel("video response too large").catch(() => undefined);
+          await finish(false);
           return controller.error(new Error(`Video response exceeds ${maximum} bytes`));
         }
         controller.enqueue(value);
       } catch (cause) {
+        await finish(false);
         controller.error(cause);
       }
     },
-    cancel(reason) {
-      return reader.cancel(reason);
+    async cancel(reason) {
+      await reader.cancel(reason).catch(() => undefined);
+      await finish(false);
     },
   });
 }
@@ -796,9 +818,20 @@ async function routeVideoPoll(request: Request, env: Env): Promise<Response> {
   const authenticated = await requireMediaCredential(request, env);
   if (authenticated instanceof Response) return authenticated;
   const { session, credential } = authenticated;
+  const ipHash = await sha256(clientIp(request));
+  if (!(await requireEdgeLimit(env.CHAT_IP_RATE_LIMITER, `media-poll:${ipHash}`))) {
+    return error("This network is polling video generation too quickly.", 429, 60);
+  }
+  const userKey = await sha256(credential.userId);
+  if (!(await requireEdgeLimit(env.CHAT_USER_RATE_LIMITER, `media-poll:${userKey}`))) {
+    return error("This Grok account is polling video generation too quickly.", 429, 60);
+  }
   const requestId = await verifyVideoRequestToken(env, token, credential.userId);
   if (!requestId) return error("The video generation request token is invalid or expired.", 403);
+  const checked = await internalJson(session, "/video/check", { requestId });
+  if (!checked.ok) return new Response(checked.body, checked);
   const sessionId = mediaSessionId(request);
+  let downloadClaimed = false;
   try {
     const upstream = await mediaUpstream(session, credential, env, `${XAI_API_ORIGIN}/videos/${encodeURIComponent(requestId)}`, (accessToken) => ({
       method: "GET",
@@ -809,18 +842,42 @@ async function routeVideoPoll(request: Request, env: Env): Promise<Response> {
     const text = new TextDecoder().decode(raw);
     if (!upstream.ok && upstream.status !== 202) return error(`Video poll failed with HTTP ${upstream.status}: ${[...text].slice(0, 200).join("")}`, upstream.status);
     const parsed = JSON.parse(text) as { status?: unknown; video?: { url?: unknown } };
-    if (parsed.status === "failed") return error(`Video generation failed on the server (request_id=${requestId}): ${[...text].slice(0, 300).join("")}`, 502);
-    if (parsed.status === "expired") return error(`Video generation request expired (request_id=${requestId}).`, 410);
+    if (parsed.status === "failed") {
+      await internalJson(session, "/video/complete", { requestId });
+      return error(`Video generation failed on the server (request_id=${requestId}): ${[...text].slice(0, 300).join("")}`, 502);
+    }
+    if (parsed.status === "expired") {
+      await internalJson(session, "/video/complete", { requestId });
+      return error(`Video generation request expired (request_id=${requestId}).`, 410);
+    }
     if (parsed.status !== "done") return json({ status: "pending" }, 202);
     const videoUrl = parsed.video?.url;
     if (typeof videoUrl !== "string" || !videoUrl) return error("Video generation completed but no download URL was returned.", 502);
-    const url = new URL(videoUrl);
-    if (url.protocol !== "https:" || url.username || url.password) return error("Video generation returned an unsafe download URL.", 502);
+    let url: URL;
+    try {
+      url = normalizeVideoDownloadUrl(videoUrl);
+    } catch {
+      return error("Video generation returned an unsafe download URL.", 502);
+    }
+    const claimed = await internalJson(session, "/video/claim", { requestId });
+    if (!claimed.ok) return new Response(claimed.body, claimed);
+    downloadClaimed = true;
     const video = await fetch(url, { redirect: "follow", signal: AbortSignal.timeout(120_000) });
-    if (!video.ok) return error(`Video download failed (HTTP ${video.status})`, 502);
+    if (!video.ok) {
+      await internalJson(session, "/video/release", { requestId });
+      downloadClaimed = false;
+      return error(`Video download failed (HTTP ${video.status})`, 502);
+    }
     const declared = Number.parseInt(video.headers.get("Content-Length") ?? "0", 10);
-    if (Number.isFinite(declared) && declared > MAX_VIDEO_RESPONSE_BYTES) return error("Video response is too large.", 502);
-    return new Response(boundedResponseStream(video, MAX_VIDEO_RESPONSE_BYTES), {
+    if (Number.isFinite(declared) && declared > MAX_VIDEO_RESPONSE_BYTES) {
+      await video.body?.cancel().catch(() => undefined);
+      await internalJson(session, "/video/release", { requestId });
+      downloadClaimed = false;
+      return error("Video response is too large.", 502);
+    }
+    return new Response(boundedResponseStream(video, MAX_VIDEO_RESPONSE_BYTES, async (completed) => {
+      await internalJson(session, completed ? "/video/complete" : "/video/release", { requestId });
+    }), {
       headers: {
         "Cache-Control": "no-store",
         "Content-Type": "video/mp4",
@@ -828,6 +885,7 @@ async function routeVideoPoll(request: Request, env: Env): Promise<Response> {
       },
     });
   } catch (cause) {
+    if (downloadClaimed) await internalJson(session, "/video/release", { requestId }).catch(() => undefined);
     console.error("imagine_video_poll_failed", cause instanceof Error ? cause.message : "unknown");
     return error(cause instanceof Error ? cause.message : "Video polling failed.", 502);
   }
@@ -888,7 +946,10 @@ async function routeResponses(request: Request, env: Env): Promise<Response> {
     if (upstream.status === 401) {
       await upstream.body?.cancel().catch(() => undefined);
       credentialResponse = await internalJson(session, "/refresh", {});
-      if (!credentialResponse.ok) return error("The Grok session expired. Sign in again.", 401);
+      if (!credentialResponse.ok) {
+        await release();
+        return error("The Grok session expired. Sign in again.", 401);
+      }
       credential = await credentialResponse.json<{ accessToken: string; userId: string; eligible: boolean }>();
       upstream = await fetch(RESPONSES_URL, {
         method: "POST",
@@ -934,6 +995,8 @@ async function routeBootstrap(request: Request, env: Env, kind: GrokBootstrapKin
   if (!(await requireEdgeLimit(env.CHAT_USER_RATE_LIMITER, `bootstrap:${userKey}`))) {
     return error("This Grok account has reached the per-minute startup limit.", 429, 60);
   }
+  const dailyLimit = await acquireDailyGate(env, "/acquire-startup", userKey);
+  if (dailyLimit) return dailyLimit;
 
   const upstreamUrl = `${CHAT_PROXY_ORIGIN}/v1/${kind}`;
   try {
@@ -979,6 +1042,8 @@ async function routeBundle(request: Request, env: Env, kind: GrokBundleKind): Pr
   if (!(await requireEdgeLimit(env.CHAT_USER_RATE_LIMITER, `bootstrap:${userKey}`))) {
     return error("This Grok account has reached the per-minute startup limit.", 429, 60);
   }
+  const dailyLimit = await acquireDailyGate(env, "/acquire-startup", userKey);
+  if (dailyLimit) return dailyLimit;
 
   const path = kind === "archive" ? "bundle/archive" : "subagents/bundle";
   const timeout = kind === "archive" ? 30_000 : 10_000;
@@ -1027,6 +1092,8 @@ async function routeTelemetry(request: Request, env: Env, route: GrokTelemetryRo
   if (!(await requireEdgeLimit(env.CHAT_USER_RATE_LIMITER, `telemetry:${userKey}`))) {
     return error("This Grok account has reached the per-minute telemetry limit.", 429, 60);
   }
+  const dailyLimit = await acquireDailyGate(env, "/acquire-telemetry", userKey);
+  if (dailyLimit) return dailyLimit;
 
   let body: Uint8Array | undefined;
   if (request.method === "POST") {
@@ -1130,6 +1197,9 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
   const expectedContentType = telemetryRoute?.contentType ?? "application/json";
   if (mutation && request.headers.get("Content-Type")?.split(";", 1)[0] !== expectedContentType) {
     return error(`Requests must use ${expectedContentType}.`, 415);
+  }
+  if (url.pathname.startsWith("/api/grok/") && env.RELAY_ENABLED !== "true") {
+    return error("The Grok relay is temporarily disabled.", 503);
   }
 
   if (url.pathname === "/api/auth/device/start" && request.method === "POST") return routeDeviceStart(request, env);
@@ -1335,6 +1405,56 @@ export class GrokSession implements DurableObject {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname.startsWith("/video/") && request.method === "POST") {
+      const payload: Record<string, unknown> = await request.json<Record<string, unknown>>().catch(() => ({}));
+      const requestId = payload.requestId;
+      if (!validVideoRequestId(requestId) || Object.keys(payload).some((key) => key !== "requestId")) {
+        return error("Invalid video request registration.", 400);
+      }
+      const session = await this.load();
+      if (!session.credential) return error("The Grok session is not authenticated.", 401);
+      const now = Date.now();
+      const requests = Object.fromEntries(Object.entries(session.videoRequests ?? {})
+        .filter(([, entry]) => entry.expiresAt > now));
+      session.videoRequests = requests;
+      const current = requests[requestId];
+
+      if (url.pathname === "/video/register") {
+        if (!current && Object.keys(requests).length >= MAX_VIDEO_REQUESTS_PER_SESSION) {
+          return error("Too many video generation requests are pending.", 429, 60);
+        }
+        requests[requestId] = { expiresAt: now + VIDEO_REQUEST_TOKEN_MAX_AGE_MS };
+        await this.save(session);
+        return json({ registered: true });
+      }
+      if (!current) return error("The video generation request is no longer pending.", 410);
+      const activelyClaimed = current.claimedAt !== undefined && current.claimedAt + VIDEO_DOWNLOAD_CLAIM_MS > now;
+      if (url.pathname === "/video/check") {
+        if (activelyClaimed) return error("This video download is already in progress.", 409, 10);
+        if (current.claimedAt !== undefined) {
+          delete current.claimedAt;
+          await this.save(session);
+        }
+        return json({ allowed: true });
+      }
+      if (url.pathname === "/video/claim") {
+        if (activelyClaimed) return error("This video download is already in progress.", 409, 10);
+        current.claimedAt = now;
+        await this.save(session);
+        return json({ claimed: true });
+      }
+      if (url.pathname === "/video/release") {
+        delete current.claimedAt;
+        await this.save(session);
+        return json({ released: true });
+      }
+      if (url.pathname === "/video/complete") {
+        delete requests[requestId];
+        await this.save(session);
+        return json({ completed: true });
+      }
+      return error("Video session route not found.", 404);
+    }
     if (url.pathname === "/device/start" && request.method === "POST") {
       this.generation += 1;
       const params = new URLSearchParams({
@@ -1494,103 +1614,8 @@ export class GrokSession implements DurableObject {
   }
 }
 
-export class RateGate implements DurableObject {
-  constructor(private readonly state: DurableObjectState) {}
-
-  private currentDay(): string {
-    return new Date().toISOString().slice(0, 10);
-  }
-
-  private async load(): Promise<GateState> {
-    const current = await this.state.storage.get<GateState>("gate");
-    const day = this.currentDay();
-    if (current?.day === day) return current;
-    return {
-      day,
-      globalChats: 0,
-      userChats: {},
-      reservations: {},
-      authStarts: 0,
-      authStartsByIp: {},
-      globalMediaStarts: 0,
-      userMediaStarts: {},
-    };
-  }
-
-  async fetch(request: Request): Promise<Response> {
-    const url = new URL(request.url);
-    const body: Record<string, unknown> = request.method === "POST"
-      ? await request.json<Record<string, unknown>>().catch(() => ({}))
-      : {};
-    const gate = await this.load();
-    gate.globalMediaStarts ??= 0;
-    gate.userMediaStarts ??= {};
-    const now = Date.now();
-    gate.reservations = Object.fromEntries(Object.entries(gate.reservations).filter(([, lease]) => lease.expiresAt > now));
-
-    if (url.pathname === "/auth-start") {
-      const ipKey = stringValue(body.ipKey);
-      if (!ipKey) return error("Invalid authentication limiter key.", 400);
-      const ipCount = gate.authStartsByIp[ipKey] ?? 0;
-      if (gate.authStarts >= AUTH_START_DAILY_GLOBAL_LIMIT || ipCount >= AUTH_START_DAILY_IP_LIMIT) {
-        return error("The daily sign-in safety limit has been reached.", 429, 3600);
-      }
-      gate.authStarts += 1;
-      gate.authStartsByIp[ipKey] = ipCount + 1;
-      await this.state.storage.put("gate", gate);
-      return json({ allowed: true });
-    }
-
-    if (url.pathname === "/acquire-chat") {
-      const userKey = stringValue(body.userKey);
-      const reservationId = stringValue(body.reservationId);
-      if (!userKey || !reservationId) return error("Invalid rate reservation.", 400);
-      const userCount = gate.userChats[userKey] ?? 0;
-      const leases = Object.values(gate.reservations);
-      const userConcurrency = leases.filter((lease) => lease.userKey === userKey).length;
-      if (gate.globalChats >= GLOBAL_DAILY_CHAT_LIMIT) return error("The service-wide daily Grok limit has been reached.", 429, 3600);
-      if (userCount >= USER_DAILY_CHAT_LIMIT) return error("This Grok account has reached its daily agent limit.", 429, 3600);
-      if (leases.length >= GLOBAL_CONCURRENCY_LIMIT) return error("The Grok relay is at its concurrency limit. Try again shortly.", 429, 10);
-      if (userConcurrency >= USER_CONCURRENCY_LIMIT) return error("This Grok account already has an agent request running.", 429, 10);
-      gate.globalChats += 1;
-      gate.userChats[userKey] = userCount + 1;
-      gate.reservations[reservationId] = { userKey, expiresAt: now + RESERVATION_LEASE_MS };
-      await this.state.storage.put("gate", gate);
-      return json({ allowed: true, userRemaining: USER_DAILY_CHAT_LIMIT - userCount - 1, globalRemaining: GLOBAL_DAILY_CHAT_LIMIT - gate.globalChats });
-    }
-
-    if (url.pathname === "/acquire-media") {
-      const userKey = stringValue(body.userKey);
-      if (!userKey) return error("Invalid media limiter key.", 400);
-      const userCount = gate.userMediaStarts[userKey] ?? 0;
-      if (gate.globalMediaStarts >= GLOBAL_DAILY_MEDIA_LIMIT) return error("The service-wide daily Imagine relay limit has been reached.", 429, 3600);
-      if (userCount >= USER_DAILY_MEDIA_LIMIT) return error("This Grok account has reached its daily Imagine relay limit.", 429, 3600);
-      gate.globalMediaStarts += 1;
-      gate.userMediaStarts[userKey] = userCount + 1;
-      await this.state.storage.put("gate", gate);
-      return json({
-        allowed: true,
-        userRemaining: USER_DAILY_MEDIA_LIMIT - userCount - 1,
-        globalRemaining: GLOBAL_DAILY_MEDIA_LIMIT - gate.globalMediaStarts,
-      });
-    }
-
-    if (url.pathname === "/release-chat") {
-      const reservationId = stringValue(body.reservationId);
-      if (reservationId) delete gate.reservations[reservationId];
-      await this.state.storage.put("gate", gate);
-      return json({ released: true });
-    }
-    return error("Rate gate route not found.", 404);
-  }
-}
 
 export const SECURITY_LIMITS = {
   maxAgentSteps: MAX_AGENT_STEPS,
-  globalDailyChats: GLOBAL_DAILY_CHAT_LIMIT,
-  userDailyChats: USER_DAILY_CHAT_LIMIT,
-  globalConcurrency: GLOBAL_CONCURRENCY_LIMIT,
-  userConcurrency: USER_CONCURRENCY_LIMIT,
-  globalDailyMediaStarts: GLOBAL_DAILY_MEDIA_LIMIT,
-  userDailyMediaStarts: USER_DAILY_MEDIA_LIMIT,
+  ...RATE_GATE_LIMITS,
 } as const;
