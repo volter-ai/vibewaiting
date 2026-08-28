@@ -24,6 +24,13 @@ describe("Grok Build browser telemetry source port", () => {
     });
   });
 
+  it("can reproduce a recorded terminal wake admitted before headless shutdown", () => {
+    const tracker = new GrokBuildSignalTracker();
+    tracker.record({ type: "run_start", task: "start child" });
+    tracker.ensureTurnCounts(2, 2);
+    expect(tracker.snapshot()).toMatchObject({ totalTurns: 2, userMessageCount: 2 });
+  });
+
   it("tracks native session counters and stable tool discovery order", () => {
     vi.spyOn(Date, "now").mockReturnValueOnce(1_000);
     const tracker = new GrokBuildSignalTracker();

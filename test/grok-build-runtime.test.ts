@@ -142,6 +142,7 @@ describe("Grok Build browser tool runtime", () => {
     }, signal);
     const id = /subagent_id: ([0-9a-f-]+)/u.exec(started.output)?.[1];
     expect(id).toBeTruthy();
+    expect(started.output).toBe(`Subagent started in background.\nsubagent_id: ${id}\ntype: general-purpose\ndescription: Inspect files\n\nWhen you need its result, use get_command_or_subagent_output with task_ids=["${id}"] and a positive timeout_ms.`);
     await expect(tools.execute({ callId: "poll", name: "get_command_or_subagent_output", arguments: JSON.stringify({ task_ids: [id] }) }, signal))
       .resolves.toMatchObject({ output: expect.stringContaining("Status: running") });
     finish("Inspection complete");

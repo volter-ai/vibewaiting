@@ -43,6 +43,7 @@ export interface GrokBuildTelemetryLifecycleOptions {
   setInterval?: typeof globalThis.setInterval;
   clearInterval?: typeof globalThis.clearInterval;
   signalAssistantCheckpoints?: readonly number[];
+  beforeTurnDelta?: () => Promise<void>;
   trace?: Omit<GrokBuildAgentTraceProducerOptions, "sessionId" | "modelId"> & {
     clientName?: string;
     clientVersion?: string;
@@ -280,6 +281,11 @@ export class GrokBuildSignalTracker {
     this.turnBaseline.longPauses += delta;
   }
 
+  ensureTurnCounts(totalTurns: number, userMessageCount: number): void {
+    if (Number.isSafeInteger(totalTurns)) this.totalTurns = Math.max(this.totalTurns, totalTurns);
+    if (Number.isSafeInteger(userMessageCount)) this.userMessages = Math.max(this.userMessages, userMessageCount);
+  }
+
   takeTurnDelta(outcome: "completed" | "cancelled" | "error", requestId?: string, now = this.now()): GrokBuildTurnDelta {
     if (outcome === "cancelled") {
       this.cancellations += 1;
@@ -424,10 +430,12 @@ export class GrokBuildTelemetryLifecycle {
   private pending = new Set<Promise<unknown>>();
   private readonly signalAssistantCheckpoints = new Map<number, number>();
   private readonly traceProducer: GrokBuildAgentTraceProducer | undefined;
+  private readonly beforeTurnDelta: () => Promise<void>;
   private readonly traceMetadata: Pick<NonNullable<GrokBuildTelemetryLifecycleOptions["trace"]>, "clientName" | "clientVersion" | "serviceVersion" | "appEntrypoint">;
 
   constructor(readonly sessionId: string, options: GrokBuildTelemetryLifecycleOptions = {}) {
     this.client = options.client ?? new GrokBuildTelemetryClient();
+    this.beforeTurnDelta = options.beforeTurnDelta ?? (() => Promise.resolve());
     this.syncIntervalMs = options.syncIntervalMs ?? 60_000;
     this.setIntervalImpl = options.setInterval ?? globalThis.setInterval.bind(globalThis);
     this.clearIntervalImpl = options.clearInterval ?? globalThis.clearInterval.bind(globalThis);
@@ -481,13 +489,23 @@ export class GrokBuildTelemetryLifecycle {
     this.traceProducer?.record(event);
     if (event.type === "complete" || event.type === "limit") {
       const outcome = event.type === "complete" ? "completed" : "error";
-      this.background(this.client.sendTurnDelta(this.sessionId, this.tracker.takeTurnDelta(outcome, requestId)));
+      const delta = this.tracker.takeTurnDelta(outcome, requestId);
+      // Native sends turn deltas from its feedback actor. Yielding one task
+      // lets a just-spawned child issue its first request before the parent
+      // delta, matching the actor mailbox order without blocking the turn.
+      this.background(this.beforeTurnDelta()
+        .then(() => new Promise<void>((resolve) => globalThis.setTimeout(resolve, 0)))
+        .then(() => this.client.sendTurnDelta(this.sessionId, delta)));
       this.exportTraceSpans(this.traceProducer?.drain() ?? []);
     }
   }
 
   ensureLongPauses(count: number): void {
     this.tracker.ensureLongPauses(count);
+  }
+
+  ensureTurnCounts(totalTurns: number, userMessageCount: number): void {
+    this.tracker.ensureTurnCounts(totalTurns, userMessageCount);
   }
 
   end(outcome: "cancelled" | "error", requestId?: string): void {

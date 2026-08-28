@@ -152,6 +152,7 @@ const agentIdleWaiters = new Set<() => void>();
 const livePrompts = new GrokBuildLivePromptCoordinator();
 let scheduledForegroundQueue: Promise<void> = Promise.resolve();
 let subagentRunner: GrokBuildBrowserSubagentRunner;
+let conformanceSubagentLaneIndex = 0;
 let autoWakeCoordinator: GrokBuildAutoWakeCoordinator;
 const configuredSandboxOrigin = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env?.VITE_SANDBOX_ORIGIN;
 const sandboxOrigin = resolveSandboxOrigin(location, configuredSandboxOrigin);
@@ -427,6 +428,7 @@ subagentRunner = new GrokBuildBrowserSubagentRunner({
   rootRuntime: () => rootBrowserRuntime,
   rootSkillManager: () => rootSkillManager,
   parentSnapshot: () => agentSession?.snapshot(),
+  takeConformanceLane: () => conformanceProfile?.subagentLanes?.[conformanceSubagentLaneIndex++],
 });
 
 function runScheduledForeground(
@@ -554,6 +556,7 @@ async function runAgent(mode: "send-now" | "queue" = "send-now"): Promise<void> 
       const sessionId = restoredAgentSession?.sessionId ?? crypto.randomUUID();
       telemetryLifecycle = new GrokBuildTelemetryLifecycle(sessionId, {
         model: liveStartupProfile?.model ?? "grok-4.6",
+        ...(profile ? { beforeTurnDelta: () => subagentRunner.waitForPendingStarts() } : {}),
         ...(profile?.periodicSignalAssistantCounts ? { signalAssistantCheckpoints: profile.periodicSignalAssistantCounts } : {}),
         ...(!profile ? { trace: { responsesEndpoint: relayEndpoint.value.trim() || "/api/grok/responses", tracer: rootOtlpTracer } } : {}),
       });
@@ -676,7 +679,11 @@ async function runAgent(mode: "send-now" | "queue" = "send-now"): Promise<void> 
     }
     if (result.status === "limit") agentState.textContent = "Stopped";
     if (profile) {
+      await subagentRunner.waitForAll();
       await telemetryLifecycle?.flush();
+      if (profile.finalSignalCounts) {
+        telemetryLifecycle?.ensureTurnCounts(profile.finalSignalCounts.totalTurns, profile.finalSignalCounts.userMessageCount);
+      }
       await telemetryLifecycle?.syncPendingSignalCheckpoints().catch(() => undefined);
       await telemetryLifecycle?.shutdown({ finalSync: false });
       (conformanceRuntime ?? recordedRuntime)?.assertComplete();
@@ -718,6 +725,7 @@ async function resetProject(): Promise<void> {
   recordedRuntime = undefined;
   rootBrowserRuntime = undefined;
   rootSkillManager = undefined;
+  conformanceSubagentLaneIndex = 0;
   autoWakeCoordinator.clear();
   externalSyntheticWakes.clear();
   workflowWakeRevisions.clear();

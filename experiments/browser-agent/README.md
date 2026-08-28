@@ -82,6 +82,10 @@ and dynamic-ID reuse.
 Credentials are redacted; UUIDs are matched by identity relationships rather than
 literal values. A response is released only after the corresponding browser request
 matches, and the first mismatch returns HTTP 409 with JSON-pointer differences.
+New recordings also preserve upstream response-chunk timing so concurrent parent and
+subagent sessions replay in their native causal order. `--timing-scale` can uniformly
+scale those delays while retaining their relative ordering; older corpora without
+timing metadata continue to replay immediately.
 
 Record a native session:
 

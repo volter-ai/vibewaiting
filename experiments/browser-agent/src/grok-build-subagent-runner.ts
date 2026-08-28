@@ -1,5 +1,5 @@
 import { createContainer } from "almostnode";
-import { GROK_BUILD_TOOLS, GrokBuildSession, type GrokBuildSessionSnapshot } from "./grok-build-agent.js";
+import { GROK_BUILD_TOOLS, GrokBuildSession, type GrokBuildSessionSnapshot, type GrokBuildToolRuntime } from "./grok-build-agent.js";
 import { GrokBuildBrowserRuntime, type GrokBuildBrowserServices } from "./grok-build-runtime.js";
 import { discoverGrokBuildAgents, renderGrokBuildAgentProjectInstructions, renderGrokBuildAgentPrompt, type GrokBuildAgentDefinition } from "./grok-build-agents.js";
 import { discoverGrokBuildSubagentDefinitions, resolveGrokBuildSubagentRuntime, validateGrokBuildSubagentResume } from "./grok-build-subagent-config.js";
@@ -21,6 +21,7 @@ import {
 import { createGrokBuildMcpOtlpTraceSink, GrokBuildAgentTraceProducer } from "./grok-build-otlp-trace.js";
 import { GrokBuildTelemetryClient } from "./grok-build-telemetry.js";
 import type { GrokBuildWorkflowSubagentResult } from "./grok-build-workflows.js";
+import { GrokConformanceToolRuntime, type GrokConformanceSubagentLane } from "./grok-build-conformance-runtime.js";
 
 type BrowserContainer = ReturnType<typeof createContainer>;
 
@@ -43,6 +44,7 @@ export interface GrokBuildBrowserSubagentRunnerOptions {
   rootRuntime(): GrokBuildBrowserRuntime | undefined;
   rootSkillManager(): GrokBuildSkillManager | undefined;
   parentSnapshot(): GrokBuildSessionSnapshot | undefined;
+  takeConformanceLane?(): GrokConformanceSubagentLane | undefined;
 }
 
 /** Owns resumable child sessions and their native agent-definition lifecycle. */
@@ -50,17 +52,33 @@ export class GrokBuildBrowserSubagentRunner {
   private readonly admission: GrokBuildSubagentAdmission;
   private readonly telemetry: GrokBuildTelemetryClient;
   private readonly sessions = new Map<string, StoredSubagentSession>();
+  private readonly pendingStarts = new Set<Promise<void>>();
+  private readonly activeRuns = new Set<Promise<GrokBuildWorkflowSubagentResult>>();
 
   constructor(private readonly options: GrokBuildBrowserSubagentRunnerOptions) {
     this.admission = options.admission ?? new GrokBuildSubagentAdmission();
     this.telemetry = options.telemetryClient ?? new GrokBuildTelemetryClient();
   }
 
+  async waitForPendingStarts(): Promise<void> {
+    await Promise.all([...this.pendingStarts]);
+  }
+
+  async waitForAll(): Promise<void> {
+    await Promise.allSettled([...this.activeRuns]);
+  }
+
   async run(
     input: Record<string, unknown>, signal: AbortSignal, subagentId: string,
     parentRuntime = this.options.rootRuntime(),
   ): Promise<GrokBuildWorkflowSubagentResult> {
-    return this.admission.run(signal, () => this.runAdmitted(input, signal, subagentId, parentRuntime));
+    const execution = this.admission.run(signal, () => this.runAdmitted(grokBuildModelSubagentInput(input), signal, subagentId, parentRuntime));
+    this.activeRuns.add(execution);
+    try {
+      return await execution;
+    } finally {
+      this.activeRuns.delete(execution);
+    }
   }
 
   async runAdmitted(
@@ -73,6 +91,7 @@ export class GrokBuildBrowserSubagentRunner {
     const requestedPersona = typeof input.persona === "string" ? input.persona : undefined;
     const resumeFrom = typeof input.resume_from === "string" ? input.resume_from : undefined;
     const prior = resumeFrom ? this.sessions.get(resumeFrom) : undefined;
+    const conformance = prior ? undefined : this.options.takeConformanceLane?.();
     if (resumeFrom && !prior) throw new Error(`Unknown completed subagent: ${resumeFrom}`);
     if (prior?.status !== undefined && prior.status !== "completed") throw new Error(`Subagent ${resumeFrom} is still running.`);
     if (prior) validateGrokBuildSubagentResume(type, requestedPersona, {
@@ -161,7 +180,11 @@ export class GrokBuildBrowserSubagentRunner {
         finally { globalThis.clearTimeout(timer); }
       },
     };
-    const agentRuntime = new GrokBuildHookedRuntime(configured.runtime, definition.hooks, cwd, hookRunner);
+    const hookedRuntime = new GrokBuildHookedRuntime(configured.runtime, definition.hooks, cwd, hookRunner);
+    const conformanceRuntime = conformance
+      ? new GrokConformanceToolRuntime(hookedRuntime, conformance.toolResults, conformance.nativeWorkspacePath, cwd)
+      : undefined;
+    const agentRuntime: GrokBuildToolRuntime = conformanceRuntime ?? hookedRuntime;
     const platform = globalThis.navigator?.platform || "Browser";
     const systemPrompt = renderGrokBuildAgentPrompt(promptDefinition, {
       ...(runtimeConfig.roleInstructions ? { roleInstructions: runtimeConfig.roleInstructions } : {}),
@@ -173,6 +196,13 @@ export class GrokBuildBrowserSubagentRunner {
     const baseSnapshot = prior?.snapshot ?? (input.fork_context === true ? this.options.parentSnapshot() : undefined);
     let latest = baseSnapshot ? subagentSnapshotWithSystemPrompt(baseSnapshot, systemPrompt, subagentId) : undefined;
     const completionTracker = new GrokBuildCompletionTracker(configured.canonicalToolName);
+    let resolveStarted!: () => void;
+    const startedRequest = new Promise<void>((resolve) => { resolveStarted = resolve; });
+    this.pendingStarts.add(startedRequest);
+    const markStarted = () => {
+      resolveStarted();
+      this.pendingStarts.delete(startedRequest);
+    };
     let turns = 0;
     let toolCalls = 0;
     const session = new GrokBuildSession({
@@ -183,20 +213,24 @@ export class GrokBuildBrowserSubagentRunner {
         shell: "/bin/sh",
         workspacePath: cwd,
         today: new Date().toISOString().slice(0, 10),
+        ...(conformance ? { startupItems: conformance.startupItems } : {}),
         ...(startupSkillReminder || projectInstructionReminder
           ? { startupReminders: [projectInstructionReminder, startupSkillReminder].filter((value): value is string => Boolean(value)) } : {}),
       },
       runtime: agentRuntime,
-      tools: configured.tools,
+      tools: conformance?.tools ?? configured.tools,
       sessionId: subagentId,
-      enableSessionTitle: false,
+      ...(conformance ? { enableSessionTitle: conformance.enableSessionTitle } : {}),
       ...(definition.discoverSkills ? { getPostToolSystemReminder: (call: Parameters<GrokBuildSkillManager["afterToolCall"]>[0], result: Parameters<GrokBuildSkillManager["afterToolCall"]>[1]) => skillManager.afterToolCall(call, result) } : {}),
       ...(definition.discoverSkills ? { onCompaction: () => skillManager.onCompaction() } : {}),
       drainSystemReminders: () => runtime.drainSystemReminders(),
       ...(effectiveModel ? { model: effectiveModel } : {}),
-      ...(runtimeConfig.reasoningEffort && runtimeConfig.reasoningEffort !== "max"
+      ...(conformance?.reasoningEffort ? { reasoningEffort: conformance.reasoningEffort } : runtimeConfig.reasoningEffort && runtimeConfig.reasoningEffort !== "max"
         ? { reasoningEffort: runtimeConfig.reasoningEffort as "none" | "minimal" | "low" | "medium" | "high" | "xhigh" } : {}),
-      maxTurns: definition.maxTurns ?? 100,
+      maxTurns: conformance?.foregroundRequests ?? definition.maxTurns ?? 100,
+      onRequestStart(kind) {
+        if (kind === "foreground") markStarted();
+      },
       onEvent(event) {
         if (event.type === "turn_start") turns += 1;
         if (event.type === "tool_start") toolCalls += 1;
@@ -225,6 +259,7 @@ export class GrokBuildBrowserSubagentRunner {
         if (!stopGate.denied) break;
         result = await completionTracker.run(stopGate.denied, definition.completionRequirement, signal, runTurn);
       }
+      conformanceRuntime?.assertComplete();
       this.storeSession(subagentId, type, requestedPersona, effectiveModel, cwd, session.snapshot(), "completed");
       const usage = session.usage();
       return {
@@ -252,6 +287,7 @@ export class GrokBuildBrowserSubagentRunner {
         ...(usage.incomplete ? { usageIncomplete: true } : {}),
       };
     } finally {
+      markStarted();
       const owner = parentRuntime ?? this.options.rootRuntime();
       if (owner && owner !== runtime) runtime.reparentBackgroundTasksTo(owner);
       void this.telemetry.exportAgentTraceSpans(trace.finish()).catch(() => undefined);
@@ -268,6 +304,13 @@ export class GrokBuildBrowserSubagentRunner {
   }
 }
 
+/** Native ignores harness-only capability overrides in model-facing JSON. */
+export function grokBuildModelSubagentInput(input: Record<string, unknown>): Record<string, unknown> {
+  const sanitized = { ...input };
+  delete sanitized.capability_mode;
+  return sanitized;
+}
+
 export function subagentToolNames(type: string, capabilityMode: string | undefined, definition: GrokBuildAgentDefinition): Set<string> {
   const read = ["read_file", "list_dir", "grep", "todo_write", "web_search", "x_search", "web_fetch", "get_command_or_subagent_output", "kill_command_or_subagent", "enter_plan_mode", "exit_plan_mode"];
   const write = ["search_replace", "write", "image_gen", "image_edit", "image_to_video", "reference_to_video"];
@@ -276,6 +319,7 @@ export function subagentToolNames(type: string, capabilityMode: string | undefin
   let allowed = type === "explore" ? new Set(["read_file", "list_dir", "grep"])
     : type === "plan" ? new Set(["read_file", "list_dir", "grep", "todo_write", "web_search"])
       : new Set(all);
+  if (definition.injectDefaultTools) for (const optional of optionalToolNames()) allowed.add(optional);
   const configured = toolConfigCanonicalNames(definition.toolConfig);
   if (configured) {
     const declared = new Set(configured);
@@ -315,7 +359,7 @@ export function subagentToolNames(type: string, capabilityMode: string | undefin
 }
 
 function optionalToolNames(): readonly string[] {
-  return ["web_search", "x_search", "web_fetch", "image_gen", "image_edit", "image_to_video", "reference_to_video", "write", "enter_plan_mode", "exit_plan_mode"];
+  return ["web_search", "x_search", "web_fetch", "image_gen", "image_edit", "image_to_video", "reference_to_video", "write", "enter_plan_mode", "exit_plan_mode", "ask_user_question"];
 }
 
 function canonicalSubagentToolNames(): Record<string, string> {

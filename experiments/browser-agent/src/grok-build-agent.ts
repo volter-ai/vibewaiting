@@ -92,6 +92,7 @@ export interface GrokBuildSessionOptions {
   enableTurnSummary?: boolean;
   strictSideCalls?: boolean;
   onEvent?: (event: GrokBuildEvent) => void;
+  onRequestStart?: (kind: string) => void;
   restore?: GrokBuildSessionSnapshot;
   onCheckpoint?: (snapshot: GrokBuildSessionSnapshot) => void;
   /** Test seam for native retry timing. Production uses real abort-aware timers. */
@@ -476,6 +477,7 @@ export class GrokBuildSession {
   }
 
   private async requestStream(init: RequestInit, kind: string, signal: AbortSignal) {
+    this.options.onRequestStart?.(kind);
     const result = await requestGrokStream(this.options.endpoint, init, kind, signal, {
       ...(this.options.retrySleep ? { sleep: this.options.retrySleep } : {}),
       ...(this.options.retryJitter ? { jitter: this.options.retryJitter } : {}),

@@ -404,7 +404,8 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
     const task = this.createSubagentTask(input, parentSignal, id);
     if (boolean(input.background, true)) {
       this.watchSubagentCompletion(task);
-      return `Subagent started in background.\nsubagent_id: ${id}\nUse get_command_or_subagent_output with task_ids: ["${id}"] to retrieve its result.`;
+      return `Subagent started in background.\nsubagent_id: ${id}\ntype: ${task.subagentType ?? "general-purpose"}\ndescription: ${task.description ?? ""}\n\n` +
+        `When you need its result, use get_command_or_subagent_output with task_ids=["${id}"] and a positive timeout_ms.`;
     }
     const output = await task.promise;
     if (task.status === "failed") throw new Error(output);
@@ -434,6 +435,7 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
       },
       ...(typeof input.description === "string" ? { description: input.description } : {}),
       subagentType: typeof input.subagent_type === "string" ? input.subagent_type : "general-purpose",
+      deferStart: true,
     });
     return task;
   }

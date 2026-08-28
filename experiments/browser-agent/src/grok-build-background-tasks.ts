@@ -49,6 +49,7 @@ export interface ExternalTaskOptions {
   promise: (signal: AbortSignal) => Promise<string>;
   description?: string;
   subagentType?: string;
+  deferStart?: boolean;
 }
 
 const MAX_MULTI_TASK_IDS = 20;
@@ -180,7 +181,10 @@ export class GrokBuildBackgroundTasks {
       rawOutputBytes: 0,
       truncated: false,
     };
-    task.promise = options.promise(AbortSignal.any([options.parentSignal, controller.signal])).then((output) => {
+    const start = options.deferStart
+      ? new Promise<void>((resolve) => globalThis.setTimeout(resolve, 0))
+      : Promise.resolve();
+    task.promise = start.then(() => options.promise(AbortSignal.any([options.parentSignal, controller.signal]))).then((output) => {
       this.finish(task, output, "completed", 0);
       return task.output;
     }, (error: unknown) => {

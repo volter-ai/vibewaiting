@@ -7,8 +7,22 @@ import {
   resolveGrokBuildSubagentRuntime,
   validateGrokBuildSubagentResume,
 } from "../experiments/browser-agent/src/grok-build-subagent-config.js";
+import { grokBuildModelSubagentInput, subagentToolNames } from "../experiments/browser-agent/src/grok-build-subagent-runner.js";
 
 describe("Grok Build subagent role/persona resolution", () => {
+  it("matches the native built-in explore tool surface", () => {
+    const definition = discoverGrokBuildAgents(new VirtualFS()).find((item) => item.name === "explore")!;
+    expect([...subagentToolNames("explore", undefined, definition)].sort()).toEqual([
+      "ask_user_question", "enter_plan_mode", "exit_plan_mode", "grep", "image_edit", "image_gen",
+      "image_to_video", "list_dir", "read_file", "reference_to_video", "web_fetch", "web_search", "write", "x_search",
+    ]);
+  });
+
+  it("ignores the harness-only capability mode in model-facing spawn JSON", () => {
+    expect(grokBuildModelSubagentInput({ prompt: "Inspect", capability_mode: "read-only" }))
+      .toEqual({ prompt: "Inspect" });
+  });
+
   it("uses inline > project > user > bundled discovery precedence", () => {
     const vfs = new VirtualFS();
     for (const directory of ["/repo/.grok/roles", "/repo/.grok/personas", "/user/roles", "/user/personas", "/user/bundled/roles"]) {

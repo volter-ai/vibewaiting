@@ -15,15 +15,28 @@ export interface GrokConformanceDriverProfile {
   bundleArchiveRequests?: number;
   periodicSignalAssistantCounts?: number[];
   nativeLongPausesCount?: number;
+  finalSignalCounts?: { totalTurns: number; userMessageCount: number };
   turnSummaryRequests?: number;
   reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
   nativeWorkspacePath: string;
   initialFiles?: Array<{ path: string; content: string }>;
   asynchronousReminders?: Array<{ beforeForegroundRequest: number; content: string }>;
+  subagentLanes?: GrokConformanceSubagentLane[];
   fixture?: string;
   autoCompactThresholdPercent?: number;
   compactionTranscriptHint?: string;
   compactionSystemReminder?: string;
+}
+
+export interface GrokConformanceSubagentLane {
+  task: string;
+  startupItems: import("../../../src/grok-browser-protocol.js").GrokInputItem[];
+  tools: import("../../../src/grok-browser-protocol.js").GrokTool[];
+  toolResults: Array<{ callId: string; output: string }>;
+  foregroundRequests: number;
+  reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+  nativeWorkspacePath: string;
+  enableSessionTitle: boolean;
 }
 
 /** Deterministic tool runtime used only by strict native-corpus replay. */
@@ -215,6 +228,8 @@ function grepMatchLines(output: string): string[] {
 function learnDynamicIdentity(name: string, expected: string, actual: string, identities: Map<string, string>): void {
   const patterns = name === "run_terminal_command"
     ? [/<task-id>([^<]+)<\/task-id>/u]
+    : name === "spawn_subagent"
+      ? [/\bsubagent_id: ([A-Za-z0-9_-]+)/u]
     : name === "scheduler_create"
       ? [/\bID: ([A-Za-z0-9_-]+)/u]
       : name === "monitor"
