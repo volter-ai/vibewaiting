@@ -22,6 +22,7 @@ const BUNDLED_MODELS = {
     reasoning_effort: "high",
     supports_backend_search: true,
     compactions_remaining: 1,
+    compaction_at_tokens: true,
   }, {
     id: "grok-4.5",
     model: "grok-4.5",
@@ -31,6 +32,7 @@ const BUNDLED_MODELS = {
     reasoning_effort: "high",
     supports_backend_search: false,
     compactions_remaining: 1,
+    compaction_at_tokens: true,
   }],
 } as const;
 
@@ -44,7 +46,8 @@ export interface GrokBuildRemoteModel {
   autoCompactThresholdPercent?: number;
   reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
   supportsBackendSearch: boolean;
-  compactionsRemaining?: number;
+  compactionsRemaining?: boolean | number;
+  compactionAtTokens?: boolean | number;
   hidden: boolean;
   supportedInApi: boolean;
   raw: JsonObject;
@@ -58,7 +61,8 @@ export interface GrokBuildStartupProfile {
   contextWindow: number;
   autoCompactThresholdPercent: number;
   reasoningEffort: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
-  maxCompactions?: number;
+  compactionsRemaining?: boolean | number;
+  compactionAtTokens?: boolean | number;
 }
 
 export interface GrokBuildStartupOptions {
@@ -109,7 +113,15 @@ export function parseGrokBuildRemoteModel(value: unknown): GrokBuildRemoteModel 
   const compactionsRemaining = parseCompactionsRemaining(
     value.compactionsRemaining
       ?? value.compactions_remaining
-      ?? meta?.compactionsRemaining,
+      ?? meta?.compactionsRemaining
+      ?? value.sendCompactionsRemaining
+      ?? value.send_compactions_remaining
+      ?? meta?.sendCompactionsRemaining,
+  );
+  const compactionAtTokens = parseCompactionHeaderSetting(
+    value.compactionAtTokens
+      ?? value.compaction_at_tokens
+      ?? meta?.compactionAtTokens,
   );
   const name = stringAt(value, "name");
   const compactThreshold = percentAt(value, "autoCompactThresholdPercent")
@@ -126,6 +138,7 @@ export function parseGrokBuildRemoteModel(value: unknown): GrokBuildRemoteModel 
       ?? booleanAt(meta, "supportsBackendSearch")
       ?? false,
     ...(compactionsRemaining !== undefined ? { compactionsRemaining } : {}),
+    ...(compactionAtTokens !== undefined ? { compactionAtTokens } : {}),
     hidden: booleanAt(value, "hidden") ?? booleanAt(meta, "hidden") ?? false,
     supportedInApi: booleanAt(value, "supportedInApi")
       ?? booleanAt(value, "supported_in_api")
@@ -171,9 +184,8 @@ export function resolveGrokBuildStartupProfile(
       ?? settingThreshold
       ?? DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
     reasoningEffort: selected.reasoningEffort ?? "high",
-    ...(selected.compactionsRemaining !== undefined
-      ? { maxCompactions: selected.compactionsRemaining }
-      : {}),
+    ...(selected.compactionsRemaining !== undefined ? { compactionsRemaining: selected.compactionsRemaining } : {}),
+    ...(selected.compactionAtTokens !== undefined ? { compactionAtTokens: selected.compactionAtTokens } : {}),
   };
 }
 
@@ -184,14 +196,22 @@ export function applyGrokBuildRemoteToolGates(
   model: GrokBuildRemoteModel,
 ): GrokTool[] {
   const disabled = new Set<string>();
-  if (settings.image_gen_enabled === false) disabled.add("image_gen");
-  if (settings.video_gen_enabled === false) {
+  const imagineDenylist = new Set(Array.isArray(settings.imagine_tools_disabled)
+    ? settings.imagine_tools_disabled.filter((value): value is string => typeof value === "string")
+    : []);
+  if (settings.image_gen_enabled === false || imagineDenylist.has("image_gen")) disabled.add("image_gen");
+  if (imagineDenylist.has("image_edit")) disabled.add("image_edit");
+  if (settings.video_gen_enabled === false
+    || imagineDenylist.has("video_gen")
+    || imagineDenylist.has("image_to_video")
+    || imagineDenylist.has("reference_to_video")) {
     disabled.add("image_to_video");
     disabled.add("reference_to_video");
   }
-  if (settings.web_fetch_enabled === false) disabled.add("web_fetch");
+  // Native's Feature::WebFetch default is false. Unlike the other public
+  // tools here, absence is not enablement: the server must opt this tool in.
+  if (settings.web_fetch_enabled !== true) disabled.add("web_fetch");
   if (settings.ask_user_question_enabled === false) disabled.add("ask_user_question");
-  if (settings.subagents_enabled === false) disabled.add("spawn_subagent");
   if (settings.workflows_enabled === false) disabled.add("workflow");
   if (settings.write_file_enabled === false) disabled.add("write");
   if (!model.supportsBackendSearch) {
@@ -410,7 +430,14 @@ function resolveClientMode(options: GrokBuildStartupOptions): GrokClientMode {
   return typeof options.clientMode === "function" ? options.clientMode() : options.clientMode ?? "headless";
 }
 
-function parseCompactionsRemaining(value: unknown): number | undefined {
+function parseCompactionsRemaining(value: unknown): boolean | number | undefined {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= 255) return value;
+  return;
+}
+
+function parseCompactionHeaderSetting(value: unknown): boolean | number | undefined {
+  if (typeof value === "boolean") return value;
   if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return value;
   return;
 }

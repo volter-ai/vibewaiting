@@ -305,13 +305,48 @@ describe("browser-native Grok Build session", () => {
     vi.unstubAllGlobals();
   });
 
-  it("does not dispatch tool calls emitted at the configured native turn boundary", async () => {
+  it("returns PromptResponse after the summary stream starts while keeping strict side-call proof awaitable", async () => {
+    const encoder = new TextEncoder();
+    let summaryController!: ReadableStreamDefaultController<Uint8Array>;
+    const summary = new Response(new ReadableStream<Uint8Array>({
+      start(controller) { summaryController = controller; },
+    }), { headers: { "Content-Type": "text/event-stream" } });
+    const responses = [
+      stream({ output: [{ type: "message", content: [{ type: "output_text", text: "Done" }] }] }, "Done"),
+      summary,
+    ];
+    vi.stubGlobal("fetch", vi.fn(async () => responses.shift() ?? (() => { throw new Error("unexpected request"); })()));
+    const session = new GrokBuildSession({
+      endpoint: "/api/grok/responses",
+      environment: { os: "Browser", shell: "/bin/sh", workspacePath: "/", today: "2026-08-27" },
+      runtime: { async execute() { return { output: "unused" }; } },
+      enableSessionTitle: false,
+      enableTurnSummary: true,
+      strictSideCalls: true,
+    });
+
+    await expect(session.run("Build Pong", new AbortController().signal)).resolves.toEqual({ status: "complete", text: "Done" });
+    let sideCallComplete = false;
+    const sideCall = session.waitForSideCalls().then(() => { sideCallComplete = true; });
+    await Promise.resolve();
+    expect(sideCallComplete).toBe(false);
+    summaryController.enqueue(encoder.encode(`data: ${JSON.stringify({
+      type: "response.completed",
+      response: { output: [{ type: "message", content: [{ type: "output_text", text: "Game shipped" }] }] },
+    })}\n\n`));
+    summaryController.close();
+    await expect(sideCall).resolves.toBeUndefined();
+    expect(sideCallComplete).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
+  it("executes tool calls emitted at the native turn boundary before stopping", async () => {
     const responses = [
       stream({ output: [] }),
       stream({ output: [{ type: "function_call", call_id: "too-late", name: "read_file", arguments: "{}" }] }),
     ];
     vi.stubGlobal("fetch", vi.fn(async () => responses.shift() ?? (() => { throw new Error("unexpected request"); })()));
-    const execute = vi.fn();
+    const execute = vi.fn(async () => ({ output: "read" }));
     const session = new GrokBuildSession({
       endpoint: "/api/grok/responses",
       environment: { os: "Browser", shell: "/bin/sh", workspacePath: "/", today: "2026-08-27" },
@@ -319,7 +354,7 @@ describe("browser-native Grok Build session", () => {
       maxTurns: 1,
     });
     await expect(session.run("Task", new AbortController().signal)).resolves.toMatchObject({ status: "limit" });
-    expect(execute).not.toHaveBeenCalled();
+    expect(execute).toHaveBeenCalledOnce();
     vi.unstubAllGlobals();
   });
 
@@ -459,6 +494,9 @@ describe("browser-native Grok Build session", () => {
     expect(requests).toHaveLength(3);
     expect(requests[1]?.headers.get("x-browser-agent-request-kind")).toBe("compaction");
     expect(requests[1]?.headers.get("x-browser-agent-compaction-at")).toBe("1");
+    expect(requests[1]?.headers.get("x-browser-agent-compactions-remaining")).toBe("1");
+    expect(requests[2]?.headers.get("x-browser-agent-compaction-at")).toBe("omit");
+    expect(requests[2]?.headers.get("x-browser-agent-compactions-remaining")).toBe("0");
     const compactInput = requests[1]?.body.input as Array<Record<string, unknown>>;
     expect(compactInput.at(-1)?.content).toContain("Your task is to produce a faithful, concise summary");
     expect(requests[1]?.body).toMatchObject({ temperature: 1, tool_choice: "auto" });
@@ -469,6 +507,35 @@ describe("browser-native Grok Build session", () => {
     expect(events).toEqual(expect.arrayContaining(["compaction_start", "compaction_end"]));
     expect(onCompaction).toHaveBeenCalledOnce();
     expect(session.snapshot()).toMatchObject({ compactionCount: 1, estimatedTokens: 130 });
+    vi.unstubAllGlobals();
+  });
+
+  it("preserves fixed and omitted native compaction header policies", async () => {
+    const captured: Headers[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      captured.push(new Headers(init?.headers));
+      return stream({ output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "Done" }] }] }, "Done");
+    }));
+    const base = {
+      endpoint: "/api/grok/responses",
+      environment: { os: "Browser", shell: "/bin/sh", workspacePath: "/", today: "2026-08-27" },
+      runtime: { async execute() { return { output: "unused" }; } },
+      enableSessionTitle: false,
+    };
+    await new GrokBuildSession({
+      ...base,
+      compactionAtTokens: 123_456,
+      compactionsRemaining: 7,
+    }).run("Fixed", new AbortController().signal);
+    await new GrokBuildSession({
+      ...base,
+      compactionAtTokens: false,
+      compactionsRemaining: false,
+    }).run("Omitted", new AbortController().signal);
+    expect(captured[0]?.get("x-browser-agent-compaction-at")).toBe("123456");
+    expect(captured[0]?.get("x-browser-agent-compactions-remaining")).toBe("7");
+    expect(captured[1]?.get("x-browser-agent-compaction-at")).toBe("omit");
+    expect(captured[1]?.get("x-browser-agent-compactions-remaining")).toBe("omit");
     vi.unstubAllGlobals();
   });
 

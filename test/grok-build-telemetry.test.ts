@@ -46,7 +46,7 @@ describe("Grok Build browser telemetry source port", () => {
       assistantMessageCount: 1,
       toolCallCount: 2,
       toolFailureCount: 1,
-      compactionCount: 1,
+      compactionCount: 2,
       sessionDurationSeconds: 3,
       toolsUsed: ["read_file", "write"],
     });
@@ -146,6 +146,35 @@ describe("Grok Build browser telemetry source port", () => {
     await lifecycle.sync(true);
     await lifecycle.shutdown({ finalSync: false });
     expect(signals).toEqual([0, 1]);
+  });
+
+  it("matches native max-turn shutdown without a turn delta and keeps final signals before traces", async () => {
+    const calls: string[] = [];
+    const client = {
+      loadFeedbackConfig: async () => { calls.push("config"); return { config_id: "v1", config_version: 1, enabled: false }; },
+      updateSignals: async (_id: string, body: Record<string, unknown>) => { calls.push(`signals:${body.compactionCount}:${body.toolCallCount}`); },
+      sendTurnDelta: async () => { calls.push("delta"); },
+      exportAgentTraceSpans: async () => { calls.push("traces"); },
+    } as unknown as GrokBuildTelemetryClient;
+    const lifecycle = new GrokBuildTelemetryLifecycle("11111111-1111-4111-8111-111111111111", {
+      client,
+      signalAssistantCheckpoints: [1],
+      trace: { responsesEndpoint: "/api/grok/responses" },
+      setInterval: (() => 1) as unknown as typeof setInterval,
+      clearInterval: vi.fn() as typeof clearInterval,
+    });
+    await lifecycle.ready();
+    lifecycle.record({ type: "run_start", task: "task" });
+    lifecycle.record({ type: "turn_start", turn: 1 });
+    lifecycle.record({ type: "assistant", turn: 1, text: "calling", reasoning: "" });
+    lifecycle.record({ type: "tool_start", turn: 1, call: { callId: "call", name: "list_dir", arguments: "{}" } });
+    lifecycle.record({ type: "tool_end", turn: 1, call: { callId: "call", name: "list_dir", arguments: "{}" }, result: { output: "ok" } });
+    lifecycle.record({ type: "compaction_end", tokens: 10, compactions: 1 });
+    lifecycle.record({ type: "limit", turns: 1 });
+    await lifecycle.flush();
+    expect(await lifecycle.syncPendingSignalCheckpoints()).toBe(1);
+    await lifecycle.shutdown({ finalSync: false });
+    expect(calls).toEqual(["config", "signals:0:0", "signals:2:1", "traces"]);
   });
 
   it("records root agent events and exports completed spans through the telemetry client", async () => {

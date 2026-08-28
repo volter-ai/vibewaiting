@@ -23,6 +23,7 @@ import { GrokBuildTelemetryClient } from "./grok-build-telemetry.js";
 import type { GrokBuildWorkflowSubagentResult } from "./grok-build-workflows.js";
 import { GrokConformanceToolRuntime, type GrokConformanceSubagentLane } from "./grok-build-conformance-runtime.js";
 import type { GrokClientMode } from "../../../src/grok-browser-protocol.js";
+import type { GrokBuildStartupProfile } from "./grok-build-bootstrap.js";
 
 type BrowserContainer = ReturnType<typeof createContainer>;
 
@@ -41,7 +42,7 @@ export interface GrokBuildBrowserSubagentRunnerOptions {
   admission?: GrokBuildSubagentAdmission;
   telemetryClient?: GrokBuildTelemetryClient;
   endpoint(): string;
-  startupModel(): string | undefined;
+  startupProfile(): GrokBuildStartupProfile | undefined;
   clientMode(): GrokClientMode;
   rootRuntime(): GrokBuildBrowserRuntime | undefined;
   rootSkillManager(): GrokBuildSkillManager | undefined;
@@ -111,6 +112,7 @@ export class GrokBuildBrowserSubagentRunner {
     markStarted: () => void = () => undefined,
   ): Promise<GrokBuildWorkflowSubagentResult> {
     const { container } = this.options;
+    const startupProfile = this.options.startupProfile();
     const type = typeof input.subagent_type === "string" ? input.subagent_type : "general-purpose";
     const requestedModel = typeof input.model === "string" ? input.model : undefined;
     const requestedPersona = typeof input.persona === "string" ? input.persona : undefined;
@@ -141,11 +143,13 @@ export class GrokBuildBrowserSubagentRunner {
         ? { capabilityMode: input.capability_mode as "read-only" | "read-write" | "execute" | "all" } : {}),
       ...(input.isolation === "worktree" || input.isolation === "none" ? { isolation: input.isolation } : {}),
       ...(input.fork_context === true ? { forkContext: true } : {}),
-    }, definitions, container.vfs, cwd, this.options.startupModel());
+    }, definitions, container.vfs, cwd, startupProfile?.model);
     if (runtimeConfig.personaError) throw new Error(runtimeConfig.personaError);
     if (runtimeConfig.isolation === "worktree") throw new Error("Browser projects do not have a host Git worktree; use isolation=none.");
     const effectiveModel = prior?.model ?? (["grok-4.5", "grok-4.6"].includes(runtimeConfig.model ?? "")
-      ? runtimeConfig.model : this.options.startupModel());
+      ? runtimeConfig.model : startupProfile?.model);
+    const liveModelProfile = startupProfile?.models.find((candidate) => candidate.model === effectiveModel || candidate.id === effectiveModel)
+      ?? (effectiveModel === startupProfile?.model ? startupProfile : undefined);
     const endpoint = this.options.endpoint();
     const trace = new GrokBuildAgentTraceProducer({
       sessionId: subagentId,
@@ -216,7 +220,15 @@ export class GrokBuildBrowserSubagentRunner {
     };
     const hookedRuntime = new GrokBuildHookedRuntime(configured.runtime, definition.hooks, cwd, hookRunner);
     const conformanceRuntime = conformance
-      ? new GrokConformanceToolRuntime(hookedRuntime, conformance.toolResults, conformance.nativeWorkspacePath, cwd)
+      ? new GrokConformanceToolRuntime(
+          hookedRuntime,
+          conformance.toolResults,
+          conformance.nativeWorkspacePath,
+          cwd,
+          [],
+          conformance.unrecordedTerminalToolCallIds,
+          conformance.terminalToolCallIds,
+        )
       : undefined;
     const agentRuntime: GrokBuildToolRuntime = conformanceRuntime ?? hookedRuntime;
     const platform = globalThis.navigator?.platform || "Browser";
@@ -257,6 +269,18 @@ export class GrokBuildBrowserSubagentRunner {
       clientIdentifier: "grok-shell",
       ...(conformance?.reasoningEffort ? { reasoningEffort: conformance.reasoningEffort } : runtimeConfig.reasoningEffort && runtimeConfig.reasoningEffort !== "max"
         ? { reasoningEffort: runtimeConfig.reasoningEffort as "none" | "minimal" | "low" | "medium" | "high" | "xhigh" } : {}),
+      ...(conformance?.compactionAtTokens !== undefined
+        ? { compactionAtTokens: conformance.compactionAtTokens }
+        : liveModelProfile?.compactionAtTokens !== undefined ? { compactionAtTokens: liveModelProfile.compactionAtTokens } : {}),
+      ...(conformance?.compactionsRemaining !== undefined
+        ? { compactionsRemaining: conformance.compactionsRemaining }
+        : liveModelProfile?.compactionsRemaining !== undefined ? { compactionsRemaining: liveModelProfile.compactionsRemaining } : {}),
+      ...(liveModelProfile?.contextWindow !== undefined ? { contextWindow: liveModelProfile.contextWindow } : {}),
+      ...(liveModelProfile?.autoCompactThresholdPercent !== undefined
+        ? { autoCompactThresholdPercent: liveModelProfile.autoCompactThresholdPercent }
+        : startupProfile?.autoCompactThresholdPercent !== undefined
+          ? { autoCompactThresholdPercent: startupProfile.autoCompactThresholdPercent }
+          : {}),
       maxTurns: conformance?.foregroundRequests ?? definition.maxTurns ?? 100,
       onResponseStart(kind) {
         if (kind === "foreground") markStarted();

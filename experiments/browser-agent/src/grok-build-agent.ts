@@ -111,6 +111,10 @@ export interface GrokBuildSessionOptions {
   clientIdentifier?: GrokClientIdentifier;
   contextWindow?: number;
   autoCompactThresholdPercent?: number;
+  /** Native remote-model policy for the `x-compaction-at` request header. */
+  compactionAtTokens?: boolean | number;
+  /** Native remote-model policy for the `x-compactions-remaining` request header. */
+  compactionsRemaining?: boolean | number;
   maxCompactions?: number;
   compactionTranscriptHint?: string;
   compactionSystemReminder?: string;
@@ -120,7 +124,6 @@ export interface GrokBuildSessionOptions {
   drainSystemReminders?: (phase: "before_sample" | "after_terminal_sample") => readonly string[];
   /** Await completion bookkeeping that native orders before the post-turn side call. */
   beforeTurnSummary?: () => void | Promise<void>;
-  afterTurnSummaryRequestStart?: () => void;
   persistCompactionSegment?: (segment: {
     index: number;
     location: string;
@@ -171,6 +174,8 @@ export class GrokBuildSession {
   private compactionCount: number;
   private totalTokensUsed = 0;
   private incompleteUsageResponses = 0;
+  private pendingTurnSummary?: Promise<void>;
+  private turnSummaryError?: unknown;
 
   constructor(private readonly options: GrokBuildSessionOptions) {
     const restored = options.restore;
@@ -204,6 +209,12 @@ export class GrokBuildSession {
 
   usage(): GrokBuildSessionUsage {
     return { totalTokensUsed: this.totalTokensUsed, incomplete: this.incompleteUsageResponses > 0 };
+  }
+
+  /** Waits for the display-only summary task when a strict caller needs an exact traffic proof. */
+  async waitForSideCalls(): Promise<void> {
+    await this.pendingTurnSummary;
+    if (this.options.strictSideCalls && this.turnSummaryError !== undefined) throw this.turnSummaryError;
   }
 
   enqueueSystemReminder(reminder: string): void {
@@ -295,7 +306,7 @@ export class GrokBuildSession {
         if (this.options.enableTurnSummary) {
           try {
             await this.options.beforeTurnSummary?.();
-            await this.createTurnSummary(signal);
+            await this.startTurnSummary(signal);
           } catch (error) {
             if (this.options.strictSideCalls) throw error;
           }
@@ -303,16 +314,6 @@ export class GrokBuildSession {
         this.checkpoint();
         return { status: "complete", text: response.text };
       }
-      if (turn === maxTurns) {
-        if (terminalSampleOnly) {
-          this.checkpoint();
-          return { status: "complete", text: response.text };
-        }
-        this.options.onEvent?.({ type: "limit", turns: maxTurns });
-        this.checkpoint();
-        return { status: "limit", text: response.text };
-      }
-
       await executeGrokToolBatch(calls, this.options.runtime, signal, async (call, execute) => {
         this.options.onEvent?.({ type: "tool_start", turn, call });
         let result: GrokBuildToolResult;
@@ -342,6 +343,18 @@ export class GrokBuildSession {
         this.checkpoint();
         this.options.onEvent?.({ type: "tool_end", turn, call, result });
       });
+      // Native checks max_turns after executing the tool batch emitted by the
+      // boundary sample. Those tool effects and signals are observable even
+      // though no subsequent model sample is made.
+      if (turn === maxTurns) {
+        if (terminalSampleOnly) {
+          this.checkpoint();
+          return { status: "complete", text: response.text };
+        }
+        this.options.onEvent?.({ type: "limit", turns: maxTurns });
+        this.checkpoint();
+        return { status: "limit", text: response.text };
+      }
     }
 
     throw new Error("Grok Build session reached an impossible loop state.");
@@ -379,11 +392,24 @@ export class GrokBuildSession {
         "x-browser-agent-request": this.requestId,
         "x-browser-agent-session": this.sessionId,
         "x-browser-agent-turn": String(this.promptIndex),
+        ...this.compactionRelayHeaders(),
         ...(this.compactionCount > 0 ? { "x-browser-agent-compacted": String(this.compactionCount) } : {}),
       },
       body: JSON.stringify(request),
     }, "foreground", signal, afterResponseStart);
     return pending;
+  }
+
+  private async startTurnSummary(signal: AbortSignal): Promise<void> {
+    this.turnSummaryError = undefined;
+    this.pendingTurnSummary = this.createTurnSummary(signal).catch((error) => {
+      this.turnSummaryError = error;
+    });
+    // Native uses spawn_local here, then yields back to the actor before ACP
+    // PromptResponse reaches the pager. Give the already-created fetch the
+    // equivalent host turn so a pager side effect cannot overtake it.
+    await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 0));
+    if (this.options.strictSideCalls && this.turnSummaryError !== undefined) throw this.turnSummaryError;
   }
 
   private async createTurnSummary(signal: AbortSignal): Promise<void> {
@@ -415,11 +441,11 @@ export class GrokBuildSession {
         "x-browser-agent-request": `xai-turn-summary-${crypto.randomUUID()}`,
         "x-browser-agent-request-kind": "turn-summary",
         "x-browser-agent-session": this.sessionId,
+        ...this.compactionRelayHeaders(),
         ...(this.compactionCount > 0 ? { "x-browser-agent-compacted": String(this.compactionCount) } : {}),
       },
       body: JSON.stringify(request),
     }, "turn-summary", signal);
-    this.options.afterTurnSummaryRequestStart?.();
     await pending;
   }
 
@@ -451,7 +477,7 @@ export class GrokBuildSession {
           "x-browser-agent-request": `xai-compact-${crypto.randomUUID()}`,
           "x-browser-agent-request-kind": "compaction",
           "x-browser-agent-session": this.sessionId,
-          "x-browser-agent-compaction-at": String(Math.floor(contextWindow * threshold / 100)),
+          ...this.compactionRelayHeaders(),
           ...(this.compactionCount > 0 ? { "x-browser-agent-compacted": String(this.compactionCount) } : {}),
         },
         body: JSON.stringify(request),
@@ -483,6 +509,28 @@ export class GrokBuildSession {
     this.estimatedTokens = Math.ceil(this.measuredInputBytes / 4);
     this.checkpoint();
     this.options.onEvent?.({ type: "compaction_end", tokens: this.estimatedTokens, compactions: this.compactionCount });
+  }
+
+  /**
+   * Preserve native's polymorphic remote-model header state. These are
+   * browser-to-relay control headers; the relay validates them before
+   * translating them into the actual Grok request headers.
+   */
+  private compactionRelayHeaders(): Record<string, string> {
+    const contextWindow = this.options.contextWindow ?? 500_000;
+    const threshold = this.options.autoCompactThresholdPercent ?? 80;
+    const atSetting = this.options.compactionAtTokens ?? true;
+    const remainingSetting = this.options.compactionsRemaining ?? true;
+    const compactionAt = this.compactionCount > 0 || atSetting === false
+      ? "omit"
+      : String(atSetting === true ? Math.floor(contextWindow * threshold / 100) : atSetting);
+    const compactionsRemaining = remainingSetting === false
+      ? "omit"
+      : String(remainingSetting === true ? (this.compactionCount > 0 ? 0 : 1) : remainingSetting);
+    return {
+      "x-browser-agent-compaction-at": compactionAt,
+      "x-browser-agent-compactions-remaining": compactionsRemaining,
+    };
   }
 
   private currentEstimatedTokens(): number {

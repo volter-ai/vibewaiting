@@ -296,6 +296,13 @@ const authController = new BrowserGrokAuthController({
 });
 
 function seedProject(profile?: GrokConformanceDriverProfile): void {
+  const externalDirectories = [
+    ...(profile?.externalDirectories ?? []),
+    ...(profile?.subagentLanes?.flatMap((lane) => lane.externalDirectories ?? []) ?? []),
+  ];
+  for (const directory of externalDirectories) {
+    container.vfs.mkdirSync(directory, { recursive: true });
+  }
   if (profile?.initialFiles?.length) {
     for (const file of profile.initialFiles) {
       const path = file.path.startsWith("/") ? file.path : `/${file.path}`;
@@ -455,7 +462,7 @@ subagentRunner = new GrokBuildBrowserSubagentRunner({
   container,
   services: browserServices,
   endpoint: () => relayEndpoint.value.trim() || "/api/grok/responses",
-  startupModel: () => liveStartupProfile?.model,
+  startupProfile: () => liveStartupProfile,
   clientMode: activeGrokClientMode,
   rootRuntime: () => rootBrowserRuntime,
   rootSkillManager: () => rootSkillManager,
@@ -578,6 +585,7 @@ async function runAgent(mode: "send-now" | "queue" = "send-now"): Promise<void> 
   try {
     let planResumePending = false;
     const profile = conformanceProfile ?? (conformanceOrigin ? await loadConformanceProfile(conformanceOrigin) : undefined);
+    let postTurnBillingRequests = profile?.postInitialSignalBillingRequests ?? 0;
     if (profile) taskInput.value = profile.task;
     if (activeGrokClientMode() === "interactive") {
       agentState.textContent = "Loading native Grok settings";
@@ -590,7 +598,6 @@ async function runAgent(mode: "send-now" | "queue" = "send-now"): Promise<void> 
     if (!agentSession) {
       const persistenceGeneration = agentSessionPersistenceGeneration;
       const sessionId = restoredAgentSession?.sessionId ?? crypto.randomUUID();
-      let postInitialSignalBillingRequests = profile?.postInitialSignalBillingRequests ?? 0;
       telemetryLifecycle = new GrokBuildTelemetryLifecycle(sessionId, {
         model: liveStartupProfile?.model ?? "grok-4.6",
         clientMode: activeGrokClientMode(),
@@ -619,8 +626,18 @@ async function runAgent(mode: "send-now" | "queue" = "send-now"): Promise<void> 
       });
       rootBrowserRuntime = browserRuntime;
       const startupSkillReminder = startupExtensionReminder(skillManager);
-      conformanceRuntime = profile?.initialFiles?.length || profile?.fixture === "three-pong-starter-v1"
-        ? new GrokConformanceToolRuntime(browserRuntime, profile.toolResults, profile.nativeWorkspacePath, "/", profile.asynchronousReminders)
+      conformanceRuntime = profile?.initialFiles?.length
+        || profile?.fixture === "three-pong-starter-v1"
+        || profile?.unrecordedTerminalToolCallIds?.length
+        ? new GrokConformanceToolRuntime(
+            browserRuntime,
+            profile.toolResults,
+            profile.nativeWorkspacePath,
+            "/",
+            profile.asynchronousReminders,
+            profile.unrecordedTerminalToolCallIds,
+            profile.terminalToolCallIds,
+          )
         : undefined;
       recordedRuntime = profile && !conformanceRuntime
         ? new GrokRecordedToolRuntime(profile.toolResults)
@@ -648,11 +665,16 @@ async function runAgent(mode: "send-now" | "queue" = "send-now"): Promise<void> 
           contextWindow: liveStartupProfile.contextWindow,
           autoCompactThresholdPercent: liveStartupProfile.autoCompactThresholdPercent,
           reasoningEffort: liveStartupProfile.reasoningEffort,
-          ...(liveStartupProfile.maxCompactions !== undefined
-            ? { maxCompactions: liveStartupProfile.maxCompactions }
+          ...(liveStartupProfile.compactionAtTokens !== undefined
+            ? { compactionAtTokens: liveStartupProfile.compactionAtTokens }
+            : {}),
+          ...(liveStartupProfile.compactionsRemaining !== undefined
+            ? { compactionsRemaining: liveStartupProfile.compactionsRemaining }
             : {}),
         } : {}),
         ...(profile?.autoCompactThresholdPercent !== undefined ? { autoCompactThresholdPercent: profile.autoCompactThresholdPercent } : {}),
+        ...(profile?.compactionAtTokens !== undefined ? { compactionAtTokens: profile.compactionAtTokens } : {}),
+        ...(profile?.compactionsRemaining !== undefined ? { compactionsRemaining: profile.compactionsRemaining } : {}),
         ...(profile?.compactionTranscriptHint ? { compactionTranscriptHint: profile.compactionTranscriptHint } : {}),
         ...(profile?.compactionSystemReminder ? { compactionSystemReminder: profile.compactionSystemReminder } : {}),
         ...(!profile ? { getCompactionSystemReminder: () => currentCompactionReminder(browserRuntime) } : {}),
@@ -687,13 +709,6 @@ async function runAgent(mode: "send-now" | "queue" = "send-now"): Promise<void> 
         clientIdentifier: activeGrokClientMode() === "interactive" ? "grok-pager" : "grok-shell",
         enableTurnSummary: profile ? (profile.turnSummaryRequests ?? 0) > 0 : true,
         beforeTurnSummary: () => telemetryLifecycle?.flush(),
-        ...(profile && postInitialSignalBillingRequests > 0 ? {
-          afterTurnSummaryRequestStart: () => {
-            if (postInitialSignalBillingRequests <= 0) return;
-            postInitialSignalBillingRequests -= 1;
-            void fetchInteractiveStartupResource("billing");
-          },
-        } : {}),
         strictSideCalls: Boolean(profile),
         onEvent: eventHandler,
         ...(!profile && restoredAgentSession ? { restore: restoredAgentSession } : {}),
@@ -716,30 +731,41 @@ async function runAgent(mode: "send-now" | "queue" = "send-now"): Promise<void> 
       }
     }
     await telemetryLifecycle?.ready();
+    const runRootTurn = async (pending: Promise<Awaited<ReturnType<GrokBuildSession["run"]>>>) => {
+      const completed = await pending;
+      // The native pager emits a silent billing refresh on PromptResponse;
+      // turn-summary sampling is an independent shell-side background task.
+      if (postTurnBillingRequests > 0) {
+        postTurnBillingRequests -= 1;
+        await fetchInteractiveStartupResource("billing");
+      }
+      return completed;
+    };
     let nextPrompt = submitted;
     let result: Awaited<ReturnType<GrokBuildSession["run"]>>;
     if (planResumePending) {
-      result = await agentSession.resume(activeRun.signal, { requestId: `plan-resume-${Date.now()}` });
+      result = await runRootTurn(agentSession.resume(activeRun.signal, { requestId: `plan-resume-${Date.now()}` }));
       planResumePending = false;
-      if (nextPrompt) result = await agentSession.run(nextPrompt, activeRun.signal);
+      if (nextPrompt) result = await runRootTurn(agentSession.run(nextPrompt, activeRun.signal));
     } else {
-      result = await agentSession.run(nextPrompt, activeRun.signal);
+      result = await runRootTurn(agentSession.run(nextPrompt, activeRun.signal));
     }
     if (profile?.subagentLanes?.length) await rootBrowserRuntime?.waitForRunningSubagents();
     while (true) {
       while (profile && conformanceRuntime?.hasPendingAutoWake()) {
         await telemetryLifecycle?.flush();
         telemetryLifecycle?.ensureLongPauses(profile.nativeLongPausesCount ?? 0);
-        result = await agentSession.resume(activeRun.signal);
+        result = await runRootTurn(agentSession.resume(activeRun.signal));
       }
       if (profile || !livePrompts.hasQueued()) break;
       nextPrompt = livePrompts.takeQueuedPrefix() ?? "";
       if (!nextPrompt) break;
-      result = await agentSession.run(nextPrompt, activeRun.signal);
+      result = await runRootTurn(agentSession.run(nextPrompt, activeRun.signal));
     }
     if (result.status === "limit") agentState.textContent = "Stopped";
     if (profile) {
       await subagentRunner.waitForAll();
+      await agentSession.waitForSideCalls();
       await telemetryLifecycle?.flush();
       if (profile.finalSignalCounts) {
         telemetryLifecycle?.ensureTurnCounts(profile.finalSignalCounts.totalTurns, profile.finalSignalCounts.userMessageCount);

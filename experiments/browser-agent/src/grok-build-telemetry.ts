@@ -270,7 +270,10 @@ export class GrokBuildSignalTracker {
     } else if (event.type === "compaction_start") {
       this.pendingCompactionTokens = event.tokens;
     } else if (event.type === "compaction_end") {
-      this.compactions = event.compactions;
+      // Native auto compaction records once in run_compact_only and again in
+      // run_compact_inner. Preserve that public signals payload while the
+      // session's own compaction index remains the number of completed passes.
+      this.compactions = event.compactions * 2;
       this.totalTokensBeforeCompaction += this.pendingCompactionTokens ?? 0;
       this.pendingCompactionTokens = undefined;
     }
@@ -522,9 +525,8 @@ export class GrokBuildTelemetryLifecycle {
     }
     this.tracker.record(event);
     this.traceProducer?.record(event);
-    if (event.type === "complete" || event.type === "limit") {
-      const outcome = event.type === "complete" ? "completed" : "error";
-      const delta = this.tracker.takeTurnDelta(outcome, requestId);
+    if (event.type === "complete") {
+      const delta = this.tracker.takeTurnDelta("completed", requestId);
       // Native's feedback actor observes a just-spawned child's accepted first
       // response before it emits the parent delta. The injected gate preserves
       // that ordering; do not add a timer after it, because the child may finish

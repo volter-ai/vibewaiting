@@ -412,14 +412,18 @@ function buildDriverProfile(path) {
     && item.content.startsWith("<system-reminder>\n##")
   )?.content;
   const seenOutputs = new Set();
-  const toolResults = [];
+  const transportToolResults = [];
   for (const exchange of foreground.slice(1)) {
     for (const item of exchange.request.body.input) {
       if (item?.type !== "function_call_output" || typeof item.call_id !== "string" || seenOutputs.has(item.call_id)) continue;
       seenOutputs.add(item.call_id);
-      toolResults.push({ callId: item.call_id, output: typeof item.output === "string" ? item.output : JSON.stringify(item.output) });
+      transportToolResults.push({ callId: item.call_id, output: typeof item.output === "string" ? item.output : JSON.stringify(item.output) });
     }
   }
+  const terminalCalls = extractUnrecordedTerminalCalls(foreground, transportToolResults);
+  const manifestTerminalResults = parseManifestTerminalToolResults(manifest);
+  const manifestTerminalIds = new Set(manifestTerminalResults.map((entry) => entry.callId));
+  const toolResults = [...transportToolResults, ...manifestTerminalResults];
   const title = exchanges.find((exchange) =>
     exchange.key === "POST /v1/responses"
     && Array.isArray(exchange.request?.body?.input)
@@ -453,6 +457,11 @@ function buildDriverProfile(path) {
   const initialFiles = extractInitialWorkspaceFiles(allForeground, nativeWorkspacePath);
   const asynchronousReminders = extractAsynchronousReminders(foreground);
   const subagentLanes = buildSubagentLanes(allForeground, exchanges, rootSessionId, nativeWorkspacePath);
+  const rootCompactionPolicy = inferCompactionHeaderPolicy(exchanges.filter((exchange) =>
+    exchange.key === "POST /v1/responses"
+    && exchange.request?.headers?.["x-grok-session-id"] === rootSessionId
+    && exchange.request?.body?.prompt_cache_key !== undefined
+  ));
   const telemetryMetadata = nativeTelemetryMetadata(manifest?.nativeVersion, clientMode, clientType);
   return {
     formatVersion: CONFORMANCE_FORMAT_VERSION,
@@ -460,6 +469,11 @@ function buildDriverProfile(path) {
     startupItems,
     tools: startupSource.tools ?? initial.tools,
     toolResults,
+    ...(terminalCalls.length > 0 ? {
+      terminalToolCallIds: terminalCalls.filter((call) => manifestTerminalIds.has(call.call_id)).map((call) => call.call_id),
+      unrecordedTerminalToolCallIds: terminalCalls.filter((call) => !manifestTerminalIds.has(call.call_id)).map((call) => call.call_id),
+      externalDirectories: extractExternalDirectories(terminalCalls, nativeWorkspacePath),
+    } : {}),
     foregroundRequests: foreground.length,
     modelRequests: exchanges.filter((exchange) => exchange.key === "POST /v1/responses").length,
     clientMode,
@@ -480,6 +494,7 @@ function buildDriverProfile(path) {
     ...(subagentLanes.length > 0 ? { subagentLanes } : {}),
     fixture: manifest?.fixture,
     autoCompactThresholdPercent: manifest?.autoCompactThresholdPercent,
+    ...rootCompactionPolicy,
     ...(compactionTranscriptHint ? { compactionTranscriptHint } : {}),
     ...(compactionSystemReminder ? { compactionSystemReminder } : {}),
   };
@@ -527,13 +542,20 @@ function buildSubagentLanes(allForeground, exchanges, rootSessionId, nativeWorks
         && extractUserQuery(exchange.request?.body?.input) === task
       );
       if (title) consumedTitles.add(title);
+      const toolResults = extractToolResults(foreground);
+      const terminalCalls = extractUnrecordedTerminalCalls(foreground, toolResults);
       return {
         task,
         startupItems: initial.input,
         tools: initial.tools ?? [],
-        toolResults: extractToolResults(foreground),
+        toolResults,
+        ...(terminalCalls.length > 0 ? {
+          unrecordedTerminalToolCallIds: terminalCalls.map((call) => call.call_id),
+          externalDirectories: extractExternalDirectories(terminalCalls, nativeWorkspacePath),
+        } : {}),
         foregroundRequests: foreground.length,
         reasoningEffort: initial.reasoning?.effort,
+        ...inferCompactionHeaderPolicy(foreground),
         nativeWorkspacePath,
         enableSessionTitle: Boolean(title),
         ...(title ? { sessionTitleTiming: title.sequence < initialExchange.sequence
@@ -541,6 +563,84 @@ function buildSubagentLanes(allForeground, exchanges, rootSessionId, nativeWorks
           : "after-first-sample-start" } : {}),
       };
     });
+}
+
+function extractUnrecordedTerminalCalls(foreground, toolResults) {
+  const recorded = new Set(toolResults.map((entry) => entry.callId));
+  return foreground.flatMap((exchange) => responseCompletedOutput(exchange))
+    .filter((item) => item?.type === "function_call"
+      && typeof item.call_id === "string"
+      && !recorded.has(item.call_id));
+}
+
+function parseManifestTerminalToolResults(manifest) {
+  if (manifest?.terminalToolResults === undefined) return [];
+  if (!Array.isArray(manifest.terminalToolResults)
+    || manifest.terminalToolResults.some((entry) => typeof entry?.callId !== "string" || typeof entry?.output !== "string")) {
+    usage("Corpus manifest terminalToolResults must contain string callId/output entries.");
+  }
+  return manifest.terminalToolResults.map((entry) => ({ callId: entry.callId, output: entry.output }));
+}
+
+function responseCompletedOutput(exchange) {
+  if (typeof exchange.response?.bodyBase64 !== "string") return [];
+  const stream = Buffer.from(exchange.response.bodyBase64, "base64").toString("utf8");
+  for (const block of stream.split("\n\n")) {
+    const data = block.split("\n").find((line) => line.startsWith("data: "));
+    if (!data) continue;
+    try {
+      const event = JSON.parse(data.slice(6));
+      if (event.type === "response.completed" && Array.isArray(event.response?.output)) return event.response.output;
+    } catch {
+      // Integrity and JSON validation happen when the corpus is loaded.
+    }
+  }
+  return [];
+}
+
+function extractExternalDirectories(calls, nativeWorkspacePath) {
+  const directories = new Set();
+  for (const call of calls) {
+    if (call.name !== "list_dir" || typeof call.arguments !== "string") continue;
+    try {
+      const target = JSON.parse(call.arguments).target_directory;
+      if (typeof target === "string" && target.startsWith("/")
+        && target !== nativeWorkspacePath && !target.startsWith(`${nativeWorkspacePath}/`)) directories.add(target);
+    } catch {
+      // Invalid tool arguments are exercised by the runtime, not seeded here.
+    }
+  }
+  return [...directories];
+}
+
+function inferCompactionHeaderPolicy(exchanges) {
+  if (exchanges.length === 0) return {};
+  const atValues = exchanges.map((exchange) => exchange.request?.headers?.["x-compaction-at"]);
+  const presentAt = atValues.filter((value) => value !== undefined);
+  let compactionAtTokens = false;
+  if (presentAt.length > 0) {
+    const parsed = presentAt.map((value) => Number(value));
+    if (parsed.some((value) => !Number.isSafeInteger(value) || value < 0) || new Set(parsed).size !== 1) {
+      usage("Corpus has an unsupported x-compaction-at policy.");
+    }
+    compactionAtTokens = parsed[0];
+  }
+
+  const remainingValues = exchanges.map((exchange) => exchange.request?.headers?.["x-compactions-remaining"]);
+  const presentRemaining = remainingValues.filter((value) => value !== undefined);
+  let compactionsRemaining = false;
+  if (presentRemaining.length > 0) {
+    const parsed = presentRemaining.map((value) => Number(value));
+    if (parsed.some((value) => !Number.isSafeInteger(value) || value < 0 || value > 255)) {
+      usage("Corpus has an invalid x-compactions-remaining value.");
+    }
+    const unique = new Set(parsed);
+    if (unique.size === 1) compactionsRemaining = parsed[0];
+    else if ([...unique].every((value) => value === 0 || value === 1)
+      && parsed.includes(1) && parsed.includes(0)) compactionsRemaining = true;
+    else usage("Corpus has an unsupported x-compactions-remaining policy.");
+  }
+  return { compactionAtTokens, compactionsRemaining };
 }
 
 function extractToolResults(foreground) {
@@ -749,6 +849,10 @@ async function sendRecorded(response, recorded, requestStartedAt) {
     response.end(Buffer.from(recorded.bodyBase64, "base64"));
     return;
   }
+  // A streaming upstream commits its HTTP response before the first SSE data
+  // event. Reproduce that boundary so request-start hooks are not delayed by
+  // the recorded time-to-first-token; the SSE bytes retain their native timing.
+  response.flushHeaders();
   for (const chunk of recorded.timing.chunks) {
     const targetMs = Number(chunk.atMs) * replayTimingScale;
     const remainingMs = targetMs - elapsedMs(requestStartedAt);

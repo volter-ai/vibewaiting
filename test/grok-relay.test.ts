@@ -165,4 +165,26 @@ describe("browser Grok relay", () => {
     expect(headers.get("x-grok-req-id")).toMatch(/^xai-turn-summary-/u);
     expect(headers.has("x-grok-turn-idx")).toBe(false);
   });
+
+  it("translates trusted browser compaction state into native omit and fixed headers", () => {
+    const metadata = {
+      conversationId: "11111111-1111-4111-8111-111111111111",
+      requestId: "33333333-3333-4333-8333-333333333333",
+      sessionId: "22222222-2222-4222-8222-222222222222",
+      turnIndex: 2,
+    };
+    const omittedAt = grokUpstreamHeaders(
+      { token: "secret-token", userId: "user-1" }, metadata, "1.0.5", "main", "grok-4.6",
+      null, "headless", "grok-shell", 0,
+    );
+    expect(omittedAt.has("x-compaction-at")).toBe(false);
+    expect(omittedAt.get("x-compactions-remaining")).toBe("0");
+
+    const fixed = grokUpstreamHeaders(
+      { token: "secret-token", userId: "user-1" }, metadata, "1.0.5", "compaction", "grok-4.6",
+      321_000, "headless", "grok-shell", null,
+    );
+    expect(fixed.get("x-compaction-at")).toBe("321000");
+    expect(fixed.has("x-compactions-remaining")).toBe(false);
+  });
 });

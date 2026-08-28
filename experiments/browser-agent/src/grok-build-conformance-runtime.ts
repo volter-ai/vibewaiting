@@ -30,9 +30,14 @@ export interface GrokConformanceDriverProfile {
   nativeWorkspacePath: string;
   initialFiles?: Array<{ path: string; content: string }>;
   asynchronousReminders?: Array<{ beforeForegroundRequest: number; content: string }>;
+  unrecordedTerminalToolCallIds?: string[];
+  terminalToolCallIds?: string[];
+  externalDirectories?: string[];
   subagentLanes?: GrokConformanceSubagentLane[];
   fixture?: string;
   autoCompactThresholdPercent?: number;
+  compactionAtTokens?: boolean | number;
+  compactionsRemaining?: boolean | number;
   compactionTranscriptHint?: string;
   compactionSystemReminder?: string;
 }
@@ -44,9 +49,14 @@ export interface GrokConformanceSubagentLane {
   toolResults: Array<{ callId: string; output: string }>;
   foregroundRequests: number;
   reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+  compactionAtTokens?: boolean | number;
+  compactionsRemaining?: boolean | number;
   nativeWorkspacePath: string;
   enableSessionTitle: boolean;
   sessionTitleTiming?: "before-first-sample" | "after-first-sample-start";
+  unrecordedTerminalToolCallIds?: string[];
+  terminalToolCallIds?: string[];
+  externalDirectories?: string[];
 }
 
 /** Deterministic tool runtime used only by strict native-corpus replay. */
@@ -95,6 +105,8 @@ export class GrokConformanceToolRuntime implements GrokBuildToolRuntime {
   private readonly nativeToBrowserIds = new Map<string, string>();
   private readonly withheldReminders: string[] = [];
   private reminderDrainIndex = 0;
+  private readonly unrecordedTerminalToolCallIds: Set<string>;
+  private readonly terminalToolCallIds: Set<string>;
 
   constructor(
     private readonly runtime: GrokBuildToolRuntime & { drainSystemReminders?(): string[] },
@@ -102,8 +114,12 @@ export class GrokConformanceToolRuntime implements GrokBuildToolRuntime {
     private readonly nativeWorkspacePath: string,
     private readonly browserWorkspacePath = "/",
     private readonly expectedReminders: readonly { beforeForegroundRequest: number; content: string }[] = [],
+    unrecordedTerminalToolCallIds: readonly string[] = [],
+    terminalToolCallIds: readonly string[] = [],
   ) {
     this.recorded = new GrokRecordedToolRuntime(results);
+    this.unrecordedTerminalToolCallIds = new Set(unrecordedTerminalToolCallIds);
+    this.terminalToolCallIds = new Set(terminalToolCallIds);
   }
 
   drainSystemReminders(phase: "before_sample" | "after_terminal_sample"): string[] {
@@ -145,10 +161,18 @@ export class GrokConformanceToolRuntime implements GrokBuildToolRuntime {
     };
     const actual = await this.runtime.execute(browserCall, signal);
     if (actual.isError) throw new Error(`Browser runtime failed ${call.name}: ${actual.output}`);
+    // A tool batch emitted by the final max-turn sample has no following
+    // Responses request in which native can replay its outputs. Its externally
+    // observable proof is successful execution plus terminal signals.
+    if (this.unrecordedTerminalToolCallIds.delete(call.callId)) return actual;
     // Register with the recorded queue only after browser execution. This keeps
     // concurrently-issued tools gated by native completion order, independent
     // of which browser promise happens to settle first.
     const expected = await this.recorded.execute(call);
+    // Native terminal results recovered from the session archive are the
+    // authoritative bytes. The isolated browser VFS may contain additional
+    // runtime metadata, so only require successful execution at this boundary.
+    if (this.terminalToolCallIds.delete(call.callId)) return expected;
     learnDynamicIdentity(call.name, expected.output, actual.output, this.nativeToBrowserIds);
     validateEffect(call, actual.output, expected.output, this.nativeWorkspacePath, this.browserWorkspacePath, this.nativeToBrowserIds);
     return expected;
@@ -156,6 +180,12 @@ export class GrokConformanceToolRuntime implements GrokBuildToolRuntime {
 
   assertComplete(): void {
     this.recorded.assertComplete();
+    if (this.unrecordedTerminalToolCallIds.size > 0) {
+      throw new Error(`Conformance runtime did not execute ${this.unrecordedTerminalToolCallIds.size} native terminal tool calls.`);
+    }
+    if (this.terminalToolCallIds.size > 0) {
+      throw new Error(`Conformance runtime did not execute ${this.terminalToolCallIds.size} recorded native terminal tool calls.`);
+    }
     const remainingExpected = this.expectedReminders.filter((entry) => entry.beforeForegroundRequest >= this.reminderDrainIndex);
     if (remainingExpected.length > 0 || this.withheldReminders.length > 0) {
       throw new Error(`Conformance reminder runtime finished with ${remainingExpected.length} native reminders and ${this.withheldReminders.length} browser reminders unconsumed.`);

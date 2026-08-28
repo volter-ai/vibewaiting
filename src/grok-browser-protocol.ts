@@ -72,6 +72,8 @@ export interface GrokHeaderOptions {
   clientIdentifier?: GrokClientIdentifier;
   /** `null` omits the native header after the first successful compaction. */
   compactionAtTokens?: number | null;
+  /** `null` omits the model-controlled remaining-compactions header. */
+  compactionsRemaining?: number | null;
 }
 
 export interface GrokResponseOutputItem extends Record<string, unknown> {
@@ -224,7 +226,9 @@ export function createGrokResponsesHeaders(
     ...(options.compactionAtTokens === null
       ? {}
       : { "x-compaction-at": String(options.compactionAtTokens ?? 400_000) }),
-    "x-compactions-remaining": "1",
+    ...(options.compactionsRemaining === null
+      ? {}
+      : { "x-compactions-remaining": String(options.compactionsRemaining ?? 1) }),
     "x-grok-agent-id": identity.agentId ?? GROK_BUILD_AGENT_ID,
     "x-grok-client-identifier": options.clientIdentifier ?? "grok-shell",
     "x-grok-client-mode": options.clientMode ?? "headless",

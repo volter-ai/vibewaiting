@@ -201,6 +201,26 @@ describe("Grok Build internal OTLP browser subset", () => {
       { key: "client.version", value: "1.2.3" },
       { key: "app.entrypoint", value: "agent" },
     ]);
+
+    const limited = new GrokBuildAgentTraceProducer({
+      sessionId: "sess-limit",
+      modelId: "grok-4.6",
+      responsesEndpoint: "/api/grok/responses",
+    });
+    limited.record({ type: "run_start", task: "task" });
+    limited.record({ type: "turn_start", turn: 1 });
+    limited.record({ type: "tool_start", turn: 1, call: { callId: "limit-call", name: "list_dir", arguments: "{}" } });
+    limited.record({ type: "tool_end", turn: 1, call: { callId: "limit-call", name: "list_dir", arguments: "{}" }, result: { output: "ok" } });
+    limited.record({ type: "limit", turns: 1 });
+    const limitSpans = limited.finish();
+    expect(limitSpans.map(({ name }) => name)).not.toEqual(expect.arrayContaining([
+      "feedback.maybe_request_feedback", "send_turn_delta_with_snapshot", "send_xai_notification_with_extra_meta",
+    ]));
+    expect(limitSpans.find(({ name }) => name === "session.process_conversation_turn")?.attributes)
+      .toEqual(expect.arrayContaining([
+        { key: "response.has_tool_call", value: true },
+        { key: "stop_reason", value: "tool_calls" },
+      ]));
   });
 
   it("produces the native MCP connection and tool-call span projections", () => {

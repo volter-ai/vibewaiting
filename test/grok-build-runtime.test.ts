@@ -559,6 +559,30 @@ These subagents were launched before this compaction and are still running. Use 
     expect(() => conformance.assertComplete()).not.toThrow();
   });
 
+  it("executes max-turn terminal calls while using recovered native archive bytes as the strict result", async () => {
+    const execute = vi.fn(async () => ({ output: "browser listing with runtime metadata" }));
+    const native = "- /private/tmp/native/src/\n  - game.js";
+    const conformance = new GrokConformanceToolRuntime(
+      { execute },
+      [{ callId: "terminal-list", output: native }],
+      "/private/tmp/native",
+      "/",
+      [],
+      [],
+      ["terminal-list"],
+    );
+
+    await expect(conformance.execute({
+      callId: "terminal-list",
+      name: "list_dir",
+      arguments: '{"target_directory":"/private/tmp/native/src"}',
+    }, new AbortController().signal)).resolves.toEqual({ output: native });
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({
+      arguments: '{"target_directory":"/src"}',
+    }), expect.any(AbortSignal));
+    expect(() => conformance.assertComplete()).not.toThrow();
+  });
+
   it("gates and validates native asynchronous reminders at their recorded foreground boundary", async () => {
     const nativeId = "11111111-1111-4111-8111-111111111111";
     const browserId = "22222222-2222-4222-8222-222222222222";

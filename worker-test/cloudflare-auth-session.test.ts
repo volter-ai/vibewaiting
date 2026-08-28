@@ -2,7 +2,7 @@
 
 // Kept outside the Node/DOM typecheck graph because Workers and DOM both declare Element.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import worker, { GrokSession, RateGate, SECURITY_LIMITS } from "../cloudflare/worker.js";
+import worker, { GrokSession, RateGate, SECURITY_LIMITS, grokResponseHeaders } from "../cloudflare/worker.js";
 
 class MemoryStorage {
   readonly values = new Map<string, unknown>();
@@ -57,6 +57,48 @@ function serviceEnv(overrides: Record<string, unknown> = {}): never {
     ...overrides,
   } as never;
 }
+
+describe("Cloudflare native Grok header boundary", () => {
+  it("preserves fixed, omitted, and post-compaction model header policies", () => {
+    const fixedRequest = new Request("https://agent.example/api/grok/responses", { headers: {
+      "x-browser-agent-conversation": "11111111-1111-4111-8111-111111111111",
+      "x-browser-agent-request": "33333333-3333-4333-8333-333333333333",
+      "x-browser-agent-session": "22222222-2222-4222-8222-222222222222",
+      "x-browser-agent-turn": "2",
+      "x-browser-agent-compaction-at": "321000",
+      "x-browser-agent-compactions-remaining": "7",
+    } });
+    const fixed = grokResponseHeaders(fixedRequest, serviceEnv(), "token", "user", "main", "grok-4.6");
+    expect(fixed.get("x-compaction-at")).toBe("321000");
+    expect(fixed.get("x-compactions-remaining")).toBe("7");
+
+    const compactedRequest = new Request(fixedRequest, { headers: {
+      ...Object.fromEntries(fixedRequest.headers),
+      "x-browser-agent-compacted": "1",
+      "x-browser-agent-compactions-remaining": "0",
+    } });
+    const compacted = grokResponseHeaders(compactedRequest, serviceEnv(), "token", "user", "main", "grok-4.6");
+    expect(compacted.has("x-compaction-at")).toBe(false);
+    expect(compacted.get("x-compactions-remaining")).toBe("0");
+
+    const omittedRequest = new Request(fixedRequest, { headers: {
+      ...Object.fromEntries(fixedRequest.headers),
+      "x-browser-agent-compaction-at": "omit",
+      "x-browser-agent-compactions-remaining": "omit",
+    } });
+    const omitted = grokResponseHeaders(omittedRequest, serviceEnv(), "token", "user", "turn-summary", "grok-4.6");
+    expect(omitted.has("x-compaction-at")).toBe(false);
+    expect(omitted.has("x-compactions-remaining")).toBe(false);
+  });
+
+  it("rejects untrusted compaction policy values", () => {
+    const request = new Request("https://agent.example/api/grok/responses", { headers: {
+      "x-browser-agent-compaction-at": "not-a-number",
+    } });
+    expect(() => grokResponseHeaders(request, serviceEnv(), "token", "user", "main", "grok-4.6"))
+      .toThrow(/compaction-at/u);
+  });
+});
 
 function request(path: string, method = "GET"): Request {
   return new Request(`https://durable.internal${path}`, { method });

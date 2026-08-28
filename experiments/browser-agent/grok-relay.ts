@@ -160,12 +160,24 @@ function sideCallMetadataFromHeaders(
   };
 }
 
-function compactionAtFromHeaders(headers: IncomingMessage["headers"]): number | undefined {
+function compactionAtFromHeaders(headers: IncomingMessage["headers"]): number | null | undefined {
   const raw = headers["x-browser-agent-compaction-at"] as string | undefined;
   if (raw === undefined) return undefined;
+  if (raw === "omit") return null;
   const parsed = Number(raw);
   if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > 10_000_000) {
     throw new Error("The Grok compaction token threshold is invalid.");
+  }
+  return parsed;
+}
+
+function compactionsRemainingFromHeaders(headers: IncomingMessage["headers"]): number | null | undefined {
+  const raw = headers["x-browser-agent-compactions-remaining"] as string | undefined;
+  if (raw === undefined) return undefined;
+  if (raw === "omit") return null;
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > 255) {
+    throw new Error("The Grok compactions-remaining value is invalid.");
   }
   return parsed;
 }
@@ -228,6 +240,7 @@ export function grokUpstreamHeaders(
   compactionAtTokens?: number | null,
   clientMode: GrokClientMode = "headless",
   clientIdentifier: GrokClientIdentifier = "grok-shell",
+  compactionsRemaining?: number | null,
 ): Headers {
   const headers = new Headers(requestKind === "session-title"
     ? createGrokSessionTitleHeaders({ bearerToken: credential.token, clientVersion, model, clientMode })
@@ -244,6 +257,7 @@ export function grokUpstreamHeaders(
         clientMode,
         clientIdentifier,
         ...(compactionAtTokens !== undefined ? { compactionAtTokens } : {}),
+        ...(compactionsRemaining !== undefined ? { compactionsRemaining } : {}),
       }) : createGrokResponsesHeaders({
         conversationId: metadata.conversationId,
         requestId: metadata.requestId,
@@ -258,6 +272,7 @@ export function grokUpstreamHeaders(
         clientMode,
         clientIdentifier,
         ...(compactionAtTokens !== undefined ? { compactionAtTokens } : {}),
+        ...(compactionsRemaining !== undefined ? { compactionsRemaining } : {}),
       }));
   headers.set("User-Agent", `grok-shell/${clientVersion}`);
   return headers;
@@ -738,9 +753,10 @@ export function createGrokRelay(options: GrokRelayOptions = {}): Plugin {
               body.model,
               wasCompacted(request.headers)
                 ? null
-                : requestKind === "compaction" ? compactionAtFromHeaders(request.headers) : undefined,
+                : compactionAtFromHeaders(request.headers),
               grokClientModeFromRequest(request),
               grokClientIdentifierFromRequest(request),
+              compactionsRemainingFromHeaders(request.headers),
             ),
             body: JSON.stringify(body),
             signal: AbortSignal.timeout(120_000),

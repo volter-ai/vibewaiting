@@ -499,7 +499,27 @@ function validSideCallId(value: string | null, prefix: "turn-summary" | "xai-tur
   return value?.startsWith(`${prefix}-`) && validUuid(suffix) ? value : undefined;
 }
 
-function grokResponseHeaders(
+function browserCompactionInteger(
+  request: Request,
+  name: "x-browser-agent-compaction-at" | "x-browser-agent-compactions-remaining",
+  maximum: number,
+): number | null | undefined {
+  const raw = request.headers.get(name);
+  if (raw === null) return undefined;
+  if (raw === "omit") return null;
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > maximum) {
+    throw new Error(`The ${name} value is invalid.`);
+  }
+  return parsed;
+}
+
+function browserRequestWasCompacted(request: Request): boolean {
+  const parsed = Number(request.headers.get("x-browser-agent-compacted"));
+  return Number.isSafeInteger(parsed) && parsed > 0;
+}
+
+export function grokResponseHeaders(
   request: Request,
   env: Env,
   token: string,
@@ -510,6 +530,13 @@ function grokResponseHeaders(
   const metadata = proxyMetadata(request);
   const clientMode = grokClientMode(request);
   const clientIdentifier = grokClientIdentifier(request);
+  const requestedCompactionAt = browserCompactionInteger(request, "x-browser-agent-compaction-at", 10_000_000);
+  const compactionAtTokens = browserRequestWasCompacted(request) ? null : requestedCompactionAt;
+  const compactionsRemaining = browserCompactionInteger(request, "x-browser-agent-compactions-remaining", 255);
+  const compactionOptions = {
+    ...(compactionAtTokens !== undefined ? { compactionAtTokens } : {}),
+    ...(compactionsRemaining !== undefined ? { compactionsRemaining } : {}),
+  };
   const headers = new Headers(kind === "session-title"
     ? createGrokSessionTitleHeaders({ bearerToken: token, clientVersion: env.XAI_CLIENT_VERSION, model, clientMode })
     : kind === "turn-summary" ? createGrokSideCallHeaders({
@@ -524,6 +551,7 @@ function grokResponseHeaders(
         model,
         clientMode,
         clientIdentifier,
+        ...compactionOptions,
       }) : kind === "compaction" ? createGrokSideCallHeaders({
         conversationId: metadata.conversationId,
         requestId: validSideCallId(request.headers.get("x-browser-agent-request"), "xai-compact") ?? `xai-compact-${crypto.randomUUID()}`,
@@ -536,6 +564,7 @@ function grokResponseHeaders(
         model,
         clientMode,
         clientIdentifier,
+        ...compactionOptions,
       }) : createGrokResponsesHeaders({
         conversationId: metadata.conversationId,
         requestId: metadata.requestId,
@@ -549,6 +578,7 @@ function grokResponseHeaders(
         model,
         clientMode,
         clientIdentifier,
+        ...compactionOptions,
       }));
   headers.set("User-Agent", `grok-shell/${env.XAI_CLIENT_VERSION}`);
   return headers;

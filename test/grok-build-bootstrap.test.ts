@@ -14,6 +14,10 @@ const tools = [
   { type: "function", name: "image_edit", parameters: {} },
   { type: "function", name: "image_to_video", parameters: {} },
   { type: "function", name: "reference_to_video", parameters: {} },
+  { type: "function", name: "ask_user_question", parameters: {} },
+  { type: "function", name: "spawn_subagent", parameters: {} },
+  { type: "function", name: "workflow", parameters: {} },
+  { type: "function", name: "write", parameters: {} },
 ] as const;
 
 describe("native Grok Build startup port", () => {
@@ -31,6 +35,11 @@ describe("native Grok Build startup port", () => {
       supportsBackendSearch: true,
     });
     expect(parseGrokBuildRemoteModel({ id: "fallback-model" })?.contextWindow).toBe(256_000);
+    expect(parseGrokBuildRemoteModel({
+      model: "legacy",
+      sendCompactionsRemaining: true,
+      compactionAtTokens: false,
+    })).toMatchObject({ compactionsRemaining: true, compactionAtTokens: false });
     expect(parseGrokBuildRemoteModel({ model: "invalid", context_window: 0 })).toBeUndefined();
   });
 
@@ -45,6 +54,7 @@ describe("native Grok Build startup port", () => {
         reasoning_effort: "medium",
         supports_backend_search: true,
         compactions_remaining: 2,
+        compaction_at_tokens: 321_000,
       }, {
         id: "grok-old",
         model: "grok-old",
@@ -62,9 +72,32 @@ describe("native Grok Build startup port", () => {
       contextWindow: 500_000,
       autoCompactThresholdPercent: 77,
       reasoningEffort: "medium",
-      maxCompactions: 2,
+      compactionsRemaining: 2,
+      compactionAtTokens: 321_000,
     });
-    expect(profile.tools.map((tool) => tool.name)).toEqual(["read_file", "web_search", "image_edit"]);
+    expect(profile.tools.map((tool) => tool.name)).toEqual([
+      "read_file", "web_search", "image_edit", "ask_user_question", "spawn_subagent", "workflow", "write",
+    ]);
+  });
+
+  it("matches native remote gate defaults, denylist authority, and ignored legacy keys", () => {
+    const model = parseGrokBuildRemoteModel({ model: "grok-4.6", supports_backend_search: true })!;
+    const absent = resolveGrokBuildStartupProfile({ data: [model.raw] }, {}, tools);
+    expect(absent.tools.map((tool) => tool.name)).not.toContain("web_fetch");
+    expect(absent.tools.map((tool) => tool.name)).toContain("spawn_subagent");
+
+    const gated = resolveGrokBuildStartupProfile({ data: [model.raw] }, {
+      web_fetch_enabled: true,
+      subagents_enabled: false,
+      imagine_tools_disabled: ["image_edit", "image_to_video"],
+    }, tools);
+    const names = gated.tools.map((tool) => tool.name);
+    expect(names).toContain("web_fetch");
+    expect(names).toContain("spawn_subagent");
+    expect(names).toContain("image_gen");
+    expect(names).not.toContain("image_edit");
+    expect(names).not.toContain("image_to_video");
+    expect(names).not.toContain("reference_to_video");
   });
 
   it("matches native startup order and settings retry backoff", async () => {

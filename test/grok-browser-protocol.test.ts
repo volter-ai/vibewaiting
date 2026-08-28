@@ -55,6 +55,22 @@ describe("browser Grok Build Responses protocol", () => {
       "x-grok-req-id": "request-1",
       "x-grok-turn-idx": "3",
       "x-grok-doom-loop-check": "1024",
+      "x-compaction-at": "400000",
+      "x-compactions-remaining": "1",
+    });
+
+    const omitted = createGrokResponsesHeaders(identity, {
+      compactionAtTokens: null,
+      compactionsRemaining: null,
+    });
+    expect(omitted).not.toHaveProperty("x-compaction-at");
+    expect(omitted).not.toHaveProperty("x-compactions-remaining");
+    expect(createGrokResponsesHeaders(identity, {
+      compactionAtTokens: 321_000,
+      compactionsRemaining: 0,
+    })).toMatchObject({
+      "x-compaction-at": "321000",
+      "x-compactions-remaining": "0",
     });
   });
 

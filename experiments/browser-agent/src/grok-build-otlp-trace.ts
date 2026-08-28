@@ -281,7 +281,7 @@ export class GrokBuildAgentTraceProducer {
         this.tools.delete(event.call.callId);
       }
     } else if (event.type === "complete" || event.type === "limit") {
-      this.recordRunCompletion();
+      this.recordRunCompletion(event.type);
       this.closePrompt();
     }
   }
@@ -341,7 +341,7 @@ export class GrokBuildAgentTraceProducer {
     this.prompt = undefined;
   }
 
-  private recordRunCompletion(): void {
+  private recordRunCompletion(outcome: "complete" | "limit"): void {
     const parent = this.prompt ?? this.session;
     this.tracer.instantSpan({
       name: "session.process_conversation_turn",
@@ -352,15 +352,17 @@ export class GrokBuildAgentTraceProducer {
         { key: "model_id", value: this.options.modelId },
         { key: "query_source", value: this.options.querySource ?? "main" },
         { key: "response.has_tool_call", value: this.runHadTool },
-        { key: "stop_reason", value: "stop" },
+        { key: "stop_reason", value: outcome === "limit" ? "tool_calls" : "stop" },
       ],
     });
-    for (const name of [
-      "session.process_conversation_turn_with_recovery",
-      "send_xai_notification_with_extra_meta",
-      "feedback.maybe_request_feedback",
-      "send_turn_delta_with_snapshot",
-    ]) this.tracer.instantSpan({ name, parent });
+    this.tracer.instantSpan({ name: "session.process_conversation_turn_with_recovery", parent });
+    if (outcome === "complete") {
+      for (const name of [
+        "send_xai_notification_with_extra_meta",
+        "feedback.maybe_request_feedback",
+        "send_turn_delta_with_snapshot",
+      ]) this.tracer.instantSpan({ name, parent });
+    }
   }
 
   private recordTokenUsage(response: GrokCompletedResponse): void {

@@ -21,11 +21,11 @@ export const GROK_BUILD_SYSTEM_PARITY = {
   },
   responses_transport: {
     level: "exact",
-    evidence: ["test/fixtures/grok-conformance/native-pong-complete-v1.jsonl", "e2e/browser-agent.e2e.mjs"],
+    evidence: ["test/fixtures/grok-conformance/native-pong-complete-v1.jsonl", "e2e/browser-agent.e2e.mjs", "e2e/browser-agent-long.e2e.mjs", "scripts/grok-conformance-proxy.mjs"],
   },
   compaction: {
     level: "exact",
-    evidence: ["test/fixtures/grok-conformance/native-auto-compaction-v1.jsonl", "test/grok-build-agent.test.ts"],
+    evidence: ["test/fixtures/grok-conformance/native-auto-compaction-v1.jsonl", "test/grok-build-agent.test.ts", "test/grok-browser-protocol.test.ts", "test/grok-relay.test.ts", "worker-test/cloudflare-auth-session.test.ts"],
   },
   startup_models: {
     level: "source-ported",
@@ -34,8 +34,8 @@ export const GROK_BUILD_SYSTEM_PARITY = {
   },
   startup_settings: {
     level: "source-ported",
-    evidence: ["test/grok-build-bootstrap.test.ts", "test/grok-relay.test.ts"],
-    gap: "Needs failure-path and post-auth re-apply traffic corpora before promotion to exact.",
+    evidence: ["test/grok-build-bootstrap.test.ts", "test/grok-browser-protocol.test.ts", "test/grok-relay.test.ts", "worker-test/cloudflare-auth-session.test.ts", "test/fixtures/grok-conformance/native-auto-compaction-v1.jsonl", "e2e/browser-agent-long.e2e.mjs"],
+    gap: "Exact remote compaction header policy is proven for root, post-compaction, and subagent sessions; failure-path and post-auth re-apply traffic corpora remain before the whole startup-settings row can be promoted to exact.",
   },
   published_bundle_cache: {
     level: "source-ported",
