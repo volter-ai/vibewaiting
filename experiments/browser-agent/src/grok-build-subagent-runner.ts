@@ -9,6 +9,7 @@ import { formatGrokBuildSkillListing } from "./grok-build-skills.js";
 import { composeGrokBuildMcpCatalog, resolveGrokBuildAgentMcp } from "./grok-build-agent-mcp.js";
 import { createGrokBuildMcpServices, grokBuildMcpServicesFromRegistry, type GrokBuildMcpRegistry } from "./grok-build-mcp.js";
 import { projectGrokBuildMcpRuntimeConfig } from "./grok-build-mcp-config-runtime.js";
+import type { GrokBuildMcpRuntimeProjectionOptions } from "./grok-build-mcp-config-runtime.js";
 import {
   configureGrokBuildAgentTools,
   formatGrokBuildPreloadedSkills,
@@ -53,6 +54,8 @@ export interface GrokBuildBrowserSubagentRunnerOptions {
   parentMcpPool?(): readonly import("./grok-build-agent-mcp.js").GrokBuildAcpMcpServer[];
   projectTrusted?(): boolean;
   defaultMcpStartupTimeoutMs?(): number | undefined;
+  mcpRelayFetch?: typeof fetch;
+  mcpOAuth?: GrokBuildMcpRuntimeProjectionOptions["oauth"];
   traceMetadata?(): { clientName: string; clientVersion: string; serviceVersion: string; appEntrypoint: string } | undefined;
   takeConformanceLane?(): GrokConformanceSubagentLane | undefined;
 }
@@ -194,6 +197,8 @@ export class GrokBuildBrowserSubagentRunner {
       cwd,
       sessionId: subagentId,
       ...(defaultMcpStartupTimeoutMs !== undefined ? { defaultStartupTimeoutMs: defaultMcpStartupTimeoutMs } : {}),
+      ...(this.options.mcpRelayFetch ? { relayFetch: this.options.mcpRelayFetch } : {}),
+      ...(this.options.mcpOAuth ? { oauth: this.options.mcpOAuth } : {}),
     }));
     const parentRegistry = parentRuntime ? this.runtimeMcpRegistries.get(parentRuntime) : undefined;
     const rootRegistry = parentRegistry ?? this.options.rootMcpRegistry?.();

@@ -4,11 +4,13 @@ import { policyFromGrokBuildAcpServer, type GrokBuildMcpConfigPolicy } from "./g
 import type { GrokBuildMcpServerConfig } from "./grok-build-mcp.js";
 import type { GrokBuildMcpOAuthOptions } from "./grok-build-mcp-oauth.js";
 import { createGrokBuildAlmostNodeStdioConfig } from "./grok-build-mcp-stdio.js";
+import { shouldRelayGrokBuildMcpUrl } from "./grok-build-mcp-relay.js";
 
 export interface GrokBuildMcpRuntimeProjectionOptions {
   cwd: string;
   sessionId?: string;
   defaultStartupTimeoutMs?: number;
+  relayFetch?: typeof fetch;
   oauth?(server: GrokBuildAcpMcpServer, policy: GrokBuildMcpConfigPolicy): GrokBuildMcpOAuthOptions | undefined;
 }
 
@@ -43,6 +45,7 @@ export function projectGrokBuildMcpRuntimeConfig(
     url: server.url,
     headers: Object.fromEntries(server.headers.map((header) => [header.name, header.value])),
     enableEventStream: server.type === "sse",
+    ...(options.relayFetch && shouldRelayGrokBuildMcpUrl(server.url) ? { fetchImpl: options.relayFetch } : {}),
     ...common,
     ...(oauth ? { oauth } : {}),
   };

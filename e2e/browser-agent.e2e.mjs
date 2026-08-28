@@ -235,3 +235,46 @@ test("commits browser projects across reload and recovers the prior verified sna
   expect(persisted.conflict).toContain("changed in another tab");
   expect(persisted.conflictPaths).toContain("/third.txt");
 });
+
+test("persists MCP OAuth credentials with native stale-writer protection", async ({ page }) => {
+  await stubAuthenticatedStartup(page, "MCP credential storage test");
+  await page.goto("http://127.0.0.1:4175/", { waitUntil: "domcontentloaded", timeout: 10_000 });
+  const result = await page.evaluate(async () => {
+    const { GrokBuildIndexedDbMcpCredentialStore } = await import("/src/grok-build-mcp-credential-store.ts");
+    const key = "calendar:https://mcp.example.test/";
+    const credentials = (accessToken, tokenReceivedAt) => ({
+      clientId: "browser-client",
+      accessToken,
+      refreshToken: `${accessToken}-refresh`,
+      grantedScopes: ["calendar.read"],
+      redirectUri: `${location.origin}/mcp-oauth-callback.html`,
+      tokenReceivedAt,
+      metadata: {
+        authorizationEndpoint: "https://auth.example.test/authorize",
+        tokenEndpoint: "https://auth.example.test/token",
+      },
+    });
+    const first = new GrokBuildIndexedDbMcpCredentialStore();
+    await first.clearAll();
+    await first.save(key, credentials("newer", 20));
+    const second = new GrokBuildIndexedDbMcpCredentialStore();
+    const afterReload = await second.load(key);
+    await second.save(key, credentials("stale", 10));
+    const afterStaleWrite = await first.load(key);
+    await second.save(key, credentials("newest", 30));
+    const afterNewWrite = await first.load(key);
+    await first.clear(key);
+    return {
+      afterReload: afterReload?.accessToken,
+      afterStaleWrite: afterStaleWrite?.accessToken,
+      afterNewWrite: afterNewWrite?.accessToken,
+      cleared: await second.load(key),
+    };
+  });
+  expect(result).toEqual({
+    afterReload: "newer",
+    afterStaleWrite: "newer",
+    afterNewWrite: "newest",
+    cleared: undefined,
+  });
+});

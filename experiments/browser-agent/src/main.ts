@@ -59,6 +59,9 @@ import { discoverGrokBuildMcpServers } from "./grok-build-mcp-config-discovery.j
 import { projectGrokBuildMcpRuntimeConfig, withGrokBuildMcpScope } from "./grok-build-mcp-config-runtime.js";
 import type { GrokBuildAcpMcpServer } from "./grok-build-agent-mcp.js";
 import type { GrokBuildMcpServerConfig } from "./grok-build-mcp.js";
+import { createGrokBuildMcpHostnameResolver, createGrokBuildMcpRelayFetch } from "./grok-build-mcp-relay.js";
+import { GrokBuildMcpOAuthDialog } from "./grok-build-mcp-oauth-dialog.js";
+import type { GrokBuildMcpConfigPolicy } from "./grok-build-mcp-config-parse.js";
 import {
   createGrokBuildManagedMcpConfigs,
   grokBuildManagedGatewayEnabled,
@@ -128,11 +131,22 @@ const mcpOptions = {
     tool.type === "function" && "name" in tool && typeof tool.name === "string" ? [tool.name] : [tool.type])),
   traceSink: createGrokBuildMcpOtlpTraceSink(rootOtlpTracer),
 };
+const mcpRelayFetch = createGrokBuildMcpRelayFetch();
+const mcpHostnameResolver = createGrokBuildMcpHostnameResolver();
+const mcpOAuthDialog = new GrokBuildMcpOAuthDialog();
+const mcpOAuth = (server: GrokBuildAcpMcpServer, policy: GrokBuildMcpConfigPolicy) => mcpOAuthDialog.options({
+  serverName: server.name,
+  ...(policy.oauth?.clientId ? { clientId: policy.oauth.clientId } : {}),
+  ...(policy.oauth?.clientSecret ? { clientSecret: policy.oauth.clientSecret } : {}),
+  ...(policy.oauth?.scopes ? { scopes: policy.oauth.scopes } : {}),
+  resolveAuthorizationHostname: mcpHostnameResolver,
+});
 let mcpRuntime = createGrokBuildMcpServices([], mcpOptions);
 let managedMcpConfigs: GrokBuildMcpServerConfig[] = [];
 let rootMcpConfigs: GrokBuildAcpMcpServer[] = [];
 let rootMcpPool: GrokBuildAcpMcpServer[] = [];
 let rootMcpSessionId: string | undefined;
+let rootMcpConnectController: AbortController | undefined;
 let workflowManager: GrokBuildBrowserWorkflowManager | undefined;
 const externalSyntheticWakes = new Map<string, GrokBuildAutoWakePayload>();
 const workflowWakeRevisions = new Map<string, number>();
@@ -271,6 +285,8 @@ function resolvedMcpStartupTimeoutMs(): number {
 }
 
 function configureRootMcpRuntime(sessionId: string): void {
+  rootMcpConnectController?.abort(new DOMException("MCP configuration changed.", "AbortError"));
+  rootMcpConnectController = new AbortController();
   rootMcpSessionId = sessionId;
   const discovered = discoverGrokBuildMcpServers(container.vfs, { cwd: "/", projectTrusted: true });
   rootMcpConfigs = discovered.servers.map((entry) => withGrokBuildMcpScope(entry.server, entry.scope));
@@ -278,6 +294,8 @@ function configureRootMcpRuntime(sessionId: string): void {
     cwd: "/",
     sessionId,
     defaultStartupTimeoutMs: resolvedMcpStartupTimeoutMs(),
+    relayFetch: mcpRelayFetch,
+    oauth: mcpOAuth,
   }));
   const localNames = new Set(rootMcpConfigs.map((server) => server.name));
   const enabledManaged = managedMcpConfigs.filter((config) => !localNames.has(config.name));
@@ -293,6 +311,9 @@ function configureRootMcpRuntime(sessionId: string): void {
   ];
   const previous = mcpRuntime;
   mcpRuntime = createGrokBuildMcpServices([...localRuntimeConfigs, ...enabledManaged], mcpOptions);
+  // Native starts all MCP discovery/handshakes in a background task when the
+  // session run loop begins; tool dispatch can proceed while that task settles.
+  void mcpRuntime.registry.connectAll(rootMcpConnectController.signal).catch(() => undefined);
   void previous.registry.closeAll(new AbortController().signal).catch(() => undefined);
   for (const skipped of discovered.skipped) {
     if (skipped.reason !== "disabled") console.warn(`Skipped MCP server '${skipped.name}' from ${skipped.path}: ${skipped.reason}`);
@@ -545,6 +566,8 @@ subagentRunner = new GrokBuildBrowserSubagentRunner({
   parentMcpPool: () => rootMcpPool,
   projectTrusted: () => true,
   defaultMcpStartupTimeoutMs: () => resolvedMcpStartupTimeoutMs(),
+  mcpRelayFetch,
+  mcpOAuth,
   traceMetadata: () => conformanceProfile?.telemetryMetadata,
   takeConformanceLane: () => conformanceProfile?.subagentLanes?.[conformanceSubagentLaneIndex++],
 });
@@ -893,6 +916,8 @@ async function resetProject(): Promise<void> {
   rootBrowserRuntime = undefined;
   rootSkillManager = undefined;
   rootMcpSessionId = undefined;
+  rootMcpConnectController?.abort(new DOMException("MCP session reset.", "AbortError"));
+  rootMcpConnectController = undefined;
   rootMcpConfigs = [];
   rootMcpPool = [];
   const previousMcpRuntime = mcpRuntime;

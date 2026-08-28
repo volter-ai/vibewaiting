@@ -352,6 +352,69 @@ describe("distributed relay budgets", () => {
     expect(upstream).toHaveBeenCalledTimes(2);
   });
 
+  it("relays only authenticated public MCP traffic with bounded headers and DNS validation", async () => {
+    const session = { fetch: async () => Response.json({
+      accessToken: "token", userId: "user-1", eligible: true, subscriptionTier: "SuperGrok",
+    }) };
+    const gate = { fetch: async () => Response.json({ allowed: true }) };
+    const relayEnv = serviceEnv({
+      SESSIONS: { get: () => session, idFromName: (name: string) => name },
+      RATE_GATE: { get: () => gate, idFromName: (name: string) => name },
+    });
+    let privateDns = false;
+    let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const upstream = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.hostname === "cloudflare-dns.com") {
+        const type = url.searchParams.get("type");
+        return Response.json({ Answer: type === "A"
+          ? [{ type: 1, data: privateDns ? "127.0.0.1" : "8.8.8.8" }]
+          : [{ type: 28, data: "2606:4700:4700::1111" }] });
+      }
+      expect(url.toString()).toBe("https://mcp.example.com/rpc");
+      expect(init).toMatchObject({ method: "POST", redirect: "manual", body: "{}" });
+      expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer byo-token");
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          streamController = controller;
+          controller.enqueue(new TextEncoder().encode("event: message\ndata: first\n\n"));
+        },
+      }), {
+        headers: { "Content-Type": "text/event-stream", "Mcp-Session-Id": "mcp-session", "X-Secret-Upstream": "hidden" },
+      });
+    });
+    vi.stubGlobal("fetch", upstream);
+    const headers = {
+      "Content-Type": "application/json",
+      Cookie: `__Host-vw_session=${"a".repeat(43)}`,
+      Origin: "https://agent.example",
+      "Sec-Fetch-Site": "same-origin",
+    };
+    const send = (url = "https://mcp.example.com/rpc") => worker.fetch(new Request("https://agent.example/api/grok/mcp/proxy", {
+      method: "POST", headers,
+      body: JSON.stringify({ url, method: "POST", headers: { Authorization: "Bearer byo-token", Accept: "application/json" }, body: "{}" }),
+    }), relayEnv);
+    const pendingResponse = send();
+    const delivery = await Promise.race([
+      pendingResponse.then(() => "streaming" as const),
+      new Promise<"buffered">((resolve) => setTimeout(() => resolve("buffered"), 100)),
+    ]);
+    if (delivery === "buffered") streamController!.close();
+    expect(delivery).toBe("streaming");
+    const response = await pendingResponse;
+    expect(response.status).toBe(200);
+    expect(response.headers.get("X-Vibewaiting-Mcp-Upstream-Status")).toBe("200");
+    expect(response.headers.get("Mcp-Session-Id")).toBe("mcp-session");
+    expect(response.headers.get("X-Secret-Upstream")).toBeNull();
+    const reader = response.body!.getReader();
+    await expect(reader.read()).resolves.toMatchObject({ done: false });
+    streamController!.close();
+    await expect(reader.read()).resolves.toEqual({ done: true, value: undefined });
+    privateDns = true;
+    expect((await send("https://private.example.com/rpc")).status).toBe(400);
+    expect(upstream.mock.calls.filter(([input]) => new URL(String(input)).hostname !== "cloudflare-dns.com")).toHaveLength(1);
+  });
+
   it("caches trusted remote media model settings inside the encrypted session boundary", async () => {
     let stored: unknown;
     const session = {
@@ -544,7 +607,7 @@ describe("distributed relay budgets", () => {
     expect(await ready.json()).toMatchObject({
       ready: true,
       checks: "passed",
-      capabilities: { relay: true, inference: false, media: true, webFetch: true },
+      capabilities: { relay: true, inference: false, media: true, webFetch: true, mcpRelay: true },
     });
     const notReady = await worker.fetch(new Request("https://agent.example/api/ready"), serviceEnv({
       SESSION_ENCRYPTION_KEY: "invalid",

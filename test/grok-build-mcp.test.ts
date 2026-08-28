@@ -303,6 +303,65 @@ describe("Grok Build browser MCP protocol", () => {
     expect(saved).toMatchObject({ accessToken: "fresh", refreshToken: "keep-me" });
   });
 
+  it("refreshes a server-rejected usable token before considering interactive authorization", async () => {
+    let stored: McpOAuthCredentials = {
+      clientId: "browser-client", accessToken: "rejected", refreshToken: "refresh",
+      grantedScopes: ["mcp"], redirectUri: "https://app.example.test/callback",
+      metadata: { authorizationEndpoint: "https://auth.example.test/authorize", tokenEndpoint: "https://auth.example.test/token" },
+    };
+    let initializeCalls = 0;
+    let authorizeCalls = 0;
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === stored.metadata.tokenEndpoint) {
+        expect(String(init?.body)).toContain("grant_type=refresh_token");
+        return jsonResponse({ access_token: "refreshed", expires_in: 3600, scope: "mcp" });
+      }
+      const request = JSON.parse(String(init?.body)) as WireRequest;
+      if (request.method === "initialize") {
+        initializeCalls += 1;
+        if (initializeCalls === 1) return new Response("expired", { status: 401 });
+        expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer refreshed");
+        return jsonResponse({ jsonrpc: "2.0", id: request.id, result: { protocolVersion: "2025-11-25", capabilities: {} } });
+      }
+      return new Response(null, { status: 202 });
+    }) as unknown as typeof fetch;
+    const client = new GrokBuildMcpHttpClient({ name: "refresh-retry", url: "https://mcp.example.test", fetchImpl, oauth: {
+      credentialStore: {
+        load: async () => stored,
+        save: async (_key, value) => { stored = value; },
+        clear: async () => undefined,
+      },
+      authorize: async () => { authorizeCalls += 1; throw new Error("must not authorize"); },
+      redirectUri: stored.redirectUri,
+      resolveAuthorizationHostname: async () => ["8.8.8.8"],
+    } });
+    await client.initialize(new AbortController().signal);
+    expect({ initializeCalls, authorizeCalls, token: stored.accessToken }).toEqual({ initializeCalls: 2, authorizeCalls: 0, token: "refreshed" });
+  });
+
+  it("does not open an authorization popup when automatic refresh fails transiently", async () => {
+    const stored: McpOAuthCredentials = {
+      clientId: "browser-client", accessToken: "rejected", refreshToken: "refresh",
+      grantedScopes: ["mcp"], redirectUri: "https://app.example.test/callback",
+      metadata: { authorizationEndpoint: "https://auth.example.test/authorize", tokenEndpoint: "https://auth.example.test/token" },
+    };
+    let authorizeCalls = 0;
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === stored.metadata.tokenEndpoint) throw new TypeError("network unavailable");
+      const request = JSON.parse(String(init?.body)) as WireRequest;
+      if (request.method === "initialize") return new Response("expired", { status: 401 });
+      throw new Error(`Unexpected ${request.method}`);
+    }) as unknown as typeof fetch;
+    const client = new GrokBuildMcpHttpClient({ name: "transient-refresh", url: "https://mcp.example.test", fetchImpl, oauth: {
+      credentialStore: { load: async () => stored, save: async () => undefined, clear: async () => undefined },
+      authorize: async () => { authorizeCalls += 1; throw new Error("must not authorize"); },
+      redirectUri: stored.redirectUri,
+      resolveAuthorizationHostname: async () => ["8.8.8.8"],
+    } });
+    await expect(client.initialize(new AbortController().signal)).rejects.toThrow("OAuth token request failed");
+    expect(authorizeCalls).toBe(0);
+  });
+
   it("performs protected-resource discovery, DCR, PKCE, issuer validation, and resource-bound token exchange", async () => {
     let authorizationUrl = "";
     let saved: McpOAuthCredentials | undefined;

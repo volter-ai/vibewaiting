@@ -17,9 +17,11 @@ export const RATE_GATE_LIMITS = {
   userDailyTelemetryRequests: 200,
   globalDailyManagedMcpCalls: 100,
   userDailyManagedMcpCalls: 40,
+  globalDailyLocalMcpRequests: 100,
+  userDailyLocalMcpRequests: 40,
 } as const;
 
-type DailyBudgetKind = "media" | "webFetch" | "startup" | "telemetry" | "managedMcp";
+type DailyBudgetKind = "media" | "webFetch" | "startup" | "telemetry" | "managedMcp" | "localMcp";
 
 interface RateReservation {
   userKey: string;
@@ -102,6 +104,14 @@ const DAILY_POLICIES: Record<string, DailyPolicy> = {
     globalMessage: "The service-wide daily managed MCP limit has been reached.",
     userMessage: "This Grok account has reached its daily managed MCP limit.",
   },
+  "/acquire-local-mcp": {
+    kind: "localMcp",
+    globalLimit: RATE_GATE_LIMITS.globalDailyLocalMcpRequests,
+    userLimit: RATE_GATE_LIMITS.userDailyLocalMcpRequests,
+    invalidMessage: "Invalid local MCP limiter key.",
+    globalMessage: "The service-wide daily local MCP relay limit has been reached.",
+    userMessage: "This Grok account has reached its daily local MCP relay limit.",
+  },
 };
 
 function json(value: unknown, status = 200, retryAfter?: number): Response {
@@ -129,6 +139,7 @@ function emptyDaily(): Record<DailyBudgetKind, DailyCounter> {
     startup: { global: 0, users: {} },
     telemetry: { global: 0, users: {} },
     managedMcp: { global: 0, users: {} },
+    localMcp: { global: 0, users: {} },
   };
 }
 
@@ -140,6 +151,7 @@ function normalizeDaily(current: LegacyGateState): Record<DailyBudgetKind, Daily
     startup: daily?.startup ?? { global: current.globalStartupRequests ?? 0, users: current.userStartupRequests ?? {} },
     telemetry: daily?.telemetry ?? { global: current.globalTelemetryRequests ?? 0, users: current.userTelemetryRequests ?? {} },
     managedMcp: daily?.managedMcp ?? { global: 0, users: {} },
+    localMcp: daily?.localMcp ?? { global: 0, users: {} },
   };
 }
 

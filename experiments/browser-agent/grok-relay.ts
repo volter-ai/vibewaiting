@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
+import { resolve4, resolve6 } from "node:dns/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Plugin } from "vite";
 import {
@@ -9,6 +10,9 @@ import {
   MAX_WEB_FETCH_REDIRECTS,
   managedMcpCatalogCallIds,
   normalizeGrokManagedMcpCallRequest,
+  normalizeGrokLocalMcpRelayRequest,
+  normalizeGrokLocalMcpUrl,
+  isPublicGrokRelayIpAddress,
   normalizeWebFetchRedirectUrl,
   normalizeWebFetchUrl,
   normalizeImageMediaRequest,
@@ -35,6 +39,7 @@ const MAX_BOOTSTRAP_RESPONSE_BYTES = 1024 * 1024;
 const MAX_BUNDLE_RESPONSE_BYTES = 8 * 1024 * 1024;
 const MAX_TELEMETRY_BYTES = 1024 * 1024;
 const MAX_MANAGED_MCP_RESPONSE_BYTES = 8 * 1024 * 1024;
+const MAX_LOCAL_MCP_RESPONSE_BYTES = 8 * 1024 * 1024;
 
 interface StoredCredential {
   key?: unknown;
@@ -679,6 +684,92 @@ async function proxyWebFetch(
   throw new Error(`Too many redirects (maximum ${MAX_WEB_FETCH_REDIRECTS})`);
 }
 
+async function resolvePublicLocalMcpHostname(hostname: string): Promise<string[]> {
+  if (/^\d+\.\d+\.\d+\.\d+$/u.test(hostname)) {
+    if (!isPublicGrokRelayIpAddress(hostname)) throw new Error("MCP target resolved to a non-public address.");
+    return [hostname];
+  }
+  const [ipv4, ipv6] = await Promise.all([
+    resolve4(hostname).catch(() => []),
+    resolve6(hostname).catch(() => []),
+  ]);
+  const addresses = [...new Set([...ipv4, ...ipv6])];
+  if (addresses.length === 0 || addresses.some((address) => !isPublicGrokRelayIpAddress(address))) {
+    throw new Error("MCP target did not resolve exclusively to public addresses.");
+  }
+  return addresses;
+}
+
+function trustedLocalMutation(request: IncomingMessage): boolean {
+  const origin = request.headers.origin;
+  const host = request.headers.host;
+  if (!origin || !host) return false;
+  try {
+    return new URL(origin).host === host;
+  } catch { return false; }
+}
+
+async function proxyLocalMcp(
+  request: IncomingMessage,
+  response: ServerResponse,
+  fetchImpl: typeof globalThis.fetch,
+): Promise<void> {
+  if (!trustedLocalMutation(request)) throw new Error("Cross-origin local MCP relay requests are not allowed.");
+  const relay = normalizeGrokLocalMcpRelayRequest(JSON.parse((await readBody(request)).toString("utf8")) as unknown);
+  await resolvePublicLocalMcpHostname(new URL(relay.url).hostname);
+  const abort = new AbortController();
+  const abortUpstream = (): void => abort.abort(new DOMException("MCP relay client disconnected.", "AbortError"));
+  request.once("aborted", abortUpstream);
+  response.once("close", () => { if (!response.writableEnded) abortUpstream(); });
+  const upstream = await fetchImpl(relay.url, {
+    method: relay.method,
+    headers: relay.headers,
+    ...(relay.body !== undefined ? { body: relay.body } : {}),
+    redirect: "manual",
+    signal: abort.signal,
+  });
+  const declared = Number.parseInt(upstream.headers.get("Content-Length") ?? "0", 10);
+  if (Number.isFinite(declared) && declared > MAX_LOCAL_MCP_RESPONSE_BYTES) {
+    await upstream.body?.cancel().catch(() => undefined);
+    throw new Error("Local MCP response exceeds 8 MiB.");
+  }
+  response.statusCode = 200;
+  response.setHeader("Cache-Control", "no-store");
+  response.setHeader("Content-Type", upstream.headers.get("Content-Type") ?? "application/octet-stream");
+  response.setHeader("X-Vibewaiting-Mcp-Upstream-Status", String(upstream.status));
+  response.setHeader("X-Content-Type-Options", "nosniff");
+  for (const name of ["Location", "Mcp-Session-Id", "Retry-After", "WWW-Authenticate"] as const) {
+    const value = upstream.headers.get(name);
+    if (value) response.setHeader(name, value);
+  }
+  if (upstream.status === 204 || upstream.status === 205 || upstream.status === 304 || !upstream.body) {
+    await upstream.body?.cancel().catch(() => undefined);
+    response.end();
+    return;
+  }
+  response.flushHeaders();
+  const reader = upstream.body.getReader();
+  let bytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > MAX_LOCAL_MCP_RESPONSE_BYTES) throw new Error("Local MCP response exceeds 8 MiB.");
+      if (!response.write(Buffer.from(value))) {
+        await new Promise<void>((resolveDrain, rejectDrain) => {
+          response.once("drain", resolveDrain);
+          response.once("error", rejectDrain);
+        });
+      }
+    }
+    response.end();
+  } catch (cause) {
+    await reader.cancel(cause).catch(() => undefined);
+    if (!response.destroyed) response.destroy(cause instanceof Error ? cause : new Error(String(cause)));
+  }
+}
+
 export function createGrokRelay(options: GrokRelayOptions = {}): Plugin {
   const fetchImpl = options.fetch ?? globalThis.fetch;
   let remoteSettings: GrokRelayRemoteSettings = { mediaModels: {}, webFetch: {} };
@@ -740,6 +831,27 @@ export function createGrokRelay(options: GrokRelayOptions = {}): Plugin {
           } catch (error) {
             json(response, 400, { error: { message: error instanceof Error ? error.message : String(error) } });
           }
+          return;
+        }
+        if (path === "/api/grok/mcp/resolve") {
+          if (request.method !== "POST") return json(response, 405, { error: { message: "Method not allowed." } });
+          try {
+            if (!trustedLocalMutation(request)) throw new Error("Cross-origin local MCP relay requests are not allowed.");
+            const value = JSON.parse((await readBody(request)).toString("utf8")) as Record<string, unknown>;
+            if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).some((key) => key !== "hostname") || typeof value.hostname !== "string") {
+              throw new Error("MCP hostname resolution requires only a hostname string.");
+            }
+            const hostname = normalizeGrokLocalMcpUrl(`https://${value.hostname}/`).hostname;
+            json(response, 200, { addresses: await resolvePublicLocalMcpHostname(hostname) });
+          } catch (error) {
+            json(response, 400, { error: { message: error instanceof Error ? error.message : String(error) } });
+          }
+          return;
+        }
+        if (path === "/api/grok/mcp/proxy") {
+          if (request.method !== "POST") return json(response, 405, { error: { message: "Method not allowed." } });
+          try { await proxyLocalMcp(request, response, fetchImpl); }
+          catch (error) { json(response, 400, { error: { message: error instanceof Error ? error.message : String(error) } }); }
           return;
         }
         if (path === "/api/grok/bundle/archive" || path === "/api/grok/subagents/bundle") {

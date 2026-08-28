@@ -8,6 +8,8 @@ export const MAX_WEB_FETCH_BYTES = 10 * 1024 * 1024;
 export const MAX_WEB_FETCH_REDIRECTS = 10;
 export const MAX_MANAGED_MCP_CALL_ID_CHARS = 256;
 export const MAX_MANAGED_MCP_CATALOG_CALL_IDS = 256;
+export const MAX_LOCAL_MCP_URL_BYTES = 4_096;
+export const MAX_LOCAL_MCP_HEADER_BYTES = 64 * 1024;
 export const MAX_MEDIA_PROMPT_CHARS = 20_000;
 export const MAX_MEDIA_REFERENCE_CHARS = 11 * 1024 * 1024;
 
@@ -62,6 +64,60 @@ export interface GrokRelayRemoteSettings {
 export interface GrokManagedMcpCallRequest {
   call_id: string;
   arguments: Record<string, unknown>;
+}
+
+export interface GrokLocalMcpRelayRequest {
+  url: string;
+  method: "GET" | "POST" | "DELETE";
+  headers: Record<string, string>;
+  body?: string;
+}
+
+const LOCAL_MCP_REQUEST_HEADERS = new Set([
+  "accept", "authorization", "content-type", "last-event-id", "mcp-protocol-version", "mcp-session-id",
+]);
+
+/** Strict same-origin envelope for browser MCP/OAuth traffic; the target is revalidated at the edge. */
+export function normalizeGrokLocalMcpRelayRequest(value: unknown): GrokLocalMcpRelayRequest {
+  if (!isObject(value)) throw new Error("Local MCP relay request must be a JSON object.");
+  exactKeys(value, ["url", "method", "headers", "body"], "Local MCP relay request");
+  const url = normalizeGrokLocalMcpUrl(value.url).toString();
+  if (value.method !== "GET" && value.method !== "POST" && value.method !== "DELETE") {
+    throw new Error("Local MCP relay method must be GET, POST, or DELETE.");
+  }
+  if (!isObject(value.headers)) throw new Error("Local MCP relay headers must be an object.");
+  const headers: Record<string, string> = {};
+  let headerBytes = 0;
+  for (const [name, raw] of Object.entries(value.headers)) {
+    const normalized = name.toLowerCase();
+    if (!LOCAL_MCP_REQUEST_HEADERS.has(normalized) || typeof raw !== "string" || /[\r\n]/u.test(name) || /[\r\n]/u.test(raw)) {
+      throw new Error(`Local MCP relay header '${name}' is not allowed.`);
+    }
+    headerBytes += new TextEncoder().encode(name).byteLength + new TextEncoder().encode(raw).byteLength;
+    if (headerBytes > MAX_LOCAL_MCP_HEADER_BYTES) throw new Error("Local MCP relay headers are too large.");
+    headers[name] = raw;
+  }
+  if (value.method === "GET" || value.method === "DELETE") {
+    if (value.body !== undefined && value.body !== "") throw new Error(`${value.method} local MCP requests cannot contain a body.`);
+    return { url, method: value.method, headers };
+  }
+  if (value.body !== undefined && typeof value.body !== "string") throw new Error("Local MCP relay body must be a string.");
+  return { url, method: value.method, headers, ...(typeof value.body === "string" ? { body: value.body } : {}) };
+}
+
+export function normalizeGrokLocalMcpUrl(value: unknown): URL {
+  if (typeof value !== "string" || !value || new TextEncoder().encode(value).byteLength > MAX_LOCAL_MCP_URL_BYTES) {
+    throw new Error("Local MCP relay URL is missing or too large.");
+  }
+  let url: URL;
+  try { url = new URL(value); } catch { throw new Error("Local MCP relay URL is invalid."); }
+  if (url.protocol !== "https:" || url.username || url.password || url.port && url.port !== "443") {
+    throw new Error("Local MCP relay targets must use credential-free HTTPS on port 443.");
+  }
+  if (!url.hostname.includes(".") || blockedWebFetchHost(normalizedWebFetchHost(url.hostname))) {
+    throw new Error("Local MCP relay target must use a public, fully-qualified hostname.");
+  }
+  return url;
 }
 
 export type GrokVideoMediaRequest =
@@ -429,8 +485,64 @@ function blockedWebFetchHost(host: string): boolean {
     || (first === 100 && second >= 64 && second <= 127)
     || (first === 169 && second === 254)
     || (first === 172 && second >= 16 && second <= 31)
-    || (first === 192 && second === 168)
-    || (first === 198 && (second === 18 || second === 19));
+    || (first === 192 && (second === 0 || second === 2 || second === 88 || second === 168))
+    || (first === 198 && (second === 18 || second === 19 || second === 51))
+    || (first === 203 && second === 0);
+}
+
+export function isPublicGrokRelayIpAddress(input: string): boolean {
+  const host = input.replace(/^\[|\]$/gu, "").toLowerCase();
+  if (host.includes(":")) {
+    const words = parseIpv6Words(host);
+    if (!words) return false;
+    const allZero = words.every((word) => word === 0);
+    const loopback = words.slice(0, 7).every((word) => word === 0) && words[7] === 1;
+    if (allZero || loopback || (words[0]! & 0xfe00) === 0xfc00
+      || (words[0]! & 0xffc0) === 0xfe80 || (words[0]! & 0xff00) === 0xff00) return false;
+    if (words[0] === 0x2001 && words[1] === 0x0db8) return false;
+    if (words[0] === 0x0100 && words.slice(1, 4).every((word) => word === 0)) return false;
+    const embeddedIpv4 = words.slice(0, 5).every((word) => word === 0)
+      && (words[5] === 0 || words[5] === 0xffff);
+    if (embeddedIpv4) return isPublicGrokRelayIpAddress(`${words[6]! >>> 8}.${words[6]! & 0xff}.${words[7]! >>> 8}.${words[7]! & 0xff}`);
+    return true;
+  }
+  const parts = host.split(".").map(Number);
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
+  const [first = 0, second = 0] = parts;
+  return !(first === 0 || first === 10 || first === 127 || first >= 224
+    || (first === 100 && second >= 64 && second <= 127)
+    || (first === 169 && second === 254)
+    || (first === 172 && second >= 16 && second <= 31)
+    || (first === 192 && (second === 0 || second === 2 || second === 88 || second === 168))
+    || (first === 198 && (second === 18 || second === 19 || second === 51))
+    || (first === 203 && second === 0));
+}
+
+function parseIpv6Words(input: string): number[] | undefined {
+  if (input.includes("%") || input.split("::").length > 2) return undefined;
+  let source = input;
+  const dotted = /(^|:)(\d+\.\d+\.\d+\.\d+)$/u.exec(source);
+  let tail: number[] = [];
+  if (dotted) {
+    const parts = dotted[2]!.split(".").map(Number);
+    if (parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return undefined;
+    tail = [(parts[0]! << 8) | parts[1]!, (parts[2]! << 8) | parts[3]!];
+    source = source.slice(0, dotted.index);
+  }
+  const compressed = source.includes("::");
+  const [leftSource = "", rightSource = ""] = source.split("::");
+  const parse = (part: string): number[] | undefined => {
+    if (!part) return [];
+    const segments = part.split(":");
+    if (segments.some((segment) => !/^[0-9a-f]{1,4}$/u.test(segment))) return undefined;
+    return segments.map((segment) => Number.parseInt(segment, 16));
+  };
+  const left = parse(leftSource);
+  const right = parse(rightSource);
+  if (!left || !right) return undefined;
+  const present = left.length + right.length + tail.length;
+  if (compressed ? present >= 8 : present !== 8) return undefined;
+  return [...left, ...Array(compressed ? 8 - present : 0).fill(0), ...right, ...tail];
 }
 
 /** Validate an xAI-issued media URL before the relay performs a server-side download. */

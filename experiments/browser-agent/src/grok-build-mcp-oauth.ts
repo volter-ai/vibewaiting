@@ -72,6 +72,15 @@ interface OAuthTokenPayload {
   token_type?: unknown;
   expires_in?: unknown;
   scope?: unknown;
+  error?: unknown;
+  error_description?: unknown;
+}
+
+class McpOAuthTokenExchangeError extends Error {
+  constructor(message: string, readonly transient: boolean, cause?: unknown) {
+    super(message, cause === undefined ? undefined : { cause });
+    this.name = "McpOAuthTokenExchangeError";
+  }
 }
 
 const DEFAULT_DISCOVERY_TIMEOUT_MS = 5_000;
@@ -118,13 +127,17 @@ export class GrokBuildMcpOAuthClient {
 
   private async prepare(signal: AbortSignal, force: boolean): Promise<string | undefined> {
     let stored = await this.options.credentialStore.load(this.key);
-    if (stored && !force) {
-      if (tokenIsUsable(stored)) return stored.accessToken;
-      if (stored.refreshToken) {
+    if (stored) {
+      if (!force && tokenIsUsable(stored)) return stored.accessToken;
+      const needsExpandedScopes = this.requiredScopes.some((scope) => !stored.grantedScopes.includes(scope));
+      if (stored.refreshToken && !needsExpandedScopes) {
         try {
           stored = await this.refresh(stored, signal);
           return stored.accessToken;
-        } catch {
+        } catch (error) {
+          // Native automatic tool retries do not open a consent window for a
+          // network/proxy blip. Terminal refresh rejection still escalates.
+          if (force && isTransientTokenExchangeFailure(error)) throw error;
           // Native falls through to interactive authorization after refresh failure.
         }
       }
@@ -288,10 +301,27 @@ async function exchangeToken(metadata: McpOAuthMetadata, fields: Record<string, 
     headers.set("Authorization", `Basic ${btoa(`${clientId}:${clientSecret}`)}`);
     body.delete("client_id");
   } else if (clientSecret) body.set("client_secret", clientSecret);
-  const response = await fetchImpl(metadata.tokenEndpoint, { method: "POST", headers, body, signal, redirect: "error", credentials: "omit" });
+  let response: Response;
+  try {
+    response = await fetchImpl(metadata.tokenEndpoint, { method: "POST", headers, body, signal, redirect: "error", credentials: "omit" });
+  } catch (cause) {
+    throw new McpOAuthTokenExchangeError("OAuth token request failed.", true, cause);
+  }
   const token = await response.json().catch(() => ({})) as OAuthTokenPayload;
-  if (!response.ok || typeof token.access_token !== "string") throw new Error(`OAuth token exchange failed with HTTP ${response.status}.`);
+  if (!response.ok || typeof token.access_token !== "string") {
+    const oauthCode = typeof token.error === "string" ? token.error : undefined;
+    const description = typeof token.error_description === "string" ? token.error_description : undefined;
+    const detail = oauthCode ? `: ${oauthCode}${description ? `: ${description}` : ""}` : "";
+    throw new McpOAuthTokenExchangeError(
+      `OAuth token exchange failed with HTTP ${response.status}${detail}.`,
+      !oauthCode,
+    );
+  }
   return token;
+}
+
+function isTransientTokenExchangeFailure(error: unknown): boolean {
+  return error instanceof McpOAuthTokenExchangeError && error.transient;
 }
 
 function credentialsFromToken(token: OAuthTokenPayload, input: { clientId: string; clientSecret?: string; metadata: McpOAuthMetadata; redirectUri: string; fallbackScopes: string[]; fallbackRefreshToken?: string }): McpOAuthCredentials {

@@ -5,6 +5,9 @@ import {
   MAX_WEB_FETCH_REDIRECTS,
   managedMcpCatalogCallIds,
   normalizeGrokManagedMcpCallRequest,
+  normalizeGrokLocalMcpRelayRequest,
+  normalizeGrokLocalMcpUrl,
+  isPublicGrokRelayIpAddress,
   cookieValue,
   isTrustedMutation,
   normalizeWebFetchRedirectUrl,
@@ -66,6 +69,7 @@ const MAX_IMAGE_RESPONSE_BYTES = 12 * 1024 * 1024;
 const MAX_VIDEO_RESPONSE_BYTES = 100 * 1024 * 1024;
 const MAX_BOOTSTRAP_RESPONSE_BYTES = 1024 * 1024;
 const MAX_MANAGED_MCP_RESPONSE_BYTES = 8 * 1024 * 1024;
+const MAX_LOCAL_MCP_RESPONSE_BYTES = 8 * 1024 * 1024;
 const MAX_BUNDLE_RESPONSE_BYTES = 8 * 1024 * 1024;
 const MAX_TELEMETRY_BYTES = 512 * 1024;
 const MAX_OAUTH_RESPONSE_BYTES = 64 * 1024;
@@ -422,6 +426,42 @@ async function readLimitedResponse(response: Response, maximum = MAX_WEB_FETCH_B
     offset += chunk.byteLength;
   }
   return body;
+}
+
+/** Preserve MCP/SSE delivery and backpressure while enforcing the same hard response cap. */
+function limitedResponseStream(response: Response, maximum: number): ReadableStream<Uint8Array> | null {
+  const declared = Number.parseInt(response.headers.get("Content-Length") ?? "0", 10);
+  if (Number.isFinite(declared) && declared > maximum) {
+    throw new Error(`Response exceeds maximum size of ${maximum} bytes`);
+  }
+  if (!response.body) return null;
+  const reader = response.body.getReader();
+  let length = 0;
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (done) {
+          controller.close();
+          return;
+        }
+        length += value.byteLength;
+        if (length > maximum) {
+          const cause = new Error(`Response exceeds maximum size of ${maximum} bytes`);
+          await reader.cancel(cause).catch(() => undefined);
+          controller.error(cause);
+          return;
+        }
+        controller.enqueue(value);
+      } catch (cause) {
+        await reader.cancel(cause).catch(() => undefined);
+        controller.error(cause);
+      }
+    },
+    async cancel(reason) {
+      await reader.cancel(reason).catch(() => undefined);
+    },
+  });
 }
 
 async function readLimitedJson<T>(response: Response, maximum: number): Promise<T | undefined> {
@@ -1173,7 +1213,8 @@ async function routeBootstrap(request: Request, env: Env, kind: GrokBootstrapKin
     });
     const etag = upstream.headers.get("ETag");
     if (etag) headers.set("ETag", etag);
-    return new Response(body.buffer as ArrayBuffer, { status: upstream.status, headers });
+    const noBody = upstream.status === 204 || upstream.status === 205 || upstream.status === 304;
+    return new Response(noBody ? null : body.buffer as ArrayBuffer, { status: upstream.status, headers });
   } catch (cause) {
     console.error("grok_bootstrap_failed", kind, cause instanceof Error ? cause.message : "unknown");
     return error(`The Grok ${kind} request did not complete.`, 502);
@@ -1238,6 +1279,123 @@ async function routeManagedMcpCall(request: Request, env: Env): Promise<Response
   } catch (cause) {
     console.error("grok_managed_mcp_call_failed", cause instanceof Error ? cause.message : "unknown");
     return error("The managed MCP tool did not complete.", 502);
+  }
+}
+
+async function requireLocalMcpCredential(request: Request, env: Env): Promise<InternalCredential | Response> {
+  const sessionId = cookieValue(request.headers.get("Cookie"), SESSION_COOKIE);
+  if (!validSessionId(sessionId)) return error("Connect a Grok subscription before using local MCP servers.", 401);
+  const credentialResponse = await internalJson(sessionStub(env, sessionId), "/credential");
+  if (!credentialResponse.ok) return new Response(credentialResponse.body, credentialResponse);
+  const credential = await credentialResponse.json<InternalCredential>();
+  return credential.eligible ? credential : error("This Grok account does not have an active eligible subscription.", 403);
+}
+
+interface DnsJsonResponse {
+  Answer?: Array<{ type?: unknown; data?: unknown }>;
+}
+
+async function resolvePublicMcpHostname(hostname: string, signal: AbortSignal): Promise<string[]> {
+  if (/^\d+\.\d+\.\d+\.\d+$/u.test(hostname)) {
+    if (!isPublicGrokRelayIpAddress(hostname)) throw new Error("MCP target resolved to a non-public address.");
+    return [hostname];
+  }
+  const addresses: string[] = [];
+  for (const type of ["A", "AAAA"] as const) {
+    const endpoint = new URL("https://cloudflare-dns.com/dns-query");
+    endpoint.searchParams.set("name", hostname);
+    endpoint.searchParams.set("type", type);
+    const response = await fetch(endpoint, {
+      headers: { Accept: "application/dns-json" },
+      redirect: "error",
+      signal,
+    });
+    const value = await readLimitedJson<DnsJsonResponse>(response, 64 * 1024);
+    for (const answer of value?.Answer ?? []) {
+      if ((answer.type === 1 || answer.type === 28) && typeof answer.data === "string" && !addresses.includes(answer.data)) {
+        addresses.push(answer.data);
+      }
+    }
+  }
+  if (addresses.length === 0 || addresses.some((address) => !isPublicGrokRelayIpAddress(address))) {
+    throw new Error("MCP target did not resolve exclusively to public addresses.");
+  }
+  return addresses;
+}
+
+async function acquireLocalMcpBudget(request: Request, env: Env, credential: InternalCredential): Promise<Response | undefined> {
+  const ipHash = await sha256(clientIp(request));
+  if (!(await requireEdgeLimit(env.CHAT_IP_RATE_LIMITER, `local-mcp:${ipHash}`))) {
+    return error("This network has reached the per-minute local MCP relay limit.", 429, 60);
+  }
+  const userKey = await sha256(credential.userId);
+  if (!(await requireEdgeLimit(env.CHAT_USER_RATE_LIMITER, `local-mcp:${userKey}`))) {
+    return error("This Grok account has reached the per-minute local MCP relay limit.", 429, 60);
+  }
+  return acquireDailyGate(env, "/acquire-local-mcp", userKey);
+}
+
+async function routeLocalMcpResolve(request: Request, env: Env): Promise<Response> {
+  const credential = await requireLocalMcpCredential(request, env);
+  if (credential instanceof Response) return credential;
+  const budget = await acquireLocalMcpBudget(request, env, credential);
+  if (budget) return budget;
+  let hostname: string;
+  try {
+    const value = JSON.parse(await readLimitedBody(request)) as Record<string, unknown>;
+    if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).some((key) => key !== "hostname") || typeof value.hostname !== "string") {
+      throw new Error("MCP hostname resolution requires only a hostname string.");
+    }
+    hostname = normalizeGrokLocalMcpUrl(`https://${value.hostname}/`).hostname;
+  } catch (cause) {
+    return error(cause instanceof Error ? cause.message : "Invalid MCP hostname.", 400);
+  }
+  try {
+    return json({ addresses: await resolvePublicMcpHostname(hostname, request.signal) });
+  } catch (cause) {
+    return error(cause instanceof Error ? cause.message : "MCP hostname resolution failed.", 400);
+  }
+}
+
+async function routeLocalMcpProxy(request: Request, env: Env): Promise<Response> {
+  const credential = await requireLocalMcpCredential(request, env);
+  if (credential instanceof Response) return credential;
+  const budget = await acquireLocalMcpBudget(request, env, credential);
+  if (budget) return budget;
+  let relay: ReturnType<typeof normalizeGrokLocalMcpRelayRequest>;
+  try {
+    relay = normalizeGrokLocalMcpRelayRequest(JSON.parse(await readLimitedBody(request)) as unknown);
+    await resolvePublicMcpHostname(new URL(relay.url).hostname, request.signal);
+  } catch (cause) {
+    return error(cause instanceof Error ? cause.message : "Invalid local MCP relay request.", 400);
+  }
+  try {
+    const upstream = await fetch(relay.url, {
+      method: relay.method,
+      headers: relay.headers,
+      ...(relay.body !== undefined ? { body: relay.body } : {}),
+      redirect: "manual",
+      signal: request.signal,
+    });
+    const body = limitedResponseStream(upstream, MAX_LOCAL_MCP_RESPONSE_BYTES);
+    const headers = new Headers({
+      "Cache-Control": "no-store",
+      "Content-Type": upstream.headers.get("Content-Type") ?? "application/octet-stream",
+      "X-Vibewaiting-Mcp-Upstream-Status": String(upstream.status),
+      "X-Content-Type-Options": "nosniff",
+    });
+    for (const name of ["Location", "Mcp-Session-Id", "Retry-After", "WWW-Authenticate"] as const) {
+      const value = upstream.headers.get(name);
+      if (value) headers.set(name, value);
+    }
+    const noBody = upstream.status === 204 || upstream.status === 205 || upstream.status === 304;
+    // Never expose an upstream redirect as the relay response itself: the
+    // browser would follow it from our origin before the MCP client could
+    // apply native redirect policy. The adapter restores this status.
+    return new Response(noBody ? null : body, { status: 200, headers });
+  } catch (cause) {
+    console.error("grok_local_mcp_failed", cause instanceof Error ? cause.name : "unknown");
+    return error("The local MCP relay request did not complete.", 502);
   }
 }
 
@@ -1418,6 +1576,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
         inference: env.INFERENCE_ENABLED === "true",
         media: env.MEDIA_ENABLED === "true",
         webFetch: env.WEB_FETCH_ENABLED === "true",
+        mcpRelay: env.RELAY_ENABLED === "true",
       },
     }, issues.length === 0 ? 200 : 503);
   }
@@ -1441,6 +1600,8 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
   if (url.pathname === "/api/grok/settings" && request.method === "GET") return routeBootstrap(request, env, "settings");
   if (url.pathname === "/api/grok/mcp/tools/list" && request.method === "GET") return routeBootstrap(request, env, "managed-mcp");
   if (url.pathname === "/api/grok/mcp/tools/call" && request.method === "POST") return routeManagedMcpCall(request, env);
+  if (url.pathname === "/api/grok/mcp/resolve" && request.method === "POST") return routeLocalMcpResolve(request, env);
+  if (url.pathname === "/api/grok/mcp/proxy" && request.method === "POST") return routeLocalMcpProxy(request, env);
   if (url.pathname === "/api/grok/billing" && request.method === "GET") return routeBootstrap(request, env, "billing");
   if (url.pathname === "/api/grok/bundle/archive" && request.method === "GET") return routeBundle(request, env, "archive");
   if (url.pathname === "/api/grok/subagents/bundle" && request.method === "GET") return routeBundle(request, env, "legacy");

@@ -4,6 +4,9 @@ import {
   isTrustedMutation,
   managedMcpCatalogCallIds,
   normalizeGrokManagedMcpCallRequest,
+  normalizeGrokLocalMcpRelayRequest,
+  normalizeGrokLocalMcpUrl,
+  isPublicGrokRelayIpAddress,
   normalizeWebFetchRedirectUrl,
   normalizeWebFetchUrl,
   normalizeImageMediaRequest,
@@ -114,6 +117,29 @@ describe("Cloudflare browser-agent security boundary", () => {
     expect(() => normalizeGrokManagedMcpCallRequest({
       call_id: "gmail.search", arguments: {}, upstream: "https://evil.example",
     }, ["gmail.search"])).toThrow(/only call_id and arguments/u);
+  });
+
+  it("constrains local MCP relay targets, methods, headers, and public addresses", () => {
+    expect(normalizeGrokLocalMcpRelayRequest({
+      url: "https://mcp.example.com/rpc",
+      method: "POST",
+      headers: { Authorization: "Bearer secret", "MCP-Protocol-Version": "2025-11-25" },
+      body: "{}",
+    })).toEqual({
+      url: "https://mcp.example.com/rpc", method: "POST",
+      headers: { Authorization: "Bearer secret", "MCP-Protocol-Version": "2025-11-25" }, body: "{}",
+    });
+    expect(() => normalizeGrokLocalMcpRelayRequest({ url: "https://mcp.example.com", method: "PUT", headers: {} })).toThrow(/method/u);
+    expect(() => normalizeGrokLocalMcpRelayRequest({ url: "https://mcp.example.com", method: "GET", headers: { Cookie: "stolen" } })).toThrow(/not allowed/u);
+    expect(() => normalizeGrokLocalMcpRelayRequest({ url: "https://mcp.example.com", method: "GET", headers: {}, body: "x" })).toThrow(/cannot contain/u);
+    for (const target of ["http://mcp.example.com", "https://localhost/mcp", "https://127.0.0.1/mcp", "https://mcp.example.com:8443/mcp", "https://user:pass@mcp.example.com/mcp"]) {
+      expect(() => normalizeGrokLocalMcpUrl(target), target).toThrow();
+    }
+    for (const address of ["127.0.0.1", "10.0.0.1", "172.16.0.1", "192.168.0.1", "169.254.169.254", "192.0.2.1", "2001:db8::1", "::1", "::ffff:127.0.0.1", "::192.168.0.1", "1:2:3", "gggg::1"]) {
+      expect(isPublicGrokRelayIpAddress(address), address).toBe(false);
+    }
+    expect(isPublicGrokRelayIpAddress("8.8.8.8")).toBe(true);
+    expect(isPublicGrokRelayIpAddress("2606:4700:4700::1111")).toBe(true);
   });
 
   it("parses only the exact session cookie and validates 256-bit ids", () => {
