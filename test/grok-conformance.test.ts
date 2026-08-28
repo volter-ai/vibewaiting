@@ -3,11 +3,13 @@ import {
   LaneProtocolState,
   ProtocolViolation,
   assertProtocolMatch,
+  canonicalOtlpTraceExport,
   canonicalRequest,
   normalizeTelemetryMeasurements,
   ProtocolSymbolMatcher,
   splitLanePath,
 } from "../src/grok-conformance.js";
+import { encodeGrokBuildOtlpExport } from "../experiments/browser-agent/src/grok-build-otlp-protobuf.js";
 
 function request(
   lane: "native" | "browser",
@@ -42,6 +44,47 @@ function request(
 }
 
 describe("Grok Build conformance protocol", () => {
+  it("canonicalizes OTLP behavior while discarding IDs, clocks, and Rust-only callsites", () => {
+    const bytes = encodeGrokBuildOtlpExport({
+      resource: [
+        { key: "service.name", value: "grok-cli" },
+        { key: "client.name", value: "grok-pager" },
+        { key: "user.id", value: "private-user" },
+      ],
+      scope: { name: "grok-cli" },
+      spans: [{
+        traceId: new Uint8Array(16).fill(1),
+        spanId: new Uint8Array(8).fill(2),
+        name: "tool.execution",
+        kind: 1,
+        startTimeUnixNano: 10n,
+        endTimeUnixNano: 20n,
+        attributes: [
+          { key: "tool_name", value: "read_file" },
+          { key: "success", value: true },
+          { key: "target", value: "rust::private::callsite" },
+        ],
+      }, {
+        traceId: new Uint8Array(16).fill(3),
+        spanId: new Uint8Array(8).fill(4),
+        name: "auth",
+        kind: 1,
+        startTimeUnixNano: 30n,
+        endTimeUnixNano: 40n,
+        attributes: [{ key: "token_type", value: "OidcSession" }],
+      }],
+    }, { redact: false });
+    expect(canonicalOtlpTraceExport(bytes)).toEqual({
+      resource: { "client.name": "grok-pager", "service.name": "grok-cli" },
+      spans: [{
+        name: "tool.execution",
+        kind: 1,
+        status: 0,
+        attributes: { success: true, tool_name: "read_file" },
+      }],
+    });
+  });
+
   it("accepts only explicit native and browser lanes", () => {
     expect(splitLanePath("/native/v1/responses")).toEqual({ lane: "native", upstreamPath: "/v1/responses" });
     expect(splitLanePath("/browser/v1/settings")).toEqual({ lane: "browser", upstreamPath: "/v1/settings" });

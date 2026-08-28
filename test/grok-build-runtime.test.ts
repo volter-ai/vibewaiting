@@ -149,7 +149,10 @@ describe("Grok Build browser tool runtime", () => {
     await child;
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
     expect(wakes).toEqual([expect.objectContaining({ promptId: `subagent-completed-${id}`, source: "subagent_completed" })]);
-    expect(tools.takeSystemReminder(`subagent-completed-${id}`)).toContain(`Background subagent "${id}"`);
+    const reminders = tools.takeSystemReminders(`subagent-completed-${id}`);
+    expect(reminders).toHaveLength(2);
+    expect(reminders[0]).toContain("While you were idle, 1 background subagent completed");
+    expect(reminders[1]).toContain(`Background subagent "${id}"`);
     await expect(tools.execute({ callId: "poll", name: "get_command_or_subagent_output", arguments: JSON.stringify({ task_ids: [id] }) }, signal))
       .resolves.toMatchObject({ output: expect.stringContaining("Status: completed") });
   });
@@ -173,7 +176,9 @@ describe("Grok Build browser tool runtime", () => {
     const id = /subagent_id: ([0-9a-f-]+)/u.exec(started.output)?.[1] ?? "";
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
     expect(wakes).toEqual([expect.objectContaining({ promptId: `subagent-completed-${id}`, source: "subagent_completed" })]);
-    expect(tools.takeSystemReminder(`subagent-completed-${id}`)).toMatch(
+    const reminders = tools.takeSystemReminders(`subagent-completed-${id}`);
+    expect(reminders[0]).toContain("While you were idle, 1 background subagent completed");
+    expect(reminders[1]).toMatch(
       new RegExp(`^<system-reminder>\\nBackground subagent "${id}" \\(explore: "Inspect files"\\) completed successfully\\.\\nDuration: .* \\| Tool calls: 3 \\| Turns: 2`, "u"),
     );
   });

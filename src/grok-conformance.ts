@@ -54,6 +54,18 @@ export interface CanonicalRequest {
   body: unknown;
 }
 
+export interface CanonicalOtlpTraceExport {
+  resource: Record<string, unknown>;
+  spans: CanonicalOtlpSpan[];
+}
+
+export interface CanonicalOtlpSpan {
+  name: string;
+  kind: number;
+  status: number;
+  attributes: Record<string, unknown>;
+}
+
 export interface RecordedResponse {
   status: number;
   headers: Record<string, string>;
@@ -202,7 +214,10 @@ export function canonicalRequest(
   body: Buffer,
   state: LaneProtocolState,
 ): CanonicalRequest {
-  const canonical = canonicalBody(body, singleHeader(headers["content-type"]), state);
+  const contentType = singleHeader(headers["content-type"]);
+  const canonical = upstreamPath === "/v1/traces" && contentType?.toLowerCase().includes("protobuf")
+    ? canonicalOtlpTraceExport(body)
+    : canonicalBody(body, contentType, state);
   normalizeTelemetryMeasurements(upstreamPath, canonical);
   return {
     method: method.toUpperCase(),
@@ -211,6 +226,42 @@ export function canonicalRequest(
     headers: canonicalHeaders(headers, state),
     body: canonical,
   };
+}
+
+/**
+ * Decode OTLP protobuf into the stable semantic surface used by the parity
+ * harness. Export batching, IDs, clocks, durations, and executor callsites are
+ * intentionally excluded; span names, kinds, statuses, resource identity, and
+ * behavior-bearing attributes remain strict.
+ */
+export function canonicalOtlpTraceExport(body: Uint8Array): CanonicalOtlpTraceExport {
+  try {
+    const root = decodeProtobufMessage(body);
+    const resource: Record<string, unknown> = {};
+    const spans: CanonicalOtlpSpan[] = [];
+    for (const resourceSpansField of protobufFields(root, 1)) {
+      const resourceSpans = nestedProtobuf(resourceSpansField);
+      const resourceMessage = optionalProtobufField(resourceSpans, 1);
+      if (resourceMessage) {
+        for (const attribute of protobufFields(nestedProtobuf(resourceMessage), 1)) {
+          const [key, value] = decodeOtlpAttribute(attribute);
+          if (OTLP_RESOURCE_KEYS.has(key)) resource[key] = value;
+        }
+      }
+      for (const scopeSpansField of protobufFields(resourceSpans, 2)) {
+        const scopeSpans = nestedProtobuf(scopeSpansField);
+        for (const spanField of protobufFields(scopeSpans, 2)) {
+          const span = decodeCanonicalOtlpSpan(spanField);
+          if (OTLP_BEHAVIOR_SPAN_NAMES.has(span.name)) spans.push(span);
+        }
+      }
+    }
+    spans.sort((left, right) => stableJson(left).localeCompare(stableJson(right)));
+    return { resource: sortJson(resource) as Record<string, unknown>, spans };
+  } catch (cause) {
+    if (cause instanceof ProtocolViolation) throw cause;
+    throw new ProtocolViolation(`OTLP trace request was not valid protobuf: ${cause instanceof Error ? cause.message : String(cause)}`);
+  }
 }
 
 /** Preserve telemetry structure/counters while removing values that necessarily change on replay. */
@@ -353,4 +404,206 @@ function alignSymbols(
     ]));
   }
   return actual;
+}
+
+const OTLP_RESOURCE_KEYS = new Set([
+  "app.entrypoint",
+  "client.name",
+  "client.version",
+  "service.name",
+  "service.version",
+]);
+
+const OTLP_BEHAVIOR_SPAN_NAMES = new Set([
+  "feedback.maybe_request_feedback",
+  "http.create_response_stream",
+  "record_token_usage",
+  "send_turn_delta_with_snapshot",
+  "session",
+  "session.handle_prompt",
+  "session.prepare_chat_completion",
+  "session.process_conversation_turn",
+  "session.process_conversation_turn_with_recovery",
+  "session.spawn",
+  "subagent.handle_request",
+  "tool.decision",
+  "tool.execution",
+  "tool.get_task_output",
+  "tool.read_file",
+  "tool.register",
+  "tool.task",
+]);
+
+const OTLP_STABLE_ATTRIBUTES_BY_SPAN = new Map<string, ReadonlySet<string>>([
+  ["feedback.maybe_request_feedback", new Set()],
+  ["http.create_response_stream", new Set(["model_id"])],
+  ["record_token_usage", new Set(["completion_tokens", "reasoning_tokens"])],
+  ["send_turn_delta_with_snapshot", new Set()],
+  ["session", new Set()],
+  ["session.handle_prompt", new Set()],
+  ["session.prepare_chat_completion", new Set()],
+  ["session.process_conversation_turn", new Set(["agent.name", "effort", "model_id", "query_source", "response.has_tool_call", "stop_reason"])],
+  ["session.spawn", new Set(["client_type", "start_type"])],
+  ["session.process_conversation_turn_with_recovery", new Set()],
+  ["subagent.handle_request", new Set(["subagent_type"])],
+  ["tool.decision", new Set(["decision", "source", "tool_name"])],
+  ["tool.execution", new Set(["outcome", "retry", "success", "tool_input_size_bytes", "tool_name", "tool_result_size_bytes"])],
+  ["tool.read_file", new Set(["path"])],
+  ["tool.register", new Set()],
+  ["tool.get_task_output", new Set()],
+  ["tool.task", new Set(["subagent_type"])],
+]);
+
+type ProtobufField =
+  | { number: number; wire: 0; value: bigint }
+  | { number: number; wire: 1; value: bigint }
+  | { number: number; wire: 2; value: Uint8Array }
+  | { number: number; wire: 5; value: number };
+
+function decodeCanonicalOtlpSpan(field: ProtobufField): CanonicalOtlpSpan {
+  const message = nestedProtobuf(field);
+  const name = decodeProtobufString(requiredProtobufField(message, 5));
+  const attributes: Record<string, unknown> = {};
+  for (const attribute of protobufFields(message, 9)) {
+    const [key, value] = decodeOtlpAttribute(attribute);
+    if (isStableOtlpAttribute(name, key)) attributes[key] = value;
+  }
+  const statusField = optionalProtobufField(message, 15);
+  const status = statusField
+    ? Number(protobufVarint(optionalProtobufField(nestedProtobuf(statusField), 3)) ?? 0n)
+    : 0;
+  return {
+    name,
+    kind: Number(protobufVarint(optionalProtobufField(message, 6)) ?? 0n),
+    status,
+    attributes: sortJson(attributes) as Record<string, unknown>,
+  };
+}
+
+function isStableOtlpAttribute(spanName: string, key: string): boolean {
+  return OTLP_STABLE_ATTRIBUTES_BY_SPAN.get(spanName)?.has(key) ?? false;
+}
+
+function decodeOtlpAttribute(field: ProtobufField): [string, unknown] {
+  const attribute = nestedProtobuf(field);
+  return [
+    decodeProtobufString(requiredProtobufField(attribute, 1)),
+    decodeOtlpAnyValue(requiredProtobufField(attribute, 2)),
+  ];
+}
+
+function decodeOtlpAnyValue(field: ProtobufField): unknown {
+  const value = nestedProtobuf(field);
+  const stringValue = optionalProtobufField(value, 1);
+  if (stringValue) return decodeProtobufString(stringValue);
+  const boolValue = protobufVarint(optionalProtobufField(value, 2));
+  if (boolValue !== undefined) return boolValue !== 0n;
+  const integerValue = protobufVarint(optionalProtobufField(value, 3));
+  if (integerValue !== undefined) {
+    const signed = BigInt.asIntN(64, integerValue);
+    return signed >= BigInt(Number.MIN_SAFE_INTEGER) && signed <= BigInt(Number.MAX_SAFE_INTEGER)
+      ? Number(signed)
+      : signed.toString();
+  }
+  const doubleValue = optionalProtobufField(value, 4);
+  if (doubleValue) {
+    if (doubleValue.wire !== 1) throw new ProtocolViolation("OTLP double value used the wrong protobuf wire type.");
+    const bytes = new Uint8Array(8);
+    let remaining = doubleValue.value;
+    for (let index = 0; index < 8; index += 1) {
+      bytes[index] = Number(remaining & 0xffn);
+      remaining >>= 8n;
+    }
+    return new DataView(bytes.buffer).getFloat64(0, true);
+  }
+  const arrayValue = optionalProtobufField(value, 5);
+  if (arrayValue) return protobufFields(nestedProtobuf(arrayValue), 1).map(decodeOtlpAnyValue);
+  const keyValueList = optionalProtobufField(value, 6);
+  if (keyValueList) return Object.fromEntries(protobufFields(nestedProtobuf(keyValueList), 1).map(decodeOtlpAttribute));
+  const bytesValue = optionalProtobufField(value, 7);
+  if (bytesValue?.wire === 2) return `<bytes:${bytesValue.value.byteLength}>`;
+  return null;
+}
+
+function decodeProtobufMessage(input: Uint8Array): ProtobufField[] {
+  const fields: ProtobufField[] = [];
+  let offset = 0;
+  while (offset < input.byteLength) {
+    const tag = readProtobufVarint(input, offset);
+    offset = tag.offset;
+    const number = Number(tag.value >> 3n);
+    const wire = Number(tag.value & 7n);
+    if (!Number.isSafeInteger(number) || number <= 0) throw new ProtocolViolation("Protobuf field number was invalid.");
+    if (wire === 0) {
+      const value = readProtobufVarint(input, offset);
+      offset = value.offset;
+      fields.push({ number, wire, value: value.value });
+    } else if (wire === 1) {
+      if (offset + 8 > input.byteLength) throw new ProtocolViolation("Truncated protobuf fixed64 field.");
+      let value = 0n;
+      for (let index = 0; index < 8; index += 1) value |= BigInt(input[offset + index] ?? 0) << BigInt(index * 8);
+      offset += 8;
+      fields.push({ number, wire, value });
+    } else if (wire === 2) {
+      const length = readProtobufVarint(input, offset);
+      offset = length.offset;
+      if (length.value > BigInt(Number.MAX_SAFE_INTEGER)) throw new ProtocolViolation("Protobuf field was too large.");
+      const end = offset + Number(length.value);
+      if (end > input.byteLength) throw new ProtocolViolation("Truncated protobuf length-delimited field.");
+      fields.push({ number, wire, value: input.slice(offset, end) });
+      offset = end;
+    } else if (wire === 5) {
+      if (offset + 4 > input.byteLength) throw new ProtocolViolation("Truncated protobuf fixed32 field.");
+      const value = new DataView(input.buffer, input.byteOffset + offset, 4).getUint32(0, true);
+      offset += 4;
+      fields.push({ number, wire, value });
+    } else {
+      throw new ProtocolViolation(`Unsupported protobuf wire type ${wire}.`);
+    }
+  }
+  return fields;
+}
+
+function readProtobufVarint(input: Uint8Array, start: number): { value: bigint; offset: number } {
+  let value = 0n;
+  let shift = 0n;
+  let offset = start;
+  while (offset < input.byteLength && shift < 70n) {
+    const byte = input[offset] ?? 0;
+    offset += 1;
+    value |= BigInt(byte & 0x7f) << shift;
+    if ((byte & 0x80) === 0) return { value, offset };
+    shift += 7n;
+  }
+  throw new ProtocolViolation("Truncated or oversized protobuf varint.");
+}
+
+function protobufFields(message: ProtobufField[], number: number): ProtobufField[] {
+  return message.filter((field) => field.number === number);
+}
+
+function optionalProtobufField(message: ProtobufField[], number: number): ProtobufField | undefined {
+  return message.find((field) => field.number === number);
+}
+
+function requiredProtobufField(message: ProtobufField[], number: number): ProtobufField {
+  const field = optionalProtobufField(message, number);
+  if (!field) throw new ProtocolViolation(`Required protobuf field ${number} was missing.`);
+  return field;
+}
+
+function nestedProtobuf(field: ProtobufField): ProtobufField[] {
+  if (field.wire !== 2) throw new ProtocolViolation("Nested protobuf field used the wrong wire type.");
+  return decodeProtobufMessage(field.value);
+}
+
+function decodeProtobufString(field: ProtobufField): string {
+  if (field.wire !== 2) throw new ProtocolViolation("Protobuf string used the wrong wire type.");
+  return new TextDecoder("utf-8", { fatal: true }).decode(field.value);
+}
+
+function protobufVarint(field: ProtobufField | undefined): bigint | undefined {
+  if (!field) return undefined;
+  if (field.wire !== 0) throw new ProtocolViolation("Protobuf integer used the wrong wire type.");
+  return field.value;
 }

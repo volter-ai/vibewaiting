@@ -10,6 +10,7 @@ import {
   MAX_CONFORMANCE_BODY_BYTES,
   ProtocolViolation,
   ProtocolSymbolMatcher,
+  canonicalOtlpTraceExport,
   canonicalRequest,
   filterForwardHeaders,
   normalizeTelemetryMeasurements,
@@ -41,6 +42,10 @@ const symbolMatcher = new ProtocolSymbolMatcher();
 let sequence = 0;
 const expectedByKey = new Map();
 const expectedControlPlaneOrder = [];
+const expectedTraceResources = new Map();
+const expectedTraceSpans = [];
+const observedTraceResources = new Map();
+const observedTraceSpans = [];
 let driverProfile;
 
 if (mode === "record") {
@@ -57,11 +62,23 @@ if (mode === "record") {
   writeFileSync(corpusPath, `${JSON.stringify(manifest)}\n`, { encoding: "utf8", mode: 0o600 });
 } else {
   loadCorpus(corpusPath, expectedByKey);
+  for (const exchange of expectedByKey.get("POST /v1/traces") ?? []) {
+    collectTraceSemantics(exchange.request.body, expectedTraceResources, expectedTraceSpans);
+  }
   expectedControlPlaneOrder.push(...[...expectedByKey.values()]
     .flat()
     .filter((exchange) => exchange.key !== "POST /v1/traces")
     .sort((left, right) => left.sequence - right.sequence));
   driverProfile = buildDriverProfile(corpusPath);
+  const nativeTraceResource = expectedByKey.get("POST /v1/traces")?.[0]?.request?.body?.resource;
+  if (nativeTraceResource && typeof nativeTraceResource === "object") {
+    driverProfile.telemetryMetadata = {
+      clientName: nativeTraceResource["client.name"],
+      clientVersion: nativeTraceResource["client.version"],
+      serviceVersion: nativeTraceResource["service.version"],
+      appEntrypoint: nativeTraceResource["app.entrypoint"],
+    };
+  }
 }
 
 const server = createServer(async (request, response) => {
@@ -102,7 +119,8 @@ const server = createServer(async (request, response) => {
     }
     if (localUrl.pathname === "/__conformance__/assert-complete") {
       if (mode === "record") throw new ProtocolViolation("Completion assertions are available only in replay modes.");
-      assertQueuesComplete(response, () => true, "complete native corpus");
+      assertTraceSemanticsComplete();
+      assertQueuesComplete(response, (exchange) => exchange.key !== "POST /v1/traces", "complete native corpus");
       return;
     }
     const { lane, upstreamPath } = splitLanePath(localUrl.pathname);
@@ -113,10 +131,20 @@ const server = createServer(async (request, response) => {
     const canonical = canonicalRequest(request.method ?? "GET", localUrl, upstreamPath, request.headers, body, state);
 
     if (mode !== "record") {
+      if (requestKey(canonical) === "POST /v1/traces") {
+        collectTraceSemantics(canonical.body, observedTraceResources, observedTraceSpans);
+        if (mode === "replay") {
+          const recorded = expectedByKey.get("POST /v1/traces")?.[0]?.response;
+          if (!recorded) throw new ProtocolViolation("Native corpus contains no OTLP trace response.");
+          await sendRecorded(response, recorded, requestStartedAt);
+          log("trace_semantics_observed", { spans: canonical.body?.spans?.length ?? 0 });
+          return;
+        }
+        await forwardAndCapture(request, response, localUrl, upstreamPath, body, canonical, undefined, requestStartedAt);
+        return;
+      }
       const queue = expectedByKey.get(requestKey(canonical));
-      const expected = requestKey(canonical) === "POST /v1/traces"
-        ? queue?.[0]
-        : expectedControlPlaneOrder[0];
+      const expected = expectedControlPlaneOrder[0];
       if (!expected) throw new ProtocolViolation(`No native exchange remains for ${requestKey(canonical)}.`);
       if (expected.key !== requestKey(canonical)) {
         throw new ProtocolViolation(
@@ -266,6 +294,7 @@ function loadCorpus(path, output) {
     }
     const requestBody = Buffer.from(exchange.requestBodyBase64, "base64");
     if (sha256(requestBody) !== exchange.requestBodySha256) usage(`Corpus request body integrity check failed at sequence ${exchange.sequence}.`);
+    if (exchange.key === "POST /v1/traces") exchange.request.body = canonicalOtlpTraceExport(requestBody);
     const responseBody = Buffer.from(exchange.response.bodyBase64, "base64");
     if (sha256(responseBody) !== exchange.response.bodySha256) usage(`Corpus response integrity check failed at sequence ${exchange.sequence}.`);
     validateRecordedTiming(exchange);
@@ -273,6 +302,45 @@ function loadCorpus(path, output) {
     queue.push(exchange);
     output.set(exchange.key, queue);
   }
+}
+
+function collectTraceSemantics(trace, resources, spans) {
+  if (!trace || typeof trace !== "object" || !Array.isArray(trace.spans) || !trace.resource || typeof trace.resource !== "object") {
+    throw new ProtocolViolation("Canonical OTLP trace semantics were malformed.");
+  }
+  const resourceKey = stableJson(trace.resource);
+  resources.set(resourceKey, (resources.get(resourceKey) ?? 0) + 1);
+  spans.push(...trace.spans);
+}
+
+function assertTraceSemanticsComplete() {
+  const expectedResources = [...expectedTraceResources.keys()].sort();
+  const observedResources = [...observedTraceResources.keys()].sort();
+  const expectedSpans = [...expectedTraceSpans].sort((left, right) => stableJson(left).localeCompare(stableJson(right)));
+  const observedSpans = [...observedTraceSpans].sort((left, right) => stableJson(left).localeCompare(stableJson(right)));
+  const differences = [];
+  if (stableJson(expectedResources) !== stableJson(observedResources)) {
+    differences.push({ pointer: "/trace/resources", expected: expectedResources, actual: observedResources });
+  }
+  if (stableJson(expectedSpans) !== stableJson(observedSpans)) {
+    differences.push({
+      pointer: "/trace/spans",
+      expected: summarizeSemanticSpans(expectedSpans),
+      actual: summarizeSemanticSpans(observedSpans),
+    });
+  }
+  if (differences.length > 0) throw new ProtocolViolation("Browser Grok OTLP semantics diverged from native Grok Build.", differences);
+}
+
+function summarizeSemanticSpans(spans) {
+  const counts = new Map();
+  for (const span of spans) {
+    const key = stableJson(span);
+    const current = counts.get(key) ?? { count: 0, span };
+    current.count += 1;
+    counts.set(key, current);
+  }
+  return [...counts.values()].sort((left, right) => stableJson(left.span).localeCompare(stableJson(right.span)));
 }
 
 function validateRecordedTiming(exchange) {
@@ -365,6 +433,10 @@ function buildDriverProfile(path) {
     && exchange !== compaction
   ).length;
   const signalExchanges = exchanges.filter((exchange) => exchange.key.includes("/signals"));
+  const postInitialSignalBillingRequests = exchanges.filter((exchange) =>
+    exchange.key === "GET /v1/billing"
+    && exchange.sequence > (signalExchanges[0]?.sequence ?? Number.MAX_SAFE_INTEGER)
+  ).length;
   const nativeLongPausesCount = signalExchanges.reduce((maximum, exchange) =>
     Math.max(maximum, Number.isSafeInteger(exchange.request?.body?.longPausesCount) ? exchange.request.body.longPausesCount : 0), 0);
   const periodicSignalAssistantCounts = signalExchanges.slice(1).flatMap((exchange) =>
@@ -373,10 +445,15 @@ function buildDriverProfile(path) {
       : []
   );
   const finalSignal = signalExchanges.at(-1)?.request?.body;
+  const clientMode = initial?.headers?.["x-grok-client-mode"]
+    ?? foreground[0]?.request?.headers?.["x-grok-client-mode"]
+    ?? "headless";
+  const clientType = signalExchanges[0]?.request?.body?.clientType ?? "agent";
   const nativeWorkspacePath = extractWorkspacePath(initial.input);
   const initialFiles = extractInitialWorkspaceFiles(allForeground, nativeWorkspacePath);
   const asynchronousReminders = extractAsynchronousReminders(foreground);
   const subagentLanes = buildSubagentLanes(allForeground, exchanges, rootSessionId, nativeWorkspacePath);
+  const telemetryMetadata = nativeTelemetryMetadata(manifest?.nativeVersion, clientMode, clientType);
   return {
     formatVersion: CONFORMANCE_FORMAT_VERSION,
     task: extractUserQuery(title?.request?.body?.input) ?? "",
@@ -385,6 +462,9 @@ function buildDriverProfile(path) {
     toolResults,
     foregroundRequests: foreground.length,
     modelRequests: exchanges.filter((exchange) => exchange.key === "POST /v1/responses").length,
+    clientMode,
+    clientType,
+    telemetryMetadata,
     bundleArchiveRequests: exchanges.filter((exchange) => exchange.key === "GET /v1/bundle/archive").length,
     ...(periodicSignalAssistantCounts.length > 0 ? { periodicSignalAssistantCounts } : {}),
     ...(nativeLongPausesCount > 0 ? { nativeLongPausesCount } : {}),
@@ -392,6 +472,7 @@ function buildDriverProfile(path) {
       ? { finalSignalCounts: { totalTurns: finalSignal.totalTurns, userMessageCount: finalSignal.userMessageCount } }
       : {}),
     turnSummaryRequests,
+    ...(postInitialSignalBillingRequests > 0 ? { postInitialSignalBillingRequests } : {}),
     reasoningEffort: initial.reasoning?.effort,
     nativeWorkspacePath,
     ...(initialFiles.length > 0 ? { initialFiles } : {}),
@@ -401,6 +482,20 @@ function buildDriverProfile(path) {
     autoCompactThresholdPercent: manifest?.autoCompactThresholdPercent,
     ...(compactionTranscriptHint ? { compactionTranscriptHint } : {}),
     ...(compactionSystemReminder ? { compactionSystemReminder } : {}),
+  };
+}
+
+function nativeTelemetryMetadata(nativeVersion, clientMode, clientType) {
+  const parsed = typeof nativeVersion === "string"
+    ? /^grok\s+([^\s]+)\s+\(([^)]+)\)/u.exec(nativeVersion)
+    : undefined;
+  const clientVersion = parsed?.[1] ?? "1.0.5";
+  const revision = parsed?.[2] ?? "unknown";
+  return {
+    clientName: clientMode === "interactive" ? "grok-pager" : "grok-shell",
+    clientVersion,
+    serviceVersion: `${clientVersion} (${revision})`,
+    appEntrypoint: clientType === "tui" ? "tui" : "agent",
   };
 }
 
@@ -425,9 +520,10 @@ function buildSubagentLanes(allForeground, exchanges, rootSessionId, nativeWorks
       const initialExchange = foreground[0];
       const initial = initialExchange.request.body;
       const task = extractPlainUserQuery(initial.input) ?? "";
-      const title = [...titleRequests].reverse().find((exchange) =>
-        exchange.sequence < initialExchange.sequence
-        && !consumedTitles.has(exchange)
+      const title = [...titleRequests].sort((left, right) =>
+        Math.abs(left.sequence - initialExchange.sequence) - Math.abs(right.sequence - initialExchange.sequence)
+      ).find((exchange) =>
+        !consumedTitles.has(exchange)
         && extractUserQuery(exchange.request?.body?.input) === task
       );
       if (title) consumedTitles.add(title);
@@ -440,6 +536,9 @@ function buildSubagentLanes(allForeground, exchanges, rootSessionId, nativeWorks
         reasoningEffort: initial.reasoning?.effort,
         nativeWorkspacePath,
         enableSessionTitle: Boolean(title),
+        ...(title ? { sessionTitleTiming: title.sequence < initialExchange.sequence
+          ? "before-first-sample"
+          : "after-first-sample-start" } : {}),
       };
     });
 }
@@ -477,7 +576,7 @@ function extractAsynchronousReminders(foreground) {
 
 function isAsynchronousReminder(content) {
   return content.startsWith("<system-reminder>\n")
-    && /(?:Background task "|Monitor "|monitor events? from|background workflow run stopped)/iu.test(content);
+    && /(?:While you were idle, \d+ background subagents? completed|Background subagent "|Background task "|Monitor "|monitor events? from|background workflow run stopped)/iu.test(content);
 }
 
 function extractInitialWorkspaceFiles(foreground, nativeWorkspacePath) {

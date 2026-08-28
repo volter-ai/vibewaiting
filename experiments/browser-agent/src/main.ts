@@ -131,6 +131,7 @@ let authReady = false;
 const conformanceOrigin = new URLSearchParams(location.search).get("conformance");
 const startupCoordinator = new GrokBuildStartupCoordinator({
   tools: GROK_BUILD_TOOLS,
+  clientMode: activeGrokClientMode,
   ...(conformanceOrigin ? {
     storage: { getItem: () => null, setItem: () => undefined, removeItem: () => undefined },
   } : {}),
@@ -143,6 +144,7 @@ let agentSession: GrokBuildSession | undefined;
 let telemetryLifecycle: GrokBuildTelemetryLifecycle | undefined;
 let liveStartupProfile: GrokBuildStartupProfile | undefined;
 let bundleSync: Promise<void> | undefined;
+let interactiveBootstrapPrepared = false;
 const mediaClient = new GrokBuildMediaClient(container.vfs, (input, init) => fetch(input, init), () => agentSession?.snapshot().sessionId);
 let conformanceRuntime: GrokConformanceToolRuntime | undefined;
 let recordedRuntime: GrokRecordedToolRuntime | undefined;
@@ -157,6 +159,10 @@ let autoWakeCoordinator: GrokBuildAutoWakeCoordinator;
 const configuredSandboxOrigin = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env?.VITE_SANDBOX_ORIGIN;
 const sandboxOrigin = resolveSandboxOrigin(location, configuredSandboxOrigin);
 const sandboxNonce = crypto.randomUUID();
+
+function activeGrokClientMode(): import("../../../src/grok-browser-protocol.js").GrokClientMode {
+  return conformanceProfile?.clientMode ?? "interactive";
+}
 const sandboxBridge = new BrowserSandboxBridge({
   preview,
   origin: sandboxOrigin,
@@ -199,7 +205,7 @@ function syncRunAvailability(): void {
 function startBundleSync(): Promise<void> {
   if (bundleSync) return bundleSync;
   if (!conformanceOrigin && !authReady) return Promise.resolve();
-  bundleSync = syncGrokBuildBundle(container.vfs)
+  bundleSync = syncGrokBuildBundle(container.vfs, { clientMode: activeGrokClientMode() })
     .then((result) => {
       if (result.updated) {
         if (rootSkillManager) {
@@ -216,6 +222,29 @@ function startBundleSync(): Promise<void> {
     })
     .finally(() => { bundleSync = undefined; });
   return bundleSync;
+}
+
+async function fetchInteractiveStartupResource(path: "user" | "mcp/tools/list" | "billing"): Promise<unknown> {
+  const suffix = path === "billing" ? "billing?format=credits" : path;
+  const response = await fetch(`/api/grok/${suffix}`, {
+    credentials: "include",
+    cache: "no-store",
+    headers: { "x-browser-agent-client-mode": "interactive" },
+  });
+  if (!response.ok) throw new Error(`Grok interactive startup ${path} returned HTTP ${response.status}.`);
+  return response.json().catch(() => undefined);
+}
+
+async function prepareInteractiveStartup(profile: GrokConformanceDriverProfile | undefined): Promise<void> {
+  if (interactiveBootstrapPrepared) return;
+  await fetchInteractiveStartupResource("user");
+  liveStartupProfile = await startupCoordinator.snapshot();
+  if (!profile || profile.bundleArchiveRequests) await startBundleSync();
+  liveStartupProfile = await startupCoordinator.refreshForNewSession();
+  await fetchInteractiveStartupResource("mcp/tools/list");
+  liveStartupProfile = await startupCoordinator.refreshForNewSession();
+  await fetchInteractiveStartupResource("billing");
+  interactiveBootstrapPrepared = true;
 }
 
 function currentCompactionReminder(runtime: GrokBuildBrowserRuntime): string | undefined {
@@ -260,6 +289,7 @@ const authController = new BrowserGrokAuthController({
     syncRunAvailability();
   },
   onAuthenticated() {
+    if (conformanceOrigin) return;
     if (runtimeReady) startBundleSync();
     void startupCoordinator.refreshAfterAuth().then((profile) => { liveStartupProfile = profile; }).catch(() => undefined);
   },
@@ -383,6 +413,7 @@ function eventHandler(event: GrokBuildEvent): void {
 
 const browserServices: GrokBuildBrowserServices = {
   spawnSubagent: runBrowserSubagent,
+  onSubagentScheduled: (subagentId) => subagentRunner.reserveStart(subagentId),
   searchTools: mcpRuntime.services.searchTools,
   useTool: mcpRuntime.services.useTool,
   askUser: (questions, signal, context) => askGrokUserQuestions(questions, signal, context),
@@ -411,8 +442,8 @@ const browserServices: GrokBuildBrowserServices = {
 autoWakeCoordinator = new GrokBuildAutoWakeCoordinator({
   waitForIdle: () => waitForAgentIdle(new AbortController().signal),
   claimReminder: (promptId) => {
-    const runtimeReminder = rootBrowserRuntime?.takeSystemReminder(promptId);
-    if (runtimeReminder) return { messages: [runtimeReminder] };
+    const runtimeReminders = rootBrowserRuntime?.takeSystemReminders(promptId) ?? [];
+    if (runtimeReminders.length > 0) return { messages: runtimeReminders };
     const payload = externalSyntheticWakes.get(promptId);
     externalSyntheticWakes.delete(promptId);
     return payload;
@@ -425,9 +456,11 @@ subagentRunner = new GrokBuildBrowserSubagentRunner({
   services: browserServices,
   endpoint: () => relayEndpoint.value.trim() || "/api/grok/responses",
   startupModel: () => liveStartupProfile?.model,
+  clientMode: activeGrokClientMode,
   rootRuntime: () => rootBrowserRuntime,
   rootSkillManager: () => rootSkillManager,
   parentSnapshot: () => agentSession?.snapshot(),
+  traceMetadata: () => conformanceProfile?.telemetryMetadata,
   takeConformanceLane: () => conformanceProfile?.subagentLanes?.[conformanceSubagentLaneIndex++],
 });
 
@@ -546,19 +579,36 @@ async function runAgent(mode: "send-now" | "queue" = "send-now"): Promise<void> 
     let planResumePending = false;
     const profile = conformanceProfile ?? (conformanceOrigin ? await loadConformanceProfile(conformanceOrigin) : undefined);
     if (profile) taskInput.value = profile.task;
-    if (!liveStartupProfile) {
+    if (activeGrokClientMode() === "interactive") {
+      agentState.textContent = "Loading native Grok settings";
+      await prepareInteractiveStartup(profile);
+    } else if (!liveStartupProfile) {
       agentState.textContent = "Loading native Grok settings";
       liveStartupProfile = await startupCoordinator.snapshot();
     }
-    if (profile?.bundleArchiveRequests) await startBundleSync();
+    if (activeGrokClientMode() === "headless" && profile?.bundleArchiveRequests) await startBundleSync();
     if (!agentSession) {
       const persistenceGeneration = agentSessionPersistenceGeneration;
       const sessionId = restoredAgentSession?.sessionId ?? crypto.randomUUID();
+      let postInitialSignalBillingRequests = profile?.postInitialSignalBillingRequests ?? 0;
       telemetryLifecycle = new GrokBuildTelemetryLifecycle(sessionId, {
         model: liveStartupProfile?.model ?? "grok-4.6",
-        ...(profile ? { beforeTurnDelta: () => subagentRunner.waitForPendingStarts() } : {}),
+        clientMode: activeGrokClientMode(),
+        clientType: profile?.clientType ?? "tui",
+        ...(activeGrokClientMode() === "interactive"
+          ? { beforeInitialSignals: () => fetchInteractiveStartupResource("billing").then(() => undefined) }
+          : {}),
+        ...(profile ? { beforeTurnDelta: async () => {
+          await rootBrowserRuntime?.waitForPendingSubagentLaunches();
+          await subagentRunner.waitForPendingStarts();
+        } } : {}),
         ...(profile?.periodicSignalAssistantCounts ? { signalAssistantCheckpoints: profile.periodicSignalAssistantCounts } : {}),
-        ...(!profile ? { trace: { responsesEndpoint: relayEndpoint.value.trim() || "/api/grok/responses", tracer: rootOtlpTracer } } : {}),
+        trace: {
+          responsesEndpoint: relayEndpoint.value.trim() || "/api/grok/responses",
+          tracer: rootOtlpTracer,
+          ...(profile?.reasoningEffort ? { reasoningEffort: profile.reasoningEffort } : {}),
+          ...profile?.telemetryMetadata,
+        },
       });
       telemetryLifecycle.start();
       const skillManager = new GrokBuildSkillManager(container.vfs, "/");
@@ -633,8 +683,17 @@ async function runAgent(mode: "send-now" | "queue" = "send-now"): Promise<void> 
           projectAutosave?.schedule();
         },
         ...(profile?.reasoningEffort ? { reasoningEffort: profile.reasoningEffort } : {}),
+        clientMode: activeGrokClientMode(),
+        clientIdentifier: activeGrokClientMode() === "interactive" ? "grok-pager" : "grok-shell",
         enableTurnSummary: profile ? (profile.turnSummaryRequests ?? 0) > 0 : true,
         beforeTurnSummary: () => telemetryLifecycle?.flush(),
+        ...(profile && postInitialSignalBillingRequests > 0 ? {
+          afterTurnSummaryRequestStart: () => {
+            if (postInitialSignalBillingRequests <= 0) return;
+            postInitialSignalBillingRequests -= 1;
+            void fetchInteractiveStartupResource("billing");
+          },
+        } : {}),
         strictSideCalls: Boolean(profile),
         onEvent: eventHandler,
         ...(!profile && restoredAgentSession ? { restore: restoredAgentSession } : {}),
@@ -666,11 +725,12 @@ async function runAgent(mode: "send-now" | "queue" = "send-now"): Promise<void> 
     } else {
       result = await agentSession.run(nextPrompt, activeRun.signal);
     }
+    if (profile?.subagentLanes?.length) await rootBrowserRuntime?.waitForRunningSubagents();
     while (true) {
       while (profile && conformanceRuntime?.hasPendingAutoWake()) {
         await telemetryLifecycle?.flush();
         telemetryLifecycle?.ensureLongPauses(profile.nativeLongPausesCount ?? 0);
-        result = await agentSession.resume(activeRun.signal, { terminalSampleOnly: true });
+        result = await agentSession.resume(activeRun.signal);
       }
       if (profile || !livePrompts.hasQueued()) break;
       nextPrompt = livePrompts.takeQueuedPrefix() ?? "";
@@ -687,7 +747,7 @@ async function runAgent(mode: "send-now" | "queue" = "send-now"): Promise<void> 
       await telemetryLifecycle?.syncPendingSignalCheckpoints().catch(() => undefined);
       await telemetryLifecycle?.shutdown({ finalSync: false });
       (conformanceRuntime ?? recordedRuntime)?.assertComplete();
-      const assertion = await fetch(`${conformanceOrigin}/__conformance__/assert-control-plane-complete`);
+      const assertion = await fetch(`${conformanceOrigin}/__conformance__/assert-complete`);
       if (!assertion.ok) throw new Error(await assertion.text());
       agentState.textContent = "Complete";
       const sideCalls = profile.modelRequests - profile.foregroundRequests;
@@ -719,7 +779,9 @@ async function resetProject(): Promise<void> {
   await telemetryLifecycle?.shutdown();
   telemetryLifecycle = undefined;
   agentSession = undefined;
-  void startupCoordinator.refreshForNewSession().then((profile) => { liveStartupProfile = profile; }).catch(() => undefined);
+  if (!conformanceOrigin) {
+    void startupCoordinator.refreshForNewSession().then((profile) => { liveStartupProfile = profile; }).catch(() => undefined);
+  }
   restoredAgentSession = undefined;
   conformanceRuntime = undefined;
   recordedRuntime = undefined;

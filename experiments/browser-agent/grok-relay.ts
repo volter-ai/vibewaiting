@@ -19,6 +19,8 @@ import {
   createGrokResponsesHeaders,
   createGrokSessionTitleHeaders,
   createGrokSideCallHeaders,
+  type GrokClientIdentifier,
+  type GrokClientMode,
   type GrokResponsesRequest,
 } from "../../src/grok-browser-protocol.js";
 
@@ -58,12 +60,20 @@ export interface GrokRelayOptions {
 }
 
 export type GrokRelayRequestKind = "main" | "session-title" | "turn-summary" | "compaction";
-type GrokBootstrapKind = "models" | "settings";
+type GrokBootstrapKind = "user" | "models" | "settings" | "managed-mcp" | "billing";
 type GrokBundleKind = "archive" | "legacy";
 type GrokRelayRequest = GrokResponsesRequest | Omit<GrokResponsesRequest, "prompt_cache_key">;
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function grokClientModeFromRequest(request: IncomingMessage): GrokClientMode {
+  return request.headers["x-browser-agent-client-mode"] === "interactive" ? "interactive" : "headless";
+}
+
+function grokClientIdentifierFromRequest(request: IncomingMessage): GrokClientIdentifier {
+  return request.headers["x-browser-agent-client-identifier"] === "grok-pager" ? "grok-pager" : "grok-shell";
 }
 
 export function credentialFromAuthJson(authJson: unknown): GrokCredential {
@@ -216,9 +226,11 @@ export function grokUpstreamHeaders(
   requestKind: GrokRelayRequestKind = "main",
   model = GROK_BUILD_MODEL,
   compactionAtTokens?: number | null,
+  clientMode: GrokClientMode = "headless",
+  clientIdentifier: GrokClientIdentifier = "grok-shell",
 ): Headers {
   const headers = new Headers(requestKind === "session-title"
-    ? createGrokSessionTitleHeaders({ bearerToken: credential.token, clientVersion, model })
+    ? createGrokSessionTitleHeaders({ bearerToken: credential.token, clientVersion, model, clientMode })
     : requestKind === "turn-summary" || requestKind === "compaction" ? createGrokSideCallHeaders({
         conversationId: metadata.conversationId,
         requestId: metadata.requestId,
@@ -229,6 +241,8 @@ export function grokUpstreamHeaders(
         traceparent: createTraceparent(),
         ...(credential.userId ? { userId: credential.userId } : {}),
         model,
+        clientMode,
+        clientIdentifier,
         ...(compactionAtTokens !== undefined ? { compactionAtTokens } : {}),
       }) : createGrokResponsesHeaders({
         conversationId: metadata.conversationId,
@@ -241,6 +255,8 @@ export function grokUpstreamHeaders(
         traceparent: createTraceparent(),
         ...(credential.userId ? { userId: credential.userId } : {}),
         model,
+        clientMode,
+        clientIdentifier,
         ...(compactionAtTokens !== undefined ? { compactionAtTokens } : {}),
       }));
   headers.set("User-Agent", `grok-shell/${clientVersion}`);
@@ -251,16 +267,17 @@ export function grokBootstrapHeaders(
   credential: GrokCredential,
   kind: GrokBootstrapKind,
   clientVersion = "1.0.5",
+  clientMode: GrokClientMode = "headless",
 ): Headers {
   const headers = new Headers({
     Authorization: `Bearer ${credential.token}`,
     "X-XAI-Token-Auth": "xai-grok-cli",
     "x-grok-client-version": clientVersion,
-    "x-grok-client-mode": "headless",
+    ...(kind === "managed-mcp" ? {} : { "x-grok-client-mode": clientMode }),
     Accept: "*/*",
   });
-  if (credential.userId) headers.set("x-userid", credential.userId);
-  if (credential.email) headers.set("x-email", credential.email);
+  if (credential.userId && kind !== "user" && kind !== "managed-mcp") headers.set("x-userid", credential.userId);
+  if (credential.email && (kind === "models" || kind === "settings")) headers.set("x-email", credential.email);
   if (kind === "settings") headers.set("x-grok-client-identifier", "grok-shell");
   return headers;
 }
@@ -269,11 +286,12 @@ export function grokBundleHeaders(
   credential: GrokCredential,
   kind: GrokBundleKind,
   clientVersion = "1.0.5",
+  clientMode: GrokClientMode = "headless",
 ): Headers {
   const headers = new Headers({
     Authorization: `Bearer ${credential.token}`,
     "x-grok-client-version": clientVersion,
-    "x-grok-client-mode": "headless",
+    "x-grok-client-mode": clientMode,
     Accept: "*/*",
   });
   if (credential.userId) headers.set("x-userid", credential.userId);
@@ -312,10 +330,13 @@ async function proxyBootstrap(
   upstreamBaseUrl: string | undefined,
   kind: GrokBootstrapKind,
   clientVersion: string | undefined,
+  clientMode: GrokClientMode,
 ): Promise<void> {
   const base = (upstreamBaseUrl ?? "https://cli-chat-proxy.grok.com/v1").replace(/\/$/u, "");
-  const upstream = await fetchImpl(`${base}/${kind}`, {
-    headers: grokBootstrapHeaders(credential, kind, clientVersion),
+  const path = kind === "managed-mcp" ? "mcp/tools/list"
+    : kind === "billing" ? "billing?format=credits" : kind;
+  const upstream = await fetchImpl(`${base}/${path}`, {
+    headers: grokBootstrapHeaders(credential, kind, clientVersion, clientMode),
     signal: AbortSignal.timeout(5_000),
   });
   const body = Buffer.from(await upstream.arrayBuffer());
@@ -336,11 +357,12 @@ async function proxyBundle(
   upstreamBaseUrl: string | undefined,
   kind: GrokBundleKind,
   clientVersion: string | undefined,
+  clientMode: GrokClientMode,
 ): Promise<void> {
   const base = (upstreamBaseUrl ?? "https://cli-chat-proxy.grok.com/v1").replace(/\/$/u, "");
   const path = kind === "archive" ? "bundle/archive" : "subagents/bundle";
   const upstream = await fetchImpl(`${base}/${path}`, {
-    headers: grokBundleHeaders(credential, kind, clientVersion),
+    headers: grokBundleHeaders(credential, kind, clientVersion, clientMode),
     signal: AbortSignal.timeout(kind === "archive" ? 30_000 : 10_000),
   });
   const body = await boundedUpstreamBody(upstream, MAX_BUNDLE_RESPONSE_BYTES);
@@ -359,6 +381,7 @@ async function proxyTelemetry(
   upstreamBaseUrl: string | undefined,
   clientVersion: string | undefined,
   route: NonNullable<ReturnType<typeof normalizeGrokTelemetryRoute>>,
+  clientMode: GrokClientMode,
 ): Promise<void> {
   const body = request.method === "POST" ? await readBody(request) : undefined;
   if (body && body.byteLength > MAX_TELEMETRY_BYTES) throw new Error("The Grok telemetry payload exceeded 1 MiB.");
@@ -367,13 +390,14 @@ async function proxyTelemetry(
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("The Grok telemetry payload must be a JSON object.");
   }
   const origin = (upstreamBaseUrl ?? "https://cli-chat-proxy.grok.com").replace(/\/v1\/?$/u, "").replace(/\/$/u, "");
-  const traced = !route.upstreamPath.endsWith("/turn-deltas");
+  const traceExport = route.upstreamPath === "/v1/traces";
+  const traced = !traceExport && !route.upstreamPath.endsWith("/turn-deltas");
   const headers = new Headers({
     Authorization: `Bearer ${credential.token}`,
     Accept: "*/*",
     "X-XAI-Token-Auth": "xai-grok-cli",
     "x-grok-client-version": clientVersion ?? "1.0.5",
-    "x-grok-client-mode": "headless",
+    ...(traceExport ? {} : { "x-grok-client-mode": clientMode }),
     ...(traced ? { traceparent: createTraceparent(), tracestate: "" } : {}),
     ...(route.upstreamPath === "/v1/traces" && credential.userId ? { "x-userid": credential.userId } : {}),
     ...(body ? { "Content-Type": route.contentType } : {}),
@@ -605,7 +629,7 @@ export function createGrokRelay(options: GrokRelayOptions = {}): Plugin {
           }
           return;
         }
-        if (path === "/api/grok/models" || path === "/api/grok/settings") {
+        if (["/api/grok/user", "/api/grok/models", "/api/grok/settings", "/api/grok/mcp/tools/list", "/api/grok/billing"].includes(path ?? "")) {
           if (request.method !== "GET") return json(response, 405, { error: { message: "Method not allowed." } });
           try {
             const credential = await readGrokCredential(authFileFromEnvironment(options.authFile));
@@ -614,8 +638,12 @@ export function createGrokRelay(options: GrokRelayOptions = {}): Plugin {
               credential,
               fetchImpl,
               options.upstreamBaseUrl ?? process.env.GROK_CONFORMANCE_BASE_URL,
-              path.endsWith("/models") ? "models" : "settings",
+              path === "/api/grok/user" ? "user"
+                : path === "/api/grok/models" ? "models"
+                  : path === "/api/grok/settings" ? "settings"
+                    : path === "/api/grok/mcp/tools/list" ? "managed-mcp" : "billing",
               options.clientVersion ?? process.env.GROK_CLIENT_VERSION,
+              grokClientModeFromRequest(request),
             );
           } catch (error) {
             json(response, 502, { error: { message: error instanceof Error ? error.message : String(error) } });
@@ -633,6 +661,7 @@ export function createGrokRelay(options: GrokRelayOptions = {}): Plugin {
               options.upstreamBaseUrl ?? process.env.GROK_CONFORMANCE_BASE_URL,
               path.endsWith("/archive") ? "archive" : "legacy",
               options.clientVersion ?? process.env.GROK_CLIENT_VERSION,
+              grokClientModeFromRequest(request),
             );
           } catch (error) {
             json(response, 502, { error: { message: error instanceof Error ? error.message : String(error) } });
@@ -669,7 +698,7 @@ export function createGrokRelay(options: GrokRelayOptions = {}): Plugin {
         if (telemetryRoute) {
           try {
             const credential = await readGrokCredential(authFileFromEnvironment(options.authFile));
-            await proxyTelemetry(request, response, credential, fetchImpl, options.upstreamBaseUrl ?? process.env.GROK_CONFORMANCE_BASE_URL, options.clientVersion ?? process.env.GROK_CLIENT_VERSION, telemetryRoute);
+            await proxyTelemetry(request, response, credential, fetchImpl, options.upstreamBaseUrl ?? process.env.GROK_CONFORMANCE_BASE_URL, options.clientVersion ?? process.env.GROK_CLIENT_VERSION, telemetryRoute, grokClientModeFromRequest(request));
           } catch (error) {
             json(response, 502, { error: { message: error instanceof Error ? error.message : String(error) } });
           }
@@ -710,6 +739,8 @@ export function createGrokRelay(options: GrokRelayOptions = {}): Plugin {
               wasCompacted(request.headers)
                 ? null
                 : requestKind === "compaction" ? compactionAtFromHeaders(request.headers) : undefined,
+              grokClientModeFromRequest(request),
+              grokClientIdentifierFromRequest(request),
             ),
             body: JSON.stringify(body),
             signal: AbortSignal.timeout(120_000),

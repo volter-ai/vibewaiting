@@ -1,4 +1,5 @@
 import type { GrokBuildEvent } from "./grok-build-agent.js";
+import type { GrokCompletedResponse } from "../../../src/grok-browser-protocol.js";
 import type { GrokBuildMcpTraceSink } from "./grok-build-mcp.js";
 import type { GrokBuildOtlpAttribute, GrokBuildOtlpSpan } from "./grok-build-otlp-redaction.js";
 import type { GrokBuildOtlpExportRequest } from "./grok-build-otlp-protobuf.js";
@@ -170,6 +171,11 @@ export interface GrokBuildAgentTraceProducerOptions extends GrokBuildBrowserTrac
   modelId: string;
   responsesEndpoint: string;
   tracer?: GrokBuildBrowserOtlpTracer;
+  clientType?: "GrokPager" | "Generic";
+  querySource?: "main" | "subagent";
+  agentName?: string;
+  reasoningEffort?: string;
+  subagentType?: string;
 }
 
 /**
@@ -182,8 +188,8 @@ export class GrokBuildAgentTraceProducer {
   private readonly session: GrokBuildOpenSpan;
   private prompt: GrokBuildOpenSpan | undefined;
   private response: GrokBuildOpenSpan | undefined;
-  private firstOutput: GrokBuildOpenSpan | undefined;
   private readonly tools = new Map<string, GrokBuildOpenSpan>();
+  private runHadTool = false;
   private finished = false;
 
   constructor(private readonly options: GrokBuildAgentTraceProducerOptions) {
@@ -192,11 +198,28 @@ export class GrokBuildAgentTraceProducer {
       name: "session",
       attributes: [{ key: "session_id", value: options.sessionId }],
     });
+    this.tracer.instantSpan({
+      name: "session.spawn",
+      parent: this.session,
+      attributes: [
+        { key: "client_type", value: options.clientType ?? "Generic" },
+        { key: "start_type", value: "new" },
+      ],
+    });
+    this.tracer.instantSpan({ name: "session.prepare_chat_completion", parent: this.session });
+    if (options.subagentType) {
+      this.tracer.instantSpan({
+        name: "subagent.handle_request",
+        parent: this.session,
+        attributes: [{ key: "subagent_type", value: options.subagentType }],
+      });
+    }
   }
 
   record(event: GrokBuildEvent): void {
     if (event.type === "run_start") {
       this.closePrompt();
+      this.runHadTool = false;
       this.prompt = this.tracer.startSpan({
         name: "session.handle_prompt",
         parent: this.session,
@@ -207,25 +230,33 @@ export class GrokBuildAgentTraceProducer {
       });
     } else if (event.type === "turn_start") {
       this.closeResponse(false);
-      this.response = this.tracer.startSpan({
-        name: "http.create_response_stream",
+      this.response = this.startResponse();
+    } else if (event.type === "response_end") {
+      // Title, summary, and compaction samples do not emit turn_start, but the
+      // native sampler still creates the same HTTP response-stream span.
+      if (this.response === undefined) this.response = this.startResponse();
+      this.closeResponse(true);
+      if (event.kind === "foreground") this.recordTokenUsage(event.response);
+    } else if (event.type === "tool_start") {
+      this.runHadTool = true;
+      this.tracer.instantSpan({ name: "tool.register", parent: this.prompt ?? this.session });
+      this.tracer.instantSpan({
+        name: "tool.decision",
         parent: this.prompt ?? this.session,
-        kind: 3,
         attributes: [
-          { key: "endpoint", value: this.options.responsesEndpoint },
-          { key: "model_id", value: this.options.modelId },
+          { key: "decision", value: "allow" },
+          { key: "source", value: "config" },
+          { key: "tool_name", value: event.call.name },
         ],
       });
-      this.firstOutput = this.tracer.startSpan({
-        name: "sampling.await_first_output",
-        parent: this.response,
-      });
-    } else if (event.type === "assistant") {
-      this.closeFirstOutput();
-    } else if (event.type === "response_end") {
-      this.closeFirstOutput();
-      this.closeResponse(true);
-    } else if (event.type === "tool_start") {
+      if (event.call.name !== "spawn_subagent") {
+        this.tracer.instantSpan({
+          name: "tools.execute",
+          parent: this.prompt ?? this.session,
+          attributes: [{ key: "model_id", value: this.options.modelId }],
+        });
+      }
+      this.recordToolInnerSpan(event.call.name, event.call.arguments);
       this.tools.set(event.call.callId, this.tracer.startSpan({
         name: "tool.execution",
         parent: this.prompt ?? this.session,
@@ -250,6 +281,7 @@ export class GrokBuildAgentTraceProducer {
         this.tools.delete(event.call.callId);
       }
     } else if (event.type === "complete" || event.type === "limit") {
+      this.recordRunCompletion();
       this.closePrompt();
     }
   }
@@ -273,17 +305,24 @@ export class GrokBuildAgentTraceProducer {
     return this.tracer.drain();
   }
 
-  private closeFirstOutput(): void {
-    if (this.firstOutput === undefined) return;
-    this.tracer.endSpan(this.firstOutput);
-    this.firstOutput = undefined;
+  private startResponse(): GrokBuildOpenSpan {
+    return this.tracer.startSpan({
+      name: "http.create_response_stream",
+      parent: this.prompt ?? this.session,
+      attributes: [
+        { key: "endpoint", value: this.options.responsesEndpoint },
+        { key: "model_id", value: this.options.modelId },
+      ],
+    });
   }
 
   private closeResponse(success: boolean): void {
-    this.closeFirstOutput();
     if (this.response === undefined) return;
     this.tracer.endSpan(this.response, {
-      attributes: [{ key: "success", value: success }],
+      attributes: [
+        { key: "success", value: success },
+        ...(success ? [{ key: "status_code", value: 200 }] : []),
+      ],
       ...(success ? {} : { status: { code: 2 as const, message: "response stream did not complete" } }),
     });
     this.response = undefined;
@@ -300,6 +339,82 @@ export class GrokBuildAgentTraceProducer {
     this.tools.clear();
     if (this.prompt !== undefined) this.tracer.endSpan(this.prompt);
     this.prompt = undefined;
+  }
+
+  private recordRunCompletion(): void {
+    const parent = this.prompt ?? this.session;
+    this.tracer.instantSpan({
+      name: "session.process_conversation_turn",
+      parent,
+      attributes: [
+        { key: "agent.name", value: this.options.agentName ?? "grok-build-plan" },
+        { key: "effort", value: this.options.reasoningEffort ?? "high" },
+        { key: "model_id", value: this.options.modelId },
+        { key: "query_source", value: this.options.querySource ?? "main" },
+        { key: "response.has_tool_call", value: this.runHadTool },
+        { key: "stop_reason", value: "stop" },
+      ],
+    });
+    for (const name of [
+      "session.process_conversation_turn_with_recovery",
+      "send_xai_notification_with_extra_meta",
+      "feedback.maybe_request_feedback",
+      "send_turn_delta_with_snapshot",
+    ]) this.tracer.instantSpan({ name, parent });
+  }
+
+  private recordTokenUsage(response: GrokCompletedResponse): void {
+    const usage = response.usage;
+    if (!usage || typeof usage !== "object" || Array.isArray(usage)) return;
+    const record = usage as Record<string, unknown>;
+    const details = record.output_tokens_details;
+    const reasoning = details && typeof details === "object" && !Array.isArray(details)
+      ? numericAttribute((details as Record<string, unknown>).reasoning_tokens)
+      : undefined;
+    const completion = numericAttribute(record.output_tokens);
+    this.tracer.instantSpan({
+      name: "record_token_usage",
+      parent: this.prompt ?? this.session,
+      attributes: [
+        ...(completion === undefined ? [] : [{ key: "completion_tokens", value: completion }]),
+        ...(reasoning === undefined ? [] : [{ key: "reasoning_tokens", value: reasoning }]),
+      ],
+    });
+  }
+
+  private recordToolInnerSpan(name: string, argumentsJson: string): void {
+    const parent = this.prompt ?? this.session;
+    if (name === "spawn_subagent") {
+      const parsed = parseArguments(argumentsJson);
+      this.tracer.instantSpan({
+        name: "tool.task",
+        parent,
+        attributes: typeof parsed.subagent_type === "string" ? [{ key: "subagent_type", value: parsed.subagent_type }] : [],
+      });
+    } else if (name === "get_command_or_subagent_output") {
+      this.tracer.instantSpan({ name: "tool.get_task_output", parent });
+    } else if (name === "read_file") {
+      const parsed = parseArguments(argumentsJson);
+      this.tracer.instantSpan({ name: "fs.read_file", parent });
+      this.tracer.instantSpan({
+        name: "tool.read_file",
+        parent,
+        attributes: typeof parsed.target_file === "string" ? [{ key: "path", value: parsed.target_file }] : [],
+      });
+    }
+  }
+}
+
+function numericAttribute(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) ? value : undefined;
+}
+
+function parseArguments(value: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+  } catch {
+    return {};
   }
 }
 

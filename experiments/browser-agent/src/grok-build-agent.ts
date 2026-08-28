@@ -6,6 +6,8 @@ import {
   createGrokSessionTitleRequest,
   functionCallOutput,
   responseToConversationInput,
+  type GrokClientIdentifier,
+  type GrokClientMode,
   type GrokCompletedResponse,
   type GrokInferenceLatencyStats,
   type GrokInputItem,
@@ -93,6 +95,8 @@ export interface GrokBuildSessionOptions {
   strictSideCalls?: boolean;
   onEvent?: (event: GrokBuildEvent) => void;
   onRequestStart?: (kind: string) => void;
+  /** Called once a successful response has reached the browser, before its stream is consumed. */
+  onResponseStart?: (kind: string) => void;
   restore?: GrokBuildSessionSnapshot;
   onCheckpoint?: (snapshot: GrokBuildSessionSnapshot) => void;
   /** Test seam for native retry timing. Production uses real abort-aware timers. */
@@ -100,8 +104,11 @@ export interface GrokBuildSessionOptions {
   retryJitter?: (baseMs: number) => number;
   sessionId?: string;
   enableSessionTitle?: boolean;
+  sessionTitleTiming?: "before-first-sample" | "after-first-sample-start";
   tools?: readonly GrokTool[];
   model?: string;
+  clientMode?: GrokClientMode;
+  clientIdentifier?: GrokClientIdentifier;
   contextWindow?: number;
   autoCompactThresholdPercent?: number;
   maxCompactions?: number;
@@ -113,6 +120,7 @@ export interface GrokBuildSessionOptions {
   drainSystemReminders?: (phase: "before_sample" | "after_terminal_sample") => readonly string[];
   /** Await completion bookkeeping that native orders before the post-turn side call. */
   beforeTurnSummary?: () => void | Promise<void>;
+  afterTurnSummaryRequestStart?: () => void;
   persistCompactionSegment?: (segment: {
     index: number;
     location: string;
@@ -234,10 +242,15 @@ export class GrokBuildSession {
     this.options.onEvent?.({ type: "run_start", task });
     this.requestId = requestId ?? crypto.randomUUID();
     this.promptIndex += 1;
-    if (!resume && !this.titleCreated && this.options.enableSessionTitle !== false) {
+    const createDeferredTitle = !resume
+      && !this.titleCreated
+      && this.options.enableSessionTitle !== false
+      && this.options.sessionTitleTiming === "after-first-sample-start";
+    if (!resume && !this.titleCreated && this.options.enableSessionTitle !== false && !createDeferredTitle) {
       await this.createSessionTitle(task, signal);
       this.titleCreated = true;
     }
+    if (createDeferredTitle) this.titleCreated = true;
     if (!resume && this.input.length === 0) {
       this.input.push(...createInitialConversation(task, this.options.environment));
     } else if (!resume) {
@@ -253,7 +266,9 @@ export class GrokBuildSession {
       for (const reminder of this.options.drainSystemReminders?.("before_sample") ?? []) {
         this.input.push({ type: "message", role: "user", content: reminder });
       }
-      const response = await this.sample(signal);
+      const response = await this.sample(signal, createDeferredTitle && turn === 1
+        ? () => { void this.createSessionTitle(task, signal).catch(() => undefined); }
+        : undefined);
       const replay = responseToConversationInput(response.response);
       this.input.push(...replay);
       this.recordTokenUsage(response.response);
@@ -277,7 +292,7 @@ export class GrokBuildSession {
           continue;
         }
         this.options.onEvent?.({ type: "complete", turn, text: response.text });
-        if (!resume && this.options.enableTurnSummary) {
+        if (this.options.enableTurnSummary) {
           try {
             await this.options.beforeTurnSummary?.();
             await this.createTurnSummary(signal);
@@ -338,13 +353,14 @@ export class GrokBuildSession {
       credentials: "include",
       headers: {
         "Content-Type": "application/json",
+        "x-browser-agent-client-mode": this.options.clientMode ?? "headless",
         "x-browser-agent-request-kind": "session-title",
       },
       body: JSON.stringify(createGrokSessionTitleRequest(task, this.options.model)),
     }, "session-title", signal);
   }
 
-  private async sample(signal: AbortSignal) {
+  private async sample(signal: AbortSignal, afterResponseStart?: () => void) {
     const request = createGrokResponsesRequest({
       input: this.input,
       tools: this.options.tools ?? GROK_BUILD_TOOLS,
@@ -352,11 +368,13 @@ export class GrokBuildSession {
       ...(this.options.model ? { model: this.options.model } : {}),
       reasoningEffort: this.options.reasoningEffort ?? "high",
     });
-    return this.requestStream({
+    const pending = this.requestStream({
       method: "POST",
       credentials: "include",
       headers: {
         "Content-Type": "application/json",
+        "x-browser-agent-client-mode": this.options.clientMode ?? "headless",
+        "x-browser-agent-client-identifier": this.options.clientIdentifier ?? "grok-shell",
         "x-browser-agent-conversation": this.sessionId,
         "x-browser-agent-request": this.requestId,
         "x-browser-agent-session": this.sessionId,
@@ -364,11 +382,15 @@ export class GrokBuildSession {
         ...(this.compactionCount > 0 ? { "x-browser-agent-compacted": String(this.compactionCount) } : {}),
       },
       body: JSON.stringify(request),
-    }, "foreground", signal);
+    }, "foreground", signal, afterResponseStart);
+    return pending;
   }
 
   private async createTurnSummary(signal: AbortSignal): Promise<void> {
-    const user = this.input.findLast((item) => item.role === "user" && typeof item.content === "string");
+    const user = this.input.find((item) => item.role === "user"
+      && typeof item.content === "string"
+      && item.content.includes("<user_query>"))
+      ?? this.input.findLast((item) => item.role === "user" && typeof item.content === "string");
     const content = typeof user?.content === "string" ? user.content : "";
     if (!content.trim()) return;
     const request = createGrokResponsesRequest({
@@ -382,11 +404,13 @@ export class GrokBuildSession {
       ...(this.options.model ? { model: this.options.model } : {}),
       reasoningEffort: this.options.reasoningEffort ?? "high",
     });
-    await this.requestStream({
+    const pending = this.requestStream({
       method: "POST",
       credentials: "include",
       headers: {
         "Content-Type": "application/json",
+        "x-browser-agent-client-mode": this.options.clientMode ?? "headless",
+        "x-browser-agent-client-identifier": this.options.clientIdentifier ?? "grok-shell",
         "x-browser-agent-conversation": `turn-summary-${crypto.randomUUID()}`,
         "x-browser-agent-request": `xai-turn-summary-${crypto.randomUUID()}`,
         "x-browser-agent-request-kind": "turn-summary",
@@ -395,6 +419,8 @@ export class GrokBuildSession {
       },
       body: JSON.stringify(request),
     }, "turn-summary", signal);
+    this.options.afterTurnSummaryRequestStart?.();
+    await pending;
   }
 
   private async maybeCompact(signal: AbortSignal): Promise<void> {
@@ -419,6 +445,8 @@ export class GrokBuildSession {
         credentials: "include",
         headers: {
           "Content-Type": "application/json",
+          "x-browser-agent-client-mode": this.options.clientMode ?? "headless",
+          "x-browser-agent-client-identifier": this.options.clientIdentifier ?? "grok-shell",
           "x-browser-agent-conversation": this.sessionId,
           "x-browser-agent-request": `xai-compact-${crypto.randomUUID()}`,
           "x-browser-agent-request-kind": "compaction",
@@ -476,12 +504,16 @@ export class GrokBuildSession {
     this.measuredInputBytes = inputBytes(this.input);
   }
 
-  private async requestStream(init: RequestInit, kind: string, signal: AbortSignal) {
+  private async requestStream(init: RequestInit, kind: string, signal: AbortSignal, onResponseStart?: () => void) {
     this.options.onRequestStart?.(kind);
     const result = await requestGrokStream(this.options.endpoint, init, kind, signal, {
       ...(this.options.retrySleep ? { sleep: this.options.retrySleep } : {}),
       ...(this.options.retryJitter ? { jitter: this.options.retryJitter } : {}),
       onRetry: (retry) => this.options.onEvent?.({ type: "retry", kind, ...retry }),
+      onResponseStart: () => {
+        onResponseStart?.();
+        this.options.onResponseStart?.(kind);
+      },
     });
     if (result.metrics) this.options.onEvent?.({ type: "response_end", kind, response: result.response, metrics: result.metrics });
     const tokens = responseTotalTokens(result.response);
@@ -662,6 +694,7 @@ interface GrokRetryHooks {
   sleep?: (delayMs: number, signal: AbortSignal) => Promise<void>;
   jitter?: (baseMs: number) => number;
   onRetry?: (retry: { attempt: number; maxRetries: number; delayMs: number; status?: number }) => void;
+  onResponseStart?: () => void;
 }
 
 class GrokHttpError extends Error {
@@ -685,6 +718,7 @@ async function requestGrokStream(
     const startedAt = globalThis.performance?.now() ?? Date.now();
     try {
       const response = await fetch(endpoint, { ...init, signal });
+      if (response.ok && response.body) hooks.onResponseStart?.();
       return await requireGrokStream(response, kind, startedAt, retryCount + 1);
     } catch (error) {
       signal.throwIfAborted();

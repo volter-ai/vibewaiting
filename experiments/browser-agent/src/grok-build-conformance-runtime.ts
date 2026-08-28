@@ -12,11 +12,20 @@ export interface GrokConformanceDriverProfile {
   toolResults: Array<{ callId: string; output: string }>;
   foregroundRequests: number;
   modelRequests: number;
+  clientMode?: import("../../../src/grok-browser-protocol.js").GrokClientMode;
+  clientType?: "agent" | "tui";
+  telemetryMetadata?: {
+    clientName: string;
+    clientVersion: string;
+    serviceVersion: string;
+    appEntrypoint: string;
+  };
   bundleArchiveRequests?: number;
   periodicSignalAssistantCounts?: number[];
   nativeLongPausesCount?: number;
   finalSignalCounts?: { totalTurns: number; userMessageCount: number };
   turnSummaryRequests?: number;
+  postInitialSignalBillingRequests?: number;
   reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
   nativeWorkspacePath: string;
   initialFiles?: Array<{ path: string; content: string }>;
@@ -37,6 +46,7 @@ export interface GrokConformanceSubagentLane {
   reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
   nativeWorkspacePath: string;
   enableSessionTitle: boolean;
+  sessionTitleTiming?: "before-first-sample" | "after-first-sample-start";
 }
 
 /** Deterministic tool runtime used only by strict native-corpus replay. */
@@ -117,6 +127,7 @@ export class GrokConformanceToolRuntime implements GrokBuildToolRuntime {
   }
 
   hasPendingAutoWake(): boolean {
+    this.withheldReminders.push(...(this.runtime.drainSystemReminders?.() ?? []));
     return this.withheldReminders.length > 0
       && this.expectedReminders.some((entry) => entry.beforeForegroundRequest === this.reminderDrainIndex);
   }
@@ -249,6 +260,8 @@ function normalizeDynamicOutput(output: string, nativeToBrowserIds: ReadonlyMap<
     .replace(/<output-file>[^<]*<\/output-file>/gu, "<output-file><dynamic></output-file>")
     .replace(/^Output File: .*$/gmu, "Output File: <dynamic>")
     .replace(/\bDuration: \d+(?:\.\d+)?s\b/gu, "Duration: <dynamic>")
+    .replace(/\(\d+(?:\.\d+)?s, /gu, "(<dynamic>, ")
+    .replace(/\bduration_ms=\d+\b/gu, "duration_ms=<dynamic>")
     .replace(/\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})\b/gu, "<timestamp>");
 }
 

@@ -170,7 +170,17 @@ describe("Grok Build browser telemetry source port", () => {
     await lifecycle.flush();
     await lifecycle.shutdown({ finalSync: false });
     expect(batches).toEqual([
-      ["sampling.await_first_output", "http.create_response_stream", "session.handle_prompt"],
+      [
+        "session.spawn",
+        "session.prepare_chat_completion",
+        "session.process_conversation_turn",
+        "session.process_conversation_turn_with_recovery",
+        "send_xai_notification_with_extra_meta",
+        "feedback.maybe_request_feedback",
+        "send_turn_delta_with_snapshot",
+        "http.create_response_stream",
+        "session.handle_prompt",
+      ],
       ["session"],
     ]);
   });

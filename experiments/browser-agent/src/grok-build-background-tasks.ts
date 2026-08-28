@@ -38,6 +38,8 @@ export interface BrowserBackgroundTask {
   truncated: boolean;
   explicitlyCancelled?: boolean;
   timedOut?: boolean;
+  /** Resolves after a deferred external task has invoked its service callback. */
+  launchStarted?: Promise<void>;
   /** Mutable notification owner used when a child session exits. */
   notificationSink?: (reminder: string) => void;
 }
@@ -167,6 +169,8 @@ export class GrokBuildBackgroundTasks {
 
   createExternal(options: ExternalTaskOptions): BrowserBackgroundTask {
     const controller = new AbortController();
+    let resolveLaunchStarted!: () => void;
+    const launchStarted = new Promise<void>((resolve) => { resolveLaunchStarted = resolve; });
     const task: BrowserBackgroundTask = {
       id: options.id,
       controller,
@@ -180,11 +184,18 @@ export class GrokBuildBackgroundTasks {
       outputFile: "",
       rawOutputBytes: 0,
       truncated: false,
+      launchStarted,
     };
     const start = options.deferStart
       ? new Promise<void>((resolve) => globalThis.setTimeout(resolve, 0))
       : Promise.resolve();
-    task.promise = start.then(() => options.promise(AbortSignal.any([options.parentSignal, controller.signal]))).then((output) => {
+    task.promise = start.then(() => {
+      try {
+        return options.promise(AbortSignal.any([options.parentSignal, controller.signal]));
+      } finally {
+        resolveLaunchStarted();
+      }
+    }).then((output) => {
       this.finish(task, output, "completed", 0);
       return task.output;
     }, (error: unknown) => {

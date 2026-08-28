@@ -14,6 +14,9 @@ export const GROK_BUILD_COMPAT_VERSION = "1.0.5";
 export const GROK_BUILD_MODEL = "grok-4.6";
 export const GROK_BUILD_AGENT_ID = "4f13d338-6255-5546-8c1d-12bf640aa33b";
 
+export type GrokClientMode = "headless" | "interactive";
+export type GrokClientIdentifier = "grok-shell" | "grok-pager";
+
 export interface GrokFunctionTool {
   type: "function";
   name: string;
@@ -65,6 +68,8 @@ export interface GrokHeaderOptions {
   traceparent?: string;
   bearerToken?: string;
   model?: string;
+  clientMode?: GrokClientMode;
+  clientIdentifier?: GrokClientIdentifier;
   /** `null` omits the native header after the first successful compaction. */
   compactionAtTokens?: number | null;
 }
@@ -157,7 +162,7 @@ export function createGrokSessionTitleHeaders(options: GrokHeaderOptions = {}): 
     "x-authenticateresponse": "authenticate-response",
     "x-grok-agent-id": "",
     "x-grok-client-identifier": "grok-shell",
-    "x-grok-client-mode": "headless",
+    "x-grok-client-mode": options.clientMode ?? "headless",
     "x-grok-client-version": options.clientVersion ?? GROK_BUILD_COMPAT_VERSION,
     "x-grok-conv-id": "",
     "x-grok-model-override": options.model ?? GROK_BUILD_MODEL,
@@ -221,8 +226,8 @@ export function createGrokResponsesHeaders(
       : { "x-compaction-at": String(options.compactionAtTokens ?? 400_000) }),
     "x-compactions-remaining": "1",
     "x-grok-agent-id": identity.agentId ?? GROK_BUILD_AGENT_ID,
-    "x-grok-client-identifier": "grok-shell",
-    "x-grok-client-mode": "headless",
+    "x-grok-client-identifier": options.clientIdentifier ?? "grok-shell",
+    "x-grok-client-mode": options.clientMode ?? "headless",
     "x-grok-client-version": options.clientVersion ?? GROK_BUILD_COMPAT_VERSION,
     "x-grok-conv-id": identity.conversationId,
     "x-grok-doom-loop-check": "1024",

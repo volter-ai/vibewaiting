@@ -4,7 +4,7 @@
 // Browser-safe translation of Grok Build's Apache-2.0 startup model/settings
 // resolution in xai-grok-shell/src/remote/client.rs and agent/models/resolution.rs.
 
-import type { GrokTool } from "../../../src/grok-browser-protocol.js";
+import type { GrokClientMode, GrokTool } from "../../../src/grok-browser-protocol.js";
 
 const DEFAULT_CONTEXT_WINDOW = 256_000;
 const DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT = 80;
@@ -71,6 +71,7 @@ export interface GrokBuildStartupOptions {
   now?: () => number;
   remoteFetchEnabled?: boolean;
   authMethod?: string;
+  clientMode?: GrokClientMode | (() => GrokClientMode);
 }
 
 interface ModelsCacheRecord {
@@ -210,7 +211,7 @@ export async function fetchGrokBuildStartupProfile(options: GrokBuildStartupOpti
   let models: unknown = cache?.payload ?? BUNDLED_MODELS;
   if (!cache && options.remoteFetchEnabled !== false) {
     try {
-      const modelsResponse = await fetchWithTimeout(fetchImpl, modelsUrl, options.signal, 5_000);
+      const modelsResponse = await fetchWithTimeout(fetchImpl, modelsUrl, options.signal, 5_000, resolveClientMode(options));
       if (modelsResponse.ok) {
         models = await modelsResponse.json() as unknown;
         writeModelsCache(options, modelsUrl, models, modelsResponse.headers.get("ETag") ?? undefined);
@@ -359,7 +360,7 @@ async function fetchSettings(
     if (attempt > 0) await (options.sleep ?? abortableSleep)(500 * attempt, options.signal);
     let response: Response;
     try {
-      response = await fetchWithTimeout(fetchImpl, url, options.signal, 5_000);
+      response = await fetchWithTimeout(fetchImpl, url, options.signal, 5_000, resolveClientMode(options));
     } catch (error) {
       if (attempt + 1 === SETTINGS_FETCH_MAX_ATTEMPTS) throw error;
       continue;
@@ -377,10 +378,16 @@ async function fetchWithTimeout(
   url: string,
   parentSignal: AbortSignal | undefined,
   timeoutMs: number,
+  clientMode: GrokClientMode = "headless",
 ): Promise<Response> {
   const timeout = AbortSignal.timeout(timeoutMs);
   const signal = parentSignal ? AbortSignal.any([parentSignal, timeout]) : timeout;
-  return fetchImpl(url, { credentials: "include", cache: "no-store", signal });
+  return fetchImpl(url, {
+    credentials: "include",
+    cache: "no-store",
+    signal,
+    headers: { "x-browser-agent-client-mode": clientMode },
+  });
 }
 
 function abortableSleep(delayMs: number, signal?: AbortSignal): Promise<void> {
@@ -397,6 +404,10 @@ function abortableSleep(delayMs: number, signal?: AbortSignal): Promise<void> {
       reject(signal?.reason ?? new DOMException("The operation was aborted.", "AbortError"));
     }
   });
+}
+
+function resolveClientMode(options: GrokBuildStartupOptions): GrokClientMode {
+  return typeof options.clientMode === "function" ? options.clientMode() : options.clientMode ?? "headless";
 }
 
 function parseCompactionsRemaining(value: unknown): number | undefined {

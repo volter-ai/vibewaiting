@@ -162,8 +162,19 @@ describe("Grok Build internal OTLP browser subset", () => {
     const spans = producer.finish();
 
     expect(spans.map(({ name }) => name)).toEqual([
-      "sampling.await_first_output",
+      "session.spawn",
+      "session.prepare_chat_completion",
+      "tool.register",
+      "tool.decision",
+      "tools.execute",
+      "fs.read_file",
+      "tool.read_file",
       "tool.execution",
+      "session.process_conversation_turn",
+      "session.process_conversation_turn_with_recovery",
+      "send_xai_notification_with_extra_meta",
+      "feedback.maybe_request_feedback",
+      "send_turn_delta_with_snapshot",
       "http.create_response_stream",
       "session.handle_prompt",
       "session",

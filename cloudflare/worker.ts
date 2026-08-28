@@ -24,6 +24,8 @@ import {
   createGrokResponsesHeaders,
   createGrokSessionTitleHeaders,
   createGrokSideCallHeaders,
+  type GrokClientIdentifier,
+  type GrokClientMode,
 } from "../src/grok-browser-protocol.js";
 import { RATE_GATE_LIMITS } from "./rate-gate.js";
 
@@ -134,7 +136,7 @@ interface InternalCredential {
   teamId?: string;
 }
 
-type GrokBootstrapKind = "models" | "settings";
+type GrokBootstrapKind = "user" | "models" | "settings" | "managed-mcp" | "billing";
 type GrokBundleKind = "archive" | "legacy";
 
 function json(value: unknown, status = 200, headers?: HeadersInit): Response {
@@ -153,6 +155,14 @@ function error(message: string, status: number, retryAfter?: number): Response {
 
 function deploymentVersion(env: Env): string {
   return env.CF_VERSION_METADATA?.id ?? "development";
+}
+
+function grokClientMode(request: Request): GrokClientMode {
+  return request.headers.get("x-browser-agent-client-mode") === "interactive" ? "interactive" : "headless";
+}
+
+function grokClientIdentifier(request: Request): GrokClientIdentifier {
+  return request.headers.get("x-browser-agent-client-identifier") === "grok-pager" ? "grok-pager" : "grok-shell";
 }
 
 function readinessIssues(env: Env): string[] {
@@ -316,17 +326,18 @@ function xaiBootstrapHeaders(
   env: Env,
   credential: InternalCredential,
   kind: GrokBootstrapKind,
+  clientMode: GrokClientMode,
 ): Headers {
   const headers = new Headers({
     Authorization: `Bearer ${credential.accessToken}`,
     "X-XAI-Token-Auth": "xai-grok-cli",
     "x-grok-client-version": env.XAI_CLIENT_VERSION,
-    "x-grok-client-mode": "headless",
-    "x-userid": credential.userId,
+    ...(kind === "managed-mcp" ? {} : { "x-grok-client-mode": clientMode }),
     Accept: "*/*",
   });
+  if (credential.userId && kind !== "user" && kind !== "managed-mcp") headers.set("x-userid", credential.userId);
   if (kind === "settings") headers.set("x-grok-client-identifier", "grok-shell");
-  if (credential.email) headers.set("x-email", credential.email);
+  if (credential.email && (kind === "models" || kind === "settings")) headers.set("x-email", credential.email);
   return headers;
 }
 
@@ -334,11 +345,12 @@ function xaiBundleHeaders(
   env: Env,
   credential: InternalCredential,
   kind: GrokBundleKind,
+  clientMode: GrokClientMode,
 ): Headers {
   const headers = new Headers({
     Authorization: `Bearer ${credential.accessToken}`,
     "x-grok-client-version": env.XAI_CLIENT_VERSION,
-    "x-grok-client-mode": "headless",
+    "x-grok-client-mode": clientMode,
     "x-userid": credential.userId,
     Accept: "*/*",
   });
@@ -496,8 +508,10 @@ function grokResponseHeaders(
   model: string,
 ): Headers {
   const metadata = proxyMetadata(request);
+  const clientMode = grokClientMode(request);
+  const clientIdentifier = grokClientIdentifier(request);
   const headers = new Headers(kind === "session-title"
-    ? createGrokSessionTitleHeaders({ bearerToken: token, clientVersion: env.XAI_CLIENT_VERSION, model })
+    ? createGrokSessionTitleHeaders({ bearerToken: token, clientVersion: env.XAI_CLIENT_VERSION, model, clientMode })
     : kind === "turn-summary" ? createGrokSideCallHeaders({
         conversationId: validSideCallId(request.headers.get("x-browser-agent-conversation"), "turn-summary") ?? `turn-summary-${crypto.randomUUID()}`,
         requestId: validSideCallId(request.headers.get("x-browser-agent-request"), "xai-turn-summary") ?? `xai-turn-summary-${crypto.randomUUID()}`,
@@ -508,6 +522,8 @@ function grokResponseHeaders(
         userId,
         traceparent: createTraceparent(),
         model,
+        clientMode,
+        clientIdentifier,
       }) : kind === "compaction" ? createGrokSideCallHeaders({
         conversationId: metadata.conversationId,
         requestId: validSideCallId(request.headers.get("x-browser-agent-request"), "xai-compact") ?? `xai-compact-${crypto.randomUUID()}`,
@@ -518,6 +534,8 @@ function grokResponseHeaders(
         userId,
         traceparent: createTraceparent(),
         model,
+        clientMode,
+        clientIdentifier,
       }) : createGrokResponsesHeaders({
         conversationId: metadata.conversationId,
         requestId: metadata.requestId,
@@ -529,6 +547,8 @@ function grokResponseHeaders(
         userId,
         traceparent: createTraceparent(),
         model,
+        clientMode,
+        clientIdentifier,
       }));
   headers.set("User-Agent", `grok-shell/${env.XAI_CLIENT_VERSION}`);
   return headers;
@@ -1060,10 +1080,12 @@ async function routeBootstrap(request: Request, env: Env, kind: GrokBootstrapKin
   const dailyLimit = await acquireDailyGate(env, "/acquire-startup", userKey);
   if (dailyLimit) return dailyLimit;
 
-  const upstreamUrl = `${CHAT_PROXY_ORIGIN}/v1/${kind}`;
+  const path = kind === "managed-mcp" ? "mcp/tools/list"
+    : kind === "billing" ? "billing?format=credits" : kind;
+  const upstreamUrl = `${CHAT_PROXY_ORIGIN}/v1/${path}`;
   try {
     let upstream = await fetch(upstreamUrl, {
-      headers: xaiBootstrapHeaders(env, credential, kind),
+      headers: xaiBootstrapHeaders(env, credential, kind, grokClientMode(request)),
       signal: AbortSignal.timeout(5_000),
     });
     if (upstream.status === 401) {
@@ -1072,7 +1094,7 @@ async function routeBootstrap(request: Request, env: Env, kind: GrokBootstrapKin
       if (!credentialResponse.ok) return error("The Grok session expired. Sign in again.", 401);
       credential = await credentialResponse.json<InternalCredential>();
       upstream = await fetch(upstreamUrl, {
-        headers: xaiBootstrapHeaders(env, credential, kind),
+        headers: xaiBootstrapHeaders(env, credential, kind, grokClientMode(request)),
         signal: AbortSignal.timeout(5_000),
       });
     }
@@ -1111,7 +1133,7 @@ async function routeBundle(request: Request, env: Env, kind: GrokBundleKind): Pr
   const timeout = kind === "archive" ? 30_000 : 10_000;
   try {
     let upstream = await fetch(`${CHAT_PROXY_ORIGIN}/v1/${path}`, {
-      headers: xaiBundleHeaders(env, credential, kind),
+      headers: xaiBundleHeaders(env, credential, kind, grokClientMode(request)),
       signal: AbortSignal.timeout(timeout),
     });
     if (upstream.status === 401) {
@@ -1120,7 +1142,7 @@ async function routeBundle(request: Request, env: Env, kind: GrokBundleKind): Pr
       if (!credentialResponse.ok) return error("The Grok session expired. Sign in again.", 401);
       credential = await credentialResponse.json<InternalCredential>();
       upstream = await fetch(`${CHAT_PROXY_ORIGIN}/v1/${path}`, {
-        headers: xaiBundleHeaders(env, credential, kind),
+        headers: xaiBundleHeaders(env, credential, kind, grokClientMode(request)),
         signal: AbortSignal.timeout(timeout),
       });
     }
@@ -1175,13 +1197,14 @@ async function routeTelemetry(request: Request, env: Env, route: GrokTelemetryRo
 
   const upstreamUrl = `${CHAT_PROXY_ORIGIN}${route.upstreamPath}`;
   const makeRequest = (current: InternalCredential): RequestInit => {
-    const traced = !route.upstreamPath.endsWith("/turn-deltas");
+    const traceExport = route.upstreamPath === "/v1/traces";
+    const traced = !traceExport && !route.upstreamPath.endsWith("/turn-deltas");
     const headers = new Headers({
       Authorization: `Bearer ${current.accessToken}`,
       Accept: "*/*",
       "X-XAI-Token-Auth": "xai-grok-cli",
       "x-grok-client-version": env.XAI_CLIENT_VERSION,
-      "x-grok-client-mode": "headless",
+      ...(traceExport ? {} : { "x-grok-client-mode": grokClientMode(request) }),
       ...(traced ? { traceparent: createTraceparent(), tracestate: "" } : {}),
     });
     if (request.method === "POST") headers.set("Content-Type", route.contentType);
@@ -1285,8 +1308,11 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
   if (url.pathname === "/api/auth/device/poll" && request.method === "POST") return routeSession(request, env, "poll");
   if (url.pathname === "/api/auth/status" && request.method === "GET") return routeSession(request, env, "status");
   if (url.pathname === "/api/auth/logout" && request.method === "POST") return routeSession(request, env, "logout");
+  if (url.pathname === "/api/grok/user" && request.method === "GET") return routeBootstrap(request, env, "user");
   if (url.pathname === "/api/grok/models" && request.method === "GET") return routeBootstrap(request, env, "models");
   if (url.pathname === "/api/grok/settings" && request.method === "GET") return routeBootstrap(request, env, "settings");
+  if (url.pathname === "/api/grok/mcp/tools/list" && request.method === "GET") return routeBootstrap(request, env, "managed-mcp");
+  if (url.pathname === "/api/grok/billing" && request.method === "GET") return routeBootstrap(request, env, "billing");
   if (url.pathname === "/api/grok/bundle/archive" && request.method === "GET") return routeBundle(request, env, "archive");
   if (url.pathname === "/api/grok/subagents/bundle" && request.method === "GET") return routeBundle(request, env, "legacy");
   if (url.pathname === "/api/grok/responses" && request.method === "POST") return routeResponses(request, env);

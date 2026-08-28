@@ -3,6 +3,7 @@
 
 import type { GrokBuildEvent } from "./grok-build-agent.js";
 import type { GrokCompletedResponse, GrokInferenceLatencyStats } from "../../../src/grok-browser-protocol.js";
+import type { GrokClientMode } from "../../../src/grok-browser-protocol.js";
 import { encodeGrokBuildOtlpExport } from "./grok-build-otlp-protobuf.js";
 import {
   createGrokBuildBrowserTraceExport,
@@ -18,7 +19,7 @@ export interface GrokBuildFeedbackConfig extends Record<string, unknown> {
 }
 
 export interface GrokBuildSessionSignals extends Record<string, unknown> {
-  clientType: "agent";
+  clientType: "agent" | "tui";
   totalTurns: number;
   userMessageCount: number;
   assistantMessageCount: number;
@@ -30,7 +31,7 @@ export interface GrokBuildSessionSignals extends Record<string, unknown> {
 }
 
 export interface GrokBuildTurnDelta extends Record<string, unknown> {
-  clientType: "agent";
+  clientType: "agent" | "tui";
   turnNumber: number;
   turnOutcome: string;
 }
@@ -44,6 +45,9 @@ export interface GrokBuildTelemetryLifecycleOptions {
   clearInterval?: typeof globalThis.clearInterval;
   signalAssistantCheckpoints?: readonly number[];
   beforeTurnDelta?: () => Promise<void>;
+  beforeInitialSignals?: () => Promise<void>;
+  clientMode?: GrokClientMode;
+  clientType?: "agent" | "tui";
   trace?: Omit<GrokBuildAgentTraceProducerOptions, "sessionId" | "modelId"> & {
     clientName?: string;
     clientVersion?: string;
@@ -55,6 +59,7 @@ export interface GrokBuildTelemetryLifecycleOptions {
 export interface GrokBuildTelemetryClientOptions {
   baseUrl?: string;
   fetch?: typeof globalThis.fetch;
+  clientMode?: GrokClientMode | (() => GrokClientMode);
 }
 
 /**
@@ -64,10 +69,12 @@ export interface GrokBuildTelemetryClientOptions {
 export class GrokBuildTelemetryClient {
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof globalThis.fetch;
+  private readonly clientMode: GrokClientMode | (() => GrokClientMode);
 
   constructor(options: GrokBuildTelemetryClientOptions = {}) {
     this.baseUrl = (options.baseUrl ?? "/api/grok").replace(/\/$/u, "");
     this.fetchImpl = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+    this.clientMode = options.clientMode ?? "headless";
   }
 
   async loadFeedbackConfig(signal?: AbortSignal): Promise<GrokBuildFeedbackConfig> {
@@ -96,7 +103,10 @@ export class GrokBuildTelemetryClient {
     const response = await this.fetchImpl(`${this.baseUrl}/traces`, {
       method: "POST",
       credentials: "include",
-      headers: { "Content-Type": "application/x-protobuf" },
+      headers: {
+        "Content-Type": "application/x-protobuf",
+        "x-browser-agent-client-mode": this.resolveClientMode(),
+      },
       body: payload.slice().buffer,
       ...(signal ? { signal } : {}),
     });
@@ -119,17 +129,23 @@ export class GrokBuildTelemetryClient {
   }
 
   private async sendJson(url: string, init: RequestInit, context: string): Promise<unknown> {
-    const response = await this.fetchImpl(url, { credentials: "include", ...init });
+    const headers = new Headers(init.headers);
+    headers.set("x-browser-agent-client-mode", this.resolveClientMode());
+    const response = await this.fetchImpl(url, { credentials: "include", ...init, headers });
     if (!response.ok) throw await responseError(response, context);
     if (response.status === 204) return undefined;
     return response.json().catch(() => { throw new Error(`${context} returned invalid JSON.`); });
   }
+
+  private resolveClientMode(): GrokClientMode {
+    return typeof this.clientMode === "function" ? this.clientMode() : this.clientMode;
+  }
 }
 
 /** Source-ordered zero-value payload emitted by native Grok Build at startup. */
-export function createInitialGrokBuildSignals(model = "grok-4.6"): GrokBuildSessionSignals {
+export function createInitialGrokBuildSignals(model = "grok-4.6", clientType: "agent" | "tui" = "agent"): GrokBuildSessionSignals {
   return {
-    clientType: "agent",
+    clientType,
     totalTurns: 0,
     userMessageCount: 0,
     assistantMessageCount: 0,
@@ -216,7 +232,12 @@ export class GrokBuildSignalTracker {
   private contextWindowTokens = 500_000;
   private pendingCompactionTokens: number | undefined;
 
-  constructor(private readonly model = "grok-4.6", private readonly now = () => Date.now()) {
+  constructor(
+    private readonly model = "grok-4.6",
+    private readonly now = () => Date.now(),
+    private readonly clientType: "agent" | "tui" = "agent",
+    private readonly locTrackingEnabled = false,
+  ) {
     this.startedAt = now();
   }
 
@@ -257,7 +278,7 @@ export class GrokBuildSignalTracker {
 
   snapshot(now = Date.now()): GrokBuildSessionSignals {
     return {
-      ...createInitialGrokBuildSignals(this.model),
+      ...createInitialGrokBuildSignals(this.model, this.clientType),
       totalTurns: this.totalTurns,
       userMessageCount: this.userMessages,
       assistantMessageCount: this.assistantMessages,
@@ -299,7 +320,7 @@ export class GrokBuildSignalTracker {
     const sortedItl = [...this.turnItlIntervals].sort((left, right) => left - right);
     const outcomes = [...this.turnToolOutcomes].sort(([left], [right]) => left.localeCompare(right)).map(([toolName, counts]) => ({ toolName, ...counts }));
     const delta: GrokBuildTurnDelta = {
-      clientType: "agent",
+      clientType: this.clientType,
       turnNumber: this.totalTurns,
       deltaToolCalls: this.toolCalls - this.turnBaseline.toolCalls,
       deltaToolFailures: this.toolFailures - this.turnBaseline.toolFailures,
@@ -344,7 +365,7 @@ export class GrokBuildSignalTracker {
       deltaAgentFilesTouched: 0,
       deltaHumanFilesTouched: 0,
       deltaTotalFilesTouched: 0,
-      locTrackingEnabled: false,
+      locTrackingEnabled: this.locTrackingEnabled,
     };
     this.turnBaseline = {
       toolCalls: this.toolCalls,
@@ -431,22 +452,35 @@ export class GrokBuildTelemetryLifecycle {
   private readonly signalAssistantCheckpoints = new Map<number, number>();
   private readonly traceProducer: GrokBuildAgentTraceProducer | undefined;
   private readonly beforeTurnDelta: () => Promise<void>;
+  private readonly beforeInitialSignals: () => Promise<void>;
   private readonly traceMetadata: Pick<NonNullable<GrokBuildTelemetryLifecycleOptions["trace"]>, "clientName" | "clientVersion" | "serviceVersion" | "appEntrypoint">;
 
   constructor(readonly sessionId: string, options: GrokBuildTelemetryLifecycleOptions = {}) {
-    this.client = options.client ?? new GrokBuildTelemetryClient();
+    this.client = options.client ?? new GrokBuildTelemetryClient({
+      ...(options.clientMode ? { clientMode: options.clientMode } : {}),
+    });
     this.beforeTurnDelta = options.beforeTurnDelta ?? (() => Promise.resolve());
+    this.beforeInitialSignals = options.beforeInitialSignals ?? (() => Promise.resolve());
     this.syncIntervalMs = options.syncIntervalMs ?? 60_000;
     this.setIntervalImpl = options.setInterval ?? globalThis.setInterval.bind(globalThis);
     this.clearIntervalImpl = options.clearInterval ?? globalThis.clearInterval.bind(globalThis);
     for (const checkpoint of options.signalAssistantCheckpoints ?? []) {
       this.signalAssistantCheckpoints.set(checkpoint, (this.signalAssistantCheckpoints.get(checkpoint) ?? 0) + 1);
     }
-    this.tracker = new GrokBuildSignalTracker(options.model, options.now);
+    this.tracker = new GrokBuildSignalTracker(
+      options.model,
+      options.now,
+      options.clientType,
+      options.clientMode === "interactive",
+    );
     this.traceProducer = options.trace ? new GrokBuildAgentTraceProducer({
       sessionId,
       modelId: options.model ?? "grok-4.6",
       responsesEndpoint: options.trace.responsesEndpoint,
+      clientType: options.clientMode === "interactive" ? "GrokPager" : "Generic",
+      querySource: "main",
+      agentName: "grok-build-plan",
+      ...(options.trace.reasoningEffort ? { reasoningEffort: options.trace.reasoningEffort } : {}),
       ...(options.trace.tracer ? { tracer: options.trace.tracer } : {}),
       ...(options.trace.nowUnixNano ? { nowUnixNano: options.trace.nowUnixNano } : {}),
       ...(options.trace.randomBytes ? { randomBytes: options.trace.randomBytes } : {}),
@@ -460,6 +494,7 @@ export class GrokBuildTelemetryLifecycle {
     const initial = this.tracker.snapshot();
     this.boot = (async () => {
       await this.client.loadFeedbackConfig().catch(() => undefined);
+      await this.beforeInitialSignals();
       await this.client.updateSignals(this.sessionId, initial);
     })().catch(() => undefined).finally(() => {
       if (!this.stopped) this.interval = this.setIntervalImpl(() => this.background(this.client.updateSignals(this.sessionId, this.tracker.snapshot())), this.syncIntervalMs);
@@ -490,11 +525,11 @@ export class GrokBuildTelemetryLifecycle {
     if (event.type === "complete" || event.type === "limit") {
       const outcome = event.type === "complete" ? "completed" : "error";
       const delta = this.tracker.takeTurnDelta(outcome, requestId);
-      // Native sends turn deltas from its feedback actor. Yielding one task
-      // lets a just-spawned child issue its first request before the parent
-      // delta, matching the actor mailbox order without blocking the turn.
+      // Native's feedback actor observes a just-spawned child's accepted first
+      // response before it emits the parent delta. The injected gate preserves
+      // that ordering; do not add a timer after it, because the child may finish
+      // a short first response and issue its next request in the same task.
       this.background(this.beforeTurnDelta()
-        .then(() => new Promise<void>((resolve) => globalThis.setTimeout(resolve, 0)))
         .then(() => this.client.sendTurnDelta(this.sessionId, delta)));
       this.exportTraceSpans(this.traceProducer?.drain() ?? []);
     }

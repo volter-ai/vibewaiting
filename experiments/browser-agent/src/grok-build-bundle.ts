@@ -4,6 +4,8 @@
 //
 // Source port of xai-grok-bundle and xai-grok-shell's published-bundle sync.
 
+import type { GrokClientMode } from "../../../src/grok-browser-protocol.js";
+
 export const GROK_BUILD_BUNDLED_ROOT = "/.grok/bundled";
 export const GROK_BUILD_BUNDLE_MANIFEST = `${GROK_BUILD_BUNDLED_ROOT}/manifest.json`;
 export const GROK_BUILD_BUNDLE_TTL_MS = 60 * 60 * 1_000;
@@ -54,6 +56,7 @@ export interface GrokBuildBundleSyncOptions {
   now?: number;
   archiveEndpoint?: string;
   legacyEndpoint?: string;
+  clientMode?: GrokClientMode;
 }
 
 interface TarEntry {
@@ -459,6 +462,7 @@ export async function syncGrokBuildBundle(
   const archive = await fetchImpl(options.archiveEndpoint ?? "/api/grok/bundle/archive", {
     credentials: "include",
     cache: "no-store",
+    headers: { "x-browser-agent-client-mode": options.clientMode ?? "headless" },
     ...(options.signal ? { signal: options.signal } : {}),
   });
   if (archive.ok) {
@@ -470,6 +474,7 @@ export async function syncGrokBuildBundle(
   const legacy = await fetchImpl(options.legacyEndpoint ?? "/api/grok/subagents/bundle", {
     credentials: "include",
     cache: "no-store",
+    headers: { "x-browser-agent-client-mode": options.clientMode ?? "headless" },
     ...(options.signal ? { signal: options.signal } : {}),
   });
   const body = await readBoundedResponse(legacy, GROK_BUILD_BUNDLE_MAX_COMPRESSED_BYTES);
