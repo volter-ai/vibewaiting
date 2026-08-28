@@ -73,6 +73,8 @@ export class BrowserGrokAuthController {
 
   async startDeviceAuth(): Promise<void> {
     const elements = this.options.elements;
+    this.clearPoll();
+    elements.devicePanel.hidden = true;
     elements.connectButton.disabled = true;
     elements.status.textContent = "Starting xAI device sign-in…";
     try {
@@ -88,7 +90,7 @@ export class BrowserGrokAuthController {
       elements.devicePanel.hidden = false;
       elements.status.textContent = "Waiting for approval at xAI…";
       elements.connectButton.hidden = true;
-      const intervalSeconds = Math.max(1, payload.intervalSeconds ?? 5);
+      const intervalSeconds = Math.max(1, Math.min(60, payload.intervalSeconds ?? 5));
       this.pollTimer = window.setTimeout(() => void this.pollDeviceAuth(intervalSeconds), intervalSeconds * 1_000);
     } catch (error) {
       elements.status.textContent = error instanceof Error ? error.message : String(error);
@@ -99,13 +101,23 @@ export class BrowserGrokAuthController {
   }
 
   async disconnect(): Promise<void> {
-    await readJson<AuthStatusPayload>(await this.fetchImpl("/api/auth/logout", {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: "{}",
-    }));
-    this.showDisconnected("Not connected", false);
+    this.clearPoll();
+    try {
+      await readJson<AuthStatusPayload>(await this.fetchImpl("/api/auth/logout", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      }));
+      this.showDisconnected("Not connected", false);
+    } catch (error) {
+      this.options.elements.status.textContent = error instanceof Error ? error.message : String(error);
+      this.options.elements.disconnectButton.hidden = false;
+    }
+  }
+
+  destroy(): void {
+    this.clearPoll();
   }
 
   private showAuthenticated(payload: AuthStatusPayload, local = false): void {
@@ -118,21 +130,23 @@ export class BrowserGrokAuthController {
     elements.connectButton.hidden = true;
     elements.disconnectButton.hidden = local;
     elements.devicePanel.hidden = true;
-    if (this.pollTimer !== undefined) window.clearTimeout(this.pollTimer);
-    this.pollTimer = undefined;
+    this.clearPoll();
     this.options.onAuthenticated?.();
   }
 
   private showDisconnected(message: string, hideConnect: boolean): void {
     const elements = this.options.elements;
+    this.clearPoll();
     this.options.onReadyChange(false);
     elements.status.textContent = message;
     elements.connectButton.hidden = hideConnect;
     elements.disconnectButton.hidden = true;
+    elements.devicePanel.hidden = true;
   }
 
   private async pollDeviceAuth(intervalSeconds: number): Promise<void> {
     const elements = this.options.elements;
+    this.pollTimer = undefined;
     try {
       const response = await this.fetchImpl("/api/auth/device/poll", {
         method: "POST",
@@ -149,13 +163,19 @@ export class BrowserGrokAuthController {
         throw new Error(authMessage(payload, `Sign-in polling failed with HTTP ${response.status}`));
       }
       const retryAfter = Number.parseInt(response.headers.get("Retry-After") || "", 10);
-      const nextSeconds = Number.isFinite(retryAfter) ? retryAfter : payload.intervalSeconds ?? intervalSeconds;
+      const requestedSeconds = Number.isFinite(retryAfter) ? retryAfter : payload.intervalSeconds ?? intervalSeconds;
+      const nextSeconds = Math.max(1, Math.min(60, requestedSeconds));
       this.pollTimer = window.setTimeout(() => void this.pollDeviceAuth(nextSeconds), Math.max(1, nextSeconds) * 1_000);
     } catch (error) {
       elements.status.textContent = error instanceof Error ? error.message : String(error);
       elements.connectButton.hidden = false;
       elements.devicePanel.hidden = true;
     }
+  }
+
+  private clearPoll(): void {
+    if (this.pollTimer !== undefined) window.clearTimeout(this.pollTimer);
+    this.pollTimer = undefined;
   }
 }
 

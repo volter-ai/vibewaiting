@@ -654,7 +654,10 @@ async function resetProject(): Promise<void> {
 runButton.addEventListener("click", (event) => void runAgent(event.shiftKey ? "queue" : "send-now"));
 stopButton.addEventListener("click", () => activeRun?.abort());
 resetButton.addEventListener("click", () => void resetProject());
-addEventListener("pagehide", () => { void telemetryLifecycle?.shutdown(); });
+addEventListener("pagehide", () => {
+  authController.destroy();
+  void telemetryLifecycle?.shutdown();
+});
 connectGrokButton.addEventListener("click", () => void authController.startDeviceAuth());
 disconnectGrokButton.addEventListener("click", () => void authController.disconnect());
 

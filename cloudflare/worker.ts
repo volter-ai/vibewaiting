@@ -62,6 +62,16 @@ const MAX_VIDEO_RESPONSE_BYTES = 100 * 1024 * 1024;
 const MAX_BOOTSTRAP_RESPONSE_BYTES = 1024 * 1024;
 const MAX_BUNDLE_RESPONSE_BYTES = 8 * 1024 * 1024;
 const MAX_TELEMETRY_BYTES = 512 * 1024;
+const MAX_OAUTH_RESPONSE_BYTES = 64 * 1024;
+const MAX_USER_RESPONSE_BYTES = 64 * 1024;
+const MAX_ENCRYPTED_SESSION_LENGTH = 128 * 1024;
+const MAX_DEVICE_CODE_LENGTH = 8 * 1024;
+const MAX_ACCESS_TOKEN_LENGTH = 64 * 1024;
+const MAX_IDENTITY_FIELD_LENGTH = 1_024;
+const MAX_OAUTH_URL_LENGTH = 4_096;
+const MAX_DEVICE_LIFETIME_SECONDS = 60 * 60;
+const MAX_CREDENTIAL_LIFETIME_SECONDS = 31 * 24 * 60 * 60;
+const MAX_DEVICE_POLL_SECONDS = 60;
 const TIER_RESTRICTED_UPSELL = "Image generation is a SuperGrok feature and isn't available on the free or X Basic tier. Let the user know they can unlock image and video generation by upgrading to SuperGrok: https://grok.com/supergrok?referrer=grok-build. Do not retry this tool.";
 
 interface Env {
@@ -75,6 +85,7 @@ interface Env {
   XAI_CLIENT_VERSION: string;
   XAI_OAUTH_CLIENT_ID: string;
   SESSION_ENCRYPTION_KEY: string;
+  SESSION_ENCRYPTION_KEY_PREVIOUS?: string;
 }
 
 interface DeviceState {
@@ -157,8 +168,28 @@ function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+function boundedString(value: unknown, maximum: number): string | undefined {
+  const text = stringValue(value);
+  return text && text.length <= maximum ? text : undefined;
+}
+
 function numberValue(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function boundedPositiveSeconds(value: unknown, fallback: number, maximum: number): number {
+  const seconds = numberValue(value);
+  return seconds && seconds > 0 ? Math.min(seconds, maximum) : fallback;
+}
+
+function safeXaiVerificationUrl(value: string): boolean {
+  if (value.length > MAX_OAUTH_URL_LENGTH) return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && (url.hostname === "x.ai" || url.hostname.endsWith(".x.ai"));
+  } catch {
+    return false;
+  }
 }
 
 function sessionCookie(sessionId: string): string {
@@ -322,6 +353,15 @@ async function readLimitedResponse(response: Response, maximum = MAX_WEB_FETCH_B
     offset += chunk.byteLength;
   }
   return body;
+}
+
+async function readLimitedJson<T>(response: Response, maximum: number): Promise<T | undefined> {
+  try {
+    const bytes = await readLimitedResponse(response, maximum);
+    return JSON.parse(new TextDecoder().decode(bytes)) as T;
+  } catch {
+    return undefined;
+  }
 }
 
 function mediaSessionId(request: Request): string {
@@ -1118,41 +1158,88 @@ export default {
 } satisfies ExportedHandler<Env>;
 
 export class GrokSession implements DurableObject {
+  private refreshInFlight: Promise<CredentialState | undefined> | undefined;
+  private generation = 0;
+
   constructor(private readonly state: DurableObjectState, private readonly env: Env) {}
 
-  private async encryptionKey(): Promise<CryptoKey> {
-    const raw = fromBase64Url(this.env.SESSION_ENCRYPTION_KEY);
+  private async encryptionKey(value: string): Promise<{ id: string; key: CryptoKey }> {
+    const raw = fromBase64Url(value);
     if (raw.byteLength !== 32) throw new Error("SESSION_ENCRYPTION_KEY must encode exactly 32 bytes.");
-    return crypto.subtle.importKey("raw", raw.buffer as ArrayBuffer, "AES-GCM", false, ["encrypt", "decrypt"]);
+    const digest = await crypto.subtle.digest("SHA-256", raw.buffer as ArrayBuffer);
+    return {
+      id: base64Url(new Uint8Array(digest)).slice(0, 11),
+      key: await crypto.subtle.importKey("raw", raw.buffer as ArrayBuffer, "AES-GCM", false, ["encrypt", "decrypt"]),
+    };
+  }
+
+  private async encryptionKeys(): Promise<Array<{ id: string; key: CryptoKey }>> {
+    const values = [this.env.SESSION_ENCRYPTION_KEY, this.env.SESSION_ENCRYPTION_KEY_PREVIOUS]
+      .filter((value): value is string => Boolean(value));
+    const keys = await Promise.all(values.map((value) => this.encryptionKey(value)));
+    return keys.filter((candidate, index) => keys.findIndex((key) => key.id === candidate.id) === index);
   }
 
   private async load(): Promise<SessionState> {
+    const generation = this.generation;
     const envelope = await this.state.storage.get<string>("session");
     if (!envelope) return {};
-    const [version, ivValue, ciphertextValue] = envelope.split(".");
-    if (version !== "v1" || !ivValue || !ciphertextValue) throw new Error("Invalid encrypted session state.");
-    const plaintext = await crypto.subtle.decrypt(
-      {
-        name: "AES-GCM",
-        iv: fromBase64Url(ivValue).buffer as ArrayBuffer,
-        additionalData: new TextEncoder().encode(this.state.id.toString()),
-      },
-      await this.encryptionKey(),
-      fromBase64Url(ciphertextValue).buffer as ArrayBuffer,
-    );
-    return JSON.parse(new TextDecoder().decode(plaintext)) as SessionState;
+    try {
+      if (envelope.length > MAX_ENCRYPTED_SESSION_LENGTH) throw new Error("Encrypted session state is too large.");
+      const parts = envelope.split(".");
+      const version = parts[0];
+      const keyId = version === "v2" ? parts[1] : undefined;
+      const ivValue = version === "v2" ? parts[2] : parts[1];
+      const ciphertextValue = version === "v2" ? parts[3] : parts[2];
+      if ((version !== "v1" && version !== "v2") || !ivValue || !ciphertextValue
+        || (version === "v2" && (!keyId || parts.length !== 4))
+        || (version === "v1" && parts.length !== 3)) throw new Error("Invalid encrypted session state.");
+      const keys = await this.encryptionKeys();
+      const candidates = version === "v2" ? keys.filter((key) => key.id === keyId) : keys;
+      for (const candidate of candidates) {
+        try {
+          const plaintext = await crypto.subtle.decrypt(
+            {
+              name: "AES-GCM",
+              iv: fromBase64Url(ivValue).buffer as ArrayBuffer,
+              additionalData: new TextEncoder().encode(this.state.id.toString()),
+            },
+            candidate.key,
+            fromBase64Url(ciphertextValue).buffer as ArrayBuffer,
+          );
+          const value = JSON.parse(new TextDecoder().decode(plaintext)) as SessionState;
+          if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid session payload.");
+          if (generation !== this.generation) return {};
+          if (version !== "v2" || candidate.id !== keys[0]?.id) {
+            if (!await this.save(value, generation)) return {};
+          }
+          return value;
+        } catch {
+          // Try the previous rotation key before treating the envelope as corrupt.
+        }
+      }
+      throw new Error("Session state could not be decrypted.");
+    } catch {
+      await this.state.storage.deleteAll();
+      return {};
+    }
   }
 
-  private async save(value: SessionState): Promise<void> {
+  private async save(value: SessionState, expectedGeneration?: number): Promise<boolean> {
+    const current = (await this.encryptionKeys())[0];
+    if (!current) throw new Error("SESSION_ENCRYPTION_KEY is required.");
+    if (expectedGeneration !== undefined && expectedGeneration !== this.generation) return false;
     const iv = crypto.getRandomValues(new Uint8Array(12));
     const plaintext = new TextEncoder().encode(JSON.stringify(value));
     const ciphertext = await crypto.subtle.encrypt(
       { name: "AES-GCM", iv, additionalData: new TextEncoder().encode(this.state.id.toString()) },
-      await this.encryptionKey(),
+      current.key,
       plaintext,
     );
-    await this.state.storage.put("session", `v1.${base64Url(iv)}.${base64Url(new Uint8Array(ciphertext))}`);
+    if (expectedGeneration !== undefined && expectedGeneration !== this.generation) return false;
+    await this.state.storage.put("session", `v2.${current.id}.${base64Url(iv)}.${base64Url(new Uint8Array(ciphertext))}`);
     await this.state.storage.setAlarm(Date.now() + SESSION_ALARM_MS);
+    return true;
   }
 
   private async fetchUser(accessToken: string, fallback: { userId?: string; email?: string }): Promise<Partial<CredentialState>> {
@@ -1162,13 +1249,14 @@ export class GrokSession implements DurableObject {
         signal: AbortSignal.timeout(10_000),
       });
       if (!response.ok) return fallback;
-      const user = await response.json<Record<string, unknown>>();
-      const userId = stringValue(user.userId) ?? fallback.userId;
-      const email = stringValue(user.email) ?? fallback.email;
-      const subscriptionTier = stringValue(user.subscriptionTier);
-      const teamId = stringValue(user.teamId) ?? stringValue(user.team_id)
+      const user = await readLimitedJson<Record<string, unknown>>(response, MAX_USER_RESPONSE_BYTES);
+      if (!user) return fallback;
+      const userId = boundedString(user.userId, MAX_IDENTITY_FIELD_LENGTH) ?? fallback.userId;
+      const email = boundedString(user.email, MAX_IDENTITY_FIELD_LENGTH) ?? fallback.email;
+      const subscriptionTier = boundedString(user.subscriptionTier, MAX_IDENTITY_FIELD_LENGTH);
+      const teamId = boundedString(user.teamId, MAX_IDENTITY_FIELD_LENGTH) ?? boundedString(user.team_id, MAX_IDENTITY_FIELD_LENGTH)
         ?? (user.team && typeof user.team === "object" && !Array.isArray(user.team)
-          ? stringValue((user.team as Record<string, unknown>).id)
+          ? boundedString((user.team as Record<string, unknown>).id, MAX_IDENTITY_FIELD_LENGTH)
           : undefined);
       return {
         ...(userId ? { userId } : {}),
@@ -1188,11 +1276,11 @@ export class GrokSession implements DurableObject {
       body: params,
       signal: AbortSignal.timeout(15_000),
     });
-    const tokens = await response.json<TokenResponse>().catch(() => ({}));
-    return { response, tokens };
+    const tokens = await readLimitedJson<TokenResponse>(response, MAX_OAUTH_RESPONSE_BYTES);
+    return { response, ...(tokens ? { tokens } : {}) };
   }
 
-  private async refresh(session: SessionState): Promise<CredentialState | undefined> {
+  private async refreshCredential(session: SessionState, generation: number): Promise<CredentialState | undefined> {
     const current = session.credential;
     if (!current?.refreshToken) return undefined;
     const params = new URLSearchParams({
@@ -1201,10 +1289,17 @@ export class GrokSession implements DurableObject {
       client_id: this.env.XAI_OAUTH_CLIENT_ID,
     });
     const { response, tokens } = await this.exchange(params);
-    const accessToken = stringValue(tokens?.access_token);
-    if (!response.ok || !accessToken) return undefined;
-    const expiresIn = numberValue(tokens?.expires_in);
-    const refreshToken = stringValue(tokens?.refresh_token) ?? current.refreshToken;
+    const accessToken = boundedString(tokens?.access_token, MAX_ACCESS_TOKEN_LENGTH);
+    if (!response.ok) {
+      const code = boundedString(tokens?.error, 128);
+      if (["access_denied", "invalid_grant", "invalid_token"].includes(code ?? "")) {
+        await this.save({}, generation);
+      }
+      return undefined;
+    }
+    if (!accessToken || generation !== this.generation) return undefined;
+    const expiresIn = boundedPositiveSeconds(tokens?.expires_in, 0, MAX_CREDENTIAL_LIFETIME_SECONDS);
+    const refreshToken = boundedString(tokens?.refresh_token, MAX_ACCESS_TOKEN_LENGTH) ?? current.refreshToken;
     const credential: CredentialState = {
       ...current,
       accessToken,
@@ -1212,8 +1307,19 @@ export class GrokSession implements DurableObject {
       ...(expiresIn ? { expiresAt: Date.now() + expiresIn * 1_000 } : {}),
     };
     session.credential = credential;
-    await this.save(session);
-    return credential;
+    return await this.save(session, generation) ? credential : undefined;
+  }
+
+  private async refresh(session: SessionState): Promise<CredentialState | undefined> {
+    if (this.refreshInFlight) return this.refreshInFlight;
+    const generation = this.generation;
+    const operation = this.refreshCredential(session, generation);
+    this.refreshInFlight = operation;
+    try {
+      return await operation;
+    } finally {
+      if (this.refreshInFlight === operation) this.refreshInFlight = undefined;
+    }
   }
 
   private safeCredential(credential: CredentialState): InternalCredential {
@@ -1230,6 +1336,7 @@ export class GrokSession implements DurableObject {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/device/start" && request.method === "POST") {
+      this.generation += 1;
       const params = new URLSearchParams({
         client_id: this.env.XAI_OAUTH_CLIENT_ID,
         scope: OAUTH_SCOPES,
@@ -1242,19 +1349,18 @@ export class GrokSession implements DurableObject {
           body: params,
           signal: AbortSignal.timeout(15_000),
         });
-        const payload: Record<string, unknown> = await response.json<Record<string, unknown>>().catch(() => ({}));
+        const payload = await readLimitedJson<Record<string, unknown>>(response, MAX_OAUTH_RESPONSE_BYTES) ?? {};
         if (!response.ok) return error("xAI did not start the device sign-in flow.", 502);
-        const deviceCode = stringValue(payload.device_code);
-        const userCode = stringValue(payload.user_code);
-        const verificationUri = stringValue(payload.verification_uri);
-        const verificationUriComplete = stringValue(payload.verification_uri_complete);
-        const expiresIn = numberValue(payload.expires_in) ?? 600;
-        const intervalSeconds = Math.max(1, numberValue(payload.interval) ?? 5);
-        if (!deviceCode || !userCode || !verificationUri || !/^[A-Z0-9-]+$/u.test(userCode)) {
+        const deviceCode = boundedString(payload.device_code, MAX_DEVICE_CODE_LENGTH);
+        const userCode = boundedString(payload.user_code, 64);
+        const verificationUri = boundedString(payload.verification_uri, MAX_OAUTH_URL_LENGTH);
+        const verificationUriComplete = boundedString(payload.verification_uri_complete, MAX_OAUTH_URL_LENGTH);
+        const expiresIn = boundedPositiveSeconds(payload.expires_in, 600, MAX_DEVICE_LIFETIME_SECONDS);
+        const intervalSeconds = boundedPositiveSeconds(payload.interval, 5, MAX_DEVICE_POLL_SECONDS);
+        if (!deviceCode || !userCode || !verificationUri || !/^[A-Z0-9-]+$/u.test(userCode)
+          || !safeXaiVerificationUrl(verificationUri)
+          || (verificationUriComplete && !safeXaiVerificationUrl(verificationUriComplete))) {
           return error("xAI returned an invalid device sign-in response.", 502);
-        }
-        for (const candidate of [verificationUri, verificationUriComplete]) {
-          if (candidate && new URL(candidate).protocol !== "https:") return error("xAI returned an unsafe sign-in URL.", 502);
         }
         const now = Date.now();
         const device: DeviceState = {
@@ -1286,7 +1392,10 @@ export class GrokSession implements DurableObject {
       const device = session.device;
       if (!device) return error("No device sign-in is pending.", 409);
       const now = Date.now();
-      if (now >= device.expiresAt) return error("The device sign-in code expired.", 410);
+      if (now >= device.expiresAt) {
+        await this.save({});
+        return error("The device sign-in code expired.", 410);
+      }
       if (now < device.nextPollAt) return error("Wait before checking sign-in again.", 429, Math.ceil((device.nextPollAt - now) / 1_000));
       device.nextPollAt = now + device.intervalSeconds * 1_000;
       await this.save(session);
@@ -1305,17 +1414,23 @@ export class GrokSession implements DurableObject {
           await this.save(session);
           return json({ status: "pending", intervalSeconds: device.intervalSeconds }, 202);
         }
-        if (code === "access_denied") return error("The xAI sign-in request was denied.", 403);
-        if (code === "expired_token") return error("The device sign-in code expired.", 410);
+        if (code === "access_denied") {
+          await this.save({});
+          return error("The xAI sign-in request was denied.", 403);
+        }
+        if (code === "expired_token") {
+          await this.save({});
+          return error("The device sign-in code expired.", 410);
+        }
         return error("xAI did not complete device sign-in.", 502);
       }
-      const accessToken = stringValue(tokens?.access_token);
+      const accessToken = boundedString(tokens?.access_token, MAX_ACCESS_TOKEN_LENGTH);
       if (!accessToken) return error("xAI returned no access token.", 502);
-      const fallback = decodeJwtIdentity(stringValue(tokens?.id_token));
+      const fallback = decodeJwtIdentity(boundedString(tokens?.id_token, MAX_ACCESS_TOKEN_LENGTH));
       const identity = await this.fetchUser(accessToken, fallback);
       if (!identity.userId) return error("xAI returned no stable account identity.", 502);
-      const expiresIn = numberValue(tokens?.expires_in);
-      const refreshToken = stringValue(tokens?.refresh_token);
+      const expiresIn = boundedPositiveSeconds(tokens?.expires_in, 0, MAX_CREDENTIAL_LIFETIME_SECONDS);
+      const refreshToken = boundedString(tokens?.refresh_token, MAX_ACCESS_TOKEN_LENGTH);
       const credential: CredentialState = {
         accessToken,
         userId: identity.userId,
@@ -1336,8 +1451,16 @@ export class GrokSession implements DurableObject {
 
     if (url.pathname === "/status" && request.method === "GET") {
       const session = await this.load();
-      const credential = session.credential;
+      let credential = session.credential;
       if (!credential) return json({ authenticated: false });
+      if (credential.expiresAt && credential.expiresAt <= Date.now() + 60_000) {
+        if (!credential.refreshToken) {
+          await this.save({});
+          return json({ authenticated: false });
+        }
+        credential = await this.refresh(session);
+        if (!credential) return error("The Grok session could not be refreshed.", 503);
+      }
       return json({
         authenticated: true,
         email: credential.email ?? null,
@@ -1358,6 +1481,7 @@ export class GrokSession implements DurableObject {
     }
 
     if (url.pathname === "/logout" && request.method === "POST") {
+      this.generation += 1;
       await this.state.storage.deleteAll();
       return json({ authenticated: false });
     }
@@ -1365,6 +1489,7 @@ export class GrokSession implements DurableObject {
   }
 
   async alarm(): Promise<void> {
+    this.generation += 1;
     await this.state.storage.deleteAll();
   }
 }
