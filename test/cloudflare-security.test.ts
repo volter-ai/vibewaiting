@@ -5,6 +5,9 @@ import {
   normalizeWebFetchRedirectUrl,
   normalizeWebFetchUrl,
   normalizeImageMediaRequest,
+  grokImageMediaModel,
+  parseGrokMediaModelOverrides,
+  parseGrokRelayRemoteSettings,
   normalizeVideoMediaRequest,
   normalizeVideoDownloadUrl,
   normalizeGrokResponsesRequest,
@@ -108,9 +111,12 @@ describe("Cloudflare browser-agent security boundary", () => {
     expect(normalizeWebFetchUrl("https://www.react.dev/learn").hostname).toBe("www.react.dev");
     expect(normalizeWebFetchUrl("https://vercel.com/docs/functions").pathname).toBe("/docs/functions");
     expect(() => normalizeWebFetchUrl("https://vercel.com/api")).toThrow(/not in the allowed/u);
-    expect(() => normalizeWebFetchUrl("https://127.0.0.1/private")).toThrow(/Single-label|not in the allowed/u);
+    expect(() => normalizeWebFetchUrl("https://127.0.0.1/private")).toThrow(/Single-label|not in the allowed|not public/u);
     expect(() => normalizeWebFetchUrl("https://user:secret@docs.rs/")).toThrow(/credentials/u);
     expect(() => normalizeWebFetchUrl("file:///etc/passwd")).toThrow(/scheme/u);
+    expect(normalizeWebFetchUrl("https://example.com/docs", ["example.com/docs"]).pathname).toBe("/docs");
+    expect(() => normalizeWebFetchUrl("https://example.com/api", ["example.com/docs"])).toThrow(/not in the allowed/u);
+    expect(() => normalizeWebFetchUrl("https://127.0.0.1/private", ["127.0.0.1"])).toThrow(/not public/u);
 
     const original = normalizeWebFetchUrl("https://docs.rs/start");
     const same = normalizeWebFetchRedirectUrl("http://docs.rs/final");
@@ -121,6 +127,18 @@ describe("Cloudflare browser-agent security boundary", () => {
   });
 
   it("accepts only the native stateless Imagine envelopes", () => {
+    expect(parseGrokRelayRemoteSettings({
+      web_fetch_allowed_domains: [],
+      web_fetch_proxy: "https://proxy.example.com",
+    })).toMatchObject({ webFetch: { allowedDomains: [], proxyEndpoint: "https://proxy.example.com" } });
+    const mediaModels = parseGrokMediaModelOverrides({
+      image_gen_model_override: "grok-imagine-image",
+      image_edit_model_override: "grok-imagine-image-edit",
+    });
+    expect(grokImageMediaModel(mediaModels, "generate")).toBe("grok-imagine-image");
+    expect(grokImageMediaModel(mediaModels, "edit")).toBe("grok-imagine-image-edit");
+    expect(grokImageMediaModel(parseGrokMediaModelOverrides({ image_gen_model_override: "" }), "generate"))
+      .toBe("grok-imagine-image-quality");
     expect(normalizeImageMediaRequest({
       kind: "generate",
       prompt: "a moon",

@@ -42,6 +42,21 @@ export type GrokImageMediaRequest =
   | { kind: "generate"; prompt: string; aspectRatio: string }
   | { kind: "edit"; prompt: string; aspectRatio: string; images: string[] };
 
+export interface GrokMediaModelOverrides {
+  imageGen?: string;
+  imageEdit?: string;
+}
+
+export interface GrokWebFetchRemotePolicy {
+  allowedDomains?: string[];
+  proxyEndpoint?: string;
+}
+
+export interface GrokRelayRemoteSettings {
+  mediaModels: GrokMediaModelOverrides;
+  webFetch: GrokWebFetchRemotePolicy;
+}
+
 export type GrokVideoMediaRequest =
   | { kind: "image-to-video"; prompt: string; duration: 6 | 10; resolution: "480p" | "720p"; image: string }
   | {
@@ -56,6 +71,47 @@ export type GrokVideoMediaRequest =
 
 function isObject(value: unknown): value is JsonObject {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+/** Native ignores empty string overrides and otherwise uses the remote slug verbatim. */
+export function parseGrokMediaModelOverrides(value: unknown): GrokMediaModelOverrides {
+  if (!isObject(value)) return {};
+  const imageGen = typeof value.image_gen_model_override === "string"
+    && value.image_gen_model_override.length > 0
+    && value.image_gen_model_override.length <= 256
+    ? value.image_gen_model_override : undefined;
+  const imageEdit = typeof value.image_edit_model_override === "string"
+    && value.image_edit_model_override.length > 0
+    && value.image_edit_model_override.length <= 256
+    ? value.image_edit_model_override : undefined;
+  return {
+    ...(imageGen ? { imageGen } : {}),
+    ...(imageEdit ? { imageEdit } : {}),
+  };
+}
+
+/** Sanitizes the remote settings that affect relay-owned behavior. */
+export function parseGrokRelayRemoteSettings(value: unknown): GrokRelayRemoteSettings {
+  const record = isObject(value) ? value : {};
+  const allowedDomains = Array.isArray(record.web_fetch_allowed_domains)
+    && record.web_fetch_allowed_domains.length <= 256
+    && record.web_fetch_allowed_domains.every((entry) => typeof entry === "string" && entry.length <= 512)
+    ? [...record.web_fetch_allowed_domains] as string[] : undefined;
+  const proxyEndpoint = typeof record.web_fetch_proxy === "string"
+    && record.web_fetch_proxy.length > 0
+    && record.web_fetch_proxy.length <= MAX_WEB_FETCH_URL_BYTES
+    ? record.web_fetch_proxy : undefined;
+  return {
+    mediaModels: parseGrokMediaModelOverrides(record),
+    webFetch: {
+      ...(allowedDomains ? { allowedDomains } : {}),
+      ...(proxyEndpoint ? { proxyEndpoint } : {}),
+    },
+  };
+}
+
+export function grokImageMediaModel(overrides: GrokMediaModelOverrides, kind: GrokImageMediaRequest["kind"]): string {
+  return (kind === "generate" ? overrides.imageGen : overrides.imageEdit) ?? "grok-imagine-image-quality";
 }
 
 const IMAGE_ASPECT_RATIOS = new Set([
@@ -281,7 +337,7 @@ function normalizedWebFetchHost(host: string): string {
 }
 
 /** Native web_fetch URL upgrade and default domain policy, before any network I/O. */
-function normalizeWebFetchUrlWithPolicy(raw: unknown, enforceDomain: boolean): URL {
+function normalizeWebFetchUrlWithPolicy(raw: unknown, enforceDomain: boolean, allowedDomains: readonly string[] = WEB_FETCH_DOMAINS): URL {
   if (typeof raw !== "string" || raw.length === 0) throw new Error("url must be a non-empty string");
   if (new TextEncoder().encode(raw).length > MAX_WEB_FETCH_URL_BYTES) {
     throw new Error(`URL exceeds maximum length of ${MAX_WEB_FETCH_URL_BYTES}`);
@@ -299,8 +355,9 @@ function normalizeWebFetchUrlWithPolicy(raw: unknown, enforceDomain: boolean): U
   if (!url.hostname.includes(".")) throw new Error(`Single-label hostname is not allowed: ${url.hostname}`);
   if (url.protocol === "http:") url.protocol = "https:";
   const host = normalizedWebFetchHost(url.hostname);
+  if (blockedWebFetchHost(host)) throw new Error(`web_fetch host is not public: ${host}`);
   if (!enforceDomain) return url;
-  const matching = WEB_FETCH_DOMAINS.find((entry) => {
+  const matching = allowedDomains.find((entry) => {
     const slash = entry.indexOf("/");
     const allowedHost = normalizedWebFetchHost(slash < 0 ? entry : entry.slice(0, slash));
     if (host !== allowedHost) return false;
@@ -313,8 +370,8 @@ function normalizeWebFetchUrlWithPolicy(raw: unknown, enforceDomain: boolean): U
   return url;
 }
 
-export function normalizeWebFetchUrl(raw: unknown): URL {
-  return normalizeWebFetchUrlWithPolicy(raw, true);
+export function normalizeWebFetchUrl(raw: unknown, allowedDomains?: readonly string[]): URL {
+  return normalizeWebFetchUrlWithPolicy(raw, true, allowedDomains);
 }
 
 export function normalizeWebFetchRedirectUrl(raw: unknown): URL {
@@ -323,6 +380,21 @@ export function normalizeWebFetchRedirectUrl(raw: unknown): URL {
 
 export function sameWebFetchHost(left: URL, right: URL): boolean {
   return left.hostname === right.hostname;
+}
+
+function blockedWebFetchHost(host: string): boolean {
+  if (host.includes(":") || /(?:^|\.)(?:localhost|local|internal|home\.arpa)$/u.test(host)) return true;
+  const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/u.exec(host);
+  if (!ipv4) return false;
+  const octets = ipv4.slice(1).map(Number);
+  if (octets.some((octet) => octet > 255)) return true;
+  const [first = 0, second = 0] = octets;
+  return first === 0 || first === 10 || first === 127 || first >= 224
+    || (first === 100 && second >= 64 && second <= 127)
+    || (first === 169 && second === 254)
+    || (first === 172 && second >= 16 && second <= 31)
+    || (first === 192 && second === 168)
+    || (first === 198 && (second === 18 || second === 19));
 }
 
 /** Validate an xAI-issued media URL before the relay performs a server-side download. */

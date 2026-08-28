@@ -154,6 +154,14 @@ describe("Grok encrypted device-auth sessions", () => {
 
     now += 1_000;
     expect((await session.fetch(request("/poll", "POST"))).status).toBe(200);
+    expect((await session.fetch(new Request("https://durable.internal/settings/remote", {
+      method: "POST",
+      body: JSON.stringify({
+        image_gen_model_override: "grok-imagine-image",
+        image_edit_model_override: "grok-imagine-image-edit",
+        web_fetch_allowed_domains: ["docs.rs"],
+      }),
+    }))).status).toBe(200);
     const credentialEnvelope = String(storage.values.get("session"));
     expect(credentialEnvelope).not.toContain("initial-access");
     expect(credentialEnvelope).not.toContain("initial-refresh");
@@ -188,8 +196,22 @@ describe("Grok encrypted device-auth sessions", () => {
     await vi.waitFor(() => expect(refreshCalls).toBe(1));
     releaseRefresh();
     const [firstResponse, secondResponse] = await Promise.all([first, second]);
-    expect(await firstResponse.json()).toMatchObject({ accessToken: "fresh-access", userId: "user-1" });
-    expect(await secondResponse.json()).toMatchObject({ accessToken: "fresh-access", userId: "user-1" });
+    expect(await firstResponse.json()).toMatchObject({
+      accessToken: "fresh-access",
+      userId: "user-1",
+      remoteSettings: {
+        mediaModels: { imageGen: "grok-imagine-image", imageEdit: "grok-imagine-image-edit" },
+        webFetch: { allowedDomains: ["docs.rs"] },
+      },
+    });
+    expect(await secondResponse.json()).toMatchObject({
+      accessToken: "fresh-access",
+      userId: "user-1",
+      remoteSettings: {
+        mediaModels: { imageGen: "grok-imagine-image", imageEdit: "grok-imagine-image-edit" },
+        webFetch: { allowedDomains: ["docs.rs"] },
+      },
+    });
     expect(refreshCalls).toBe(1);
 
     const beforeRotation = String(storage.values.get("session"));
@@ -272,6 +294,128 @@ describe("Grok encrypted device-auth sessions", () => {
 });
 
 describe("distributed relay budgets", () => {
+  it("caches trusted remote media model settings inside the encrypted session boundary", async () => {
+    let stored: unknown;
+    const session = {
+      fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
+        const pathname = new URL(String(input)).pathname;
+        if (pathname === "/credential") return Response.json({
+          accessToken: "token", userId: "user-1", eligible: true, subscriptionTier: "SuperGrok",
+        });
+        if (pathname === "/settings/remote") {
+          stored = JSON.parse(String(init?.body));
+          return Response.json({ stored: true });
+        }
+        throw new Error(`unexpected session request ${pathname}`);
+      },
+    };
+    const gate = { fetch: async () => Response.json({ allowed: true }) };
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({
+      image_gen_model_override: "grok-imagine-image",
+      image_edit_model_override: "grok-imagine-image-edit",
+    })));
+    const response = await worker.fetch(new Request("https://agent.example/api/grok/settings", {
+      headers: { Cookie: `__Host-vw_session=${"a".repeat(43)}` },
+    }), serviceEnv({
+      SESSIONS: { get: () => session, idFromName: (name: string) => name },
+      RATE_GATE: { get: () => gate, idFromName: (name: string) => name },
+    }));
+
+    expect(response.status).toBe(200);
+    expect(stored).toEqual({
+      image_gen_model_override: "grok-imagine-image",
+      image_edit_model_override: "grok-imagine-image-edit",
+    });
+  });
+
+  it("uses only server-cached remote settings for image generation and edit model overrides", async () => {
+    const upstreamPayloads: Array<Record<string, unknown>> = [];
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      upstreamPayloads.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return Response.json({ data: [{ b64_json: "/9j/" }] });
+    }));
+    const session = {
+      fetch: async (input: RequestInfo | URL) => {
+        const pathname = new URL(String(input)).pathname;
+        if (pathname === "/credential") return Response.json({
+          accessToken: "token",
+          userId: "user-1",
+          eligible: true,
+          subscriptionTier: "SuperGrok",
+          remoteSettings: {
+            mediaModels: { imageGen: "grok-imagine-image", imageEdit: "grok-imagine-image-edit" },
+            webFetch: {},
+          },
+        });
+        throw new Error(`unexpected session request ${pathname}`);
+      },
+    };
+    const gate = { fetch: async () => Response.json({ allowed: true }) };
+    const sessionNamespace = {
+      get: () => session,
+      idFromName: (name: string) => name,
+    };
+    const gateNamespace = {
+      get: () => gate,
+      idFromName: (name: string) => name,
+    };
+    const mediaEnv = serviceEnv({
+      INFERENCE_ENABLED: "true",
+      SESSIONS: sessionNamespace,
+      RATE_GATE: gateNamespace,
+    });
+    const headers = {
+      "Content-Type": "application/json",
+      Cookie: `__Host-vw_session=${"a".repeat(43)}`,
+      Origin: "https://agent.example",
+      "Sec-Fetch-Site": "same-origin",
+      "x-browser-agent-session": "11111111-1111-4111-8111-111111111111",
+    };
+    const send = (body: Record<string, unknown>) => worker.fetch(new Request("https://agent.example/api/grok/media/image", {
+      method: "POST", headers, body: JSON.stringify(body),
+    }), mediaEnv);
+
+    expect((await send({ kind: "generate", prompt: "moon", aspectRatio: "1:1" })).status).toBe(200);
+    expect((await send({ kind: "edit", prompt: "blue", aspectRatio: "auto", images: ["data:image/jpeg;base64,/9j/"] })).status).toBe(200);
+    expect(upstreamPayloads.map((payload) => payload.model)).toEqual([
+      "grok-imagine-image",
+      "grok-imagine-image-edit",
+    ]);
+  });
+
+  it("enforces cached remote web_fetch domains and fails closed on unsupported egress proxies", async () => {
+    let policy: Record<string, unknown> = { allowedDomains: ["example.com"] };
+    const session = { fetch: async () => Response.json({
+      accessToken: "token", userId: "user-1", eligible: true, subscriptionTier: "SuperGrok",
+      remoteSettings: { mediaModels: {}, webFetch: policy },
+    }) };
+    const gate = { fetch: async () => Response.json({ allowed: true }) };
+    const relayEnv = serviceEnv({
+      SESSIONS: { get: () => session, idFromName: (name: string) => name },
+      RATE_GATE: { get: () => gate, idFromName: (name: string) => name },
+    });
+    const fetchMock = vi.fn(async () => new Response("ok", { headers: { "Content-Type": "text/plain" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const send = (url: string) => worker.fetch(new Request("https://agent.example/api/grok/web-fetch", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: `__Host-vw_session=${"a".repeat(43)}`,
+        Origin: "https://agent.example",
+        "Sec-Fetch-Site": "same-origin",
+      },
+      body: JSON.stringify({ url }),
+    }), relayEnv);
+
+    expect((await send("https://docs.rs/")).status).toBe(400);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect((await send("https://example.com/docs")).status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    policy = { allowedDomains: ["example.com"], proxyEndpoint: "https://proxy.example.com" };
+    expect((await send("https://example.com/docs")).status).toBe(501);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it("enforces concurrency globally and releases reservations", async () => {
     const storage = new MemoryStorage();
     const gate = new RateGate(state(storage));

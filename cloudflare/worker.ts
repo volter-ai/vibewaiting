@@ -8,6 +8,8 @@ import {
   normalizeWebFetchRedirectUrl,
   normalizeWebFetchUrl,
   normalizeImageMediaRequest,
+  grokImageMediaModel,
+  parseGrokRelayRemoteSettings,
   normalizeVideoMediaRequest,
   normalizeVideoDownloadUrl,
   normalizeGrokTelemetryRoute,
@@ -18,6 +20,7 @@ import {
   validGrokRequestId,
   validUuid,
   type GrokRelayRequestKind,
+  type GrokRelayRemoteSettings,
   type GrokTelemetryRoute,
 } from "./security.js";
 import {
@@ -115,6 +118,7 @@ interface CredentialState {
 interface SessionState {
   device?: DeviceState;
   credential?: CredentialState;
+  remoteSettings?: GrokRelayRemoteSettings;
   videoRequests?: Record<string, { expiresAt: number; claimedAt?: number }>;
 }
 
@@ -134,6 +138,7 @@ interface InternalCredential {
   eligible: boolean;
   subscriptionTier?: string;
   teamId?: string;
+  remoteSettings?: GrokRelayRemoteSettings;
 }
 
 type GrokBootstrapKind = "user" | "models" | "settings" | "managed-mcp" | "billing";
@@ -640,25 +645,35 @@ async function routeWebFetch(request: Request, env: Env): Promise<Response> {
   if (env.WEB_FETCH_ENABLED !== "true") return error("Grok web_fetch is temporarily disabled.", 503);
   const sessionId = cookieValue(request.headers.get("Cookie"), SESSION_COOKIE);
   if (!validSessionId(sessionId)) return error("Connect a Grok subscription before using web_fetch.", 401);
-  let current: URL;
+  let rawUrl: unknown;
   try {
     const payload = JSON.parse(await readLimitedBody(request)) as unknown;
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("web_fetch requires a JSON object");
     const record = payload as Record<string, unknown>;
     if (Object.keys(record).some((key) => key !== "url")) throw new Error("web_fetch accepts only a url field");
-    current = normalizeWebFetchUrl(record.url);
+    rawUrl = record.url;
   } catch (cause) {
     return error(cause instanceof Error ? cause.message : "Invalid web_fetch request.", 400);
   }
 
+  const credentialResponse = await internalJson(sessionStub(env, sessionId), "/credential");
+  if (!credentialResponse.ok) return new Response(credentialResponse.body, credentialResponse);
+  const credential = await credentialResponse.json<InternalCredential>();
+  if (!credential.eligible) return error("This Grok account does not have an active eligible subscription.", 403);
+  const policy = credential.remoteSettings?.webFetch;
+  if (policy?.proxyEndpoint) {
+    return error("This Grok web_fetch policy requires an egress proxy that is unavailable in the browser relay.", 501);
+  }
+  let current: URL;
+  try {
+    current = normalizeWebFetchUrl(rawUrl, policy?.allowedDomains);
+  } catch (cause) {
+    return error(cause instanceof Error ? cause.message : "Invalid web_fetch request.", 400);
+  }
   const ipHash = await sha256(clientIp(request));
   if (!(await requireEdgeLimit(env.CHAT_IP_RATE_LIMITER, `fetch:${ipHash}`))) {
     return error("This network has reached the per-minute web_fetch limit.", 429, 60);
   }
-  const credentialResponse = await internalJson(sessionStub(env, sessionId), "/credential");
-  if (!credentialResponse.ok) return new Response(credentialResponse.body, credentialResponse);
-  const credential = await credentialResponse.json<{ userId: string; eligible: boolean }>();
-  if (!credential.eligible) return error("This Grok account does not have an active eligible subscription.", 403);
   const userKey = await sha256(credential.userId);
   if (!(await requireEdgeLimit(env.CHAT_USER_RATE_LIMITER, `fetch:${userKey}`))) {
     return error("This Grok account has reached the per-minute web_fetch limit.", 429, 60);
@@ -780,7 +795,7 @@ async function routeImageMedia(request: Request, env: Env): Promise<Response> {
   const sessionId = mediaSessionId(request);
   const endpoint = body.kind === "generate" ? `${XAI_API_ORIGIN}/images/generations` : `${XAI_API_ORIGIN}/images/edits`;
   const payload: Record<string, unknown> = {
-    model: "grok-imagine-image-quality",
+    model: grokImageMediaModel(credential.remoteSettings?.mediaModels ?? {}, body.kind),
     prompt: body.prompt,
     n: 1,
     resolution: "1k",
@@ -1129,6 +1144,14 @@ async function routeBootstrap(request: Request, env: Env, kind: GrokBootstrapKin
       });
     }
     const body = await readLimitedResponse(upstream, MAX_BOOTSTRAP_RESPONSE_BYTES);
+    if (kind === "settings" && upstream.ok) {
+      try {
+        const settings = JSON.parse(new TextDecoder().decode(body)) as unknown;
+        await internalJson(session, "/settings/remote", settings);
+      } catch (cause) {
+        console.error("grok_media_settings_cache_failed", cause instanceof Error ? cause.message : "unknown");
+      }
+    }
     const headers = new Headers({
       "Cache-Control": "no-store",
       "Content-Type": upstream.headers.get("Content-Type") ?? "application/json; charset=utf-8",
@@ -1547,7 +1570,7 @@ export class GrokSession implements DurableObject {
     }
   }
 
-  private safeCredential(credential: CredentialState): InternalCredential {
+  private safeCredential(credential: CredentialState, remoteSettings?: GrokRelayRemoteSettings): InternalCredential {
     return {
       accessToken: credential.accessToken,
       userId: credential.userId,
@@ -1555,11 +1578,20 @@ export class GrokSession implements DurableObject {
       eligible: Boolean(credential.subscriptionTier && credential.subscriptionTier !== "Free"),
       ...(credential.subscriptionTier ? { subscriptionTier: credential.subscriptionTier } : {}),
       ...(credential.teamId ? { teamId: credential.teamId } : {}),
+      ...(remoteSettings ? { remoteSettings } : {}),
     };
   }
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname === "/settings/remote" && request.method === "POST") {
+      const payload: unknown = await request.json().catch(() => ({}));
+      const session = await this.load();
+      if (!session.credential) return error("The Grok session is not authenticated.", 401);
+      session.remoteSettings = parseGrokRelayRemoteSettings(payload);
+      await this.save(session);
+      return json({ stored: true });
+    }
     if (url.pathname.startsWith("/video/") && request.method === "POST") {
       const payload: Record<string, unknown> = await request.json<Record<string, unknown>>().catch(() => ({}));
       const requestId = payload.requestId;
@@ -1752,7 +1784,7 @@ export class GrokSession implements DurableObject {
         credential = await this.refresh(session);
         if (!credential) return error("The Grok session could not be refreshed.", 401);
       }
-      return json(this.safeCredential(credential));
+      return json(this.safeCredential(credential, session.remoteSettings));
     }
 
     if (url.pathname === "/logout" && request.method === "POST") {

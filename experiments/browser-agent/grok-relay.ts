@@ -10,9 +10,12 @@ import {
   normalizeWebFetchRedirectUrl,
   normalizeWebFetchUrl,
   normalizeImageMediaRequest,
+  grokImageMediaModel,
+  parseGrokRelayRemoteSettings,
   normalizeVideoMediaRequest,
   normalizeGrokTelemetryRoute,
   sameWebFetchHost,
+  type GrokRelayRemoteSettings,
 } from "../../cloudflare/security.js";
 import {
   GROK_BUILD_MODEL,
@@ -346,7 +349,7 @@ async function proxyBootstrap(
   kind: GrokBootstrapKind,
   clientVersion: string | undefined,
   clientMode: GrokClientMode,
-): Promise<void> {
+): Promise<GrokRelayRemoteSettings | undefined> {
   const base = (upstreamBaseUrl ?? "https://cli-chat-proxy.grok.com/v1").replace(/\/$/u, "");
   const path = kind === "managed-mcp" ? "mcp/tools/list"
     : kind === "billing" ? "billing?format=credits" : kind;
@@ -363,6 +366,13 @@ async function proxyBootstrap(
   const etag = upstream.headers.get("ETag");
   if (etag) response.setHeader("ETag", etag);
   response.end(body);
+  if (kind === "settings" && upstream.ok) {
+    try {
+      return parseGrokRelayRemoteSettings(JSON.parse(body.toString("utf8")) as unknown);
+    } catch {
+      return;
+    }
+  }
 }
 
 async function proxyBundle(
@@ -471,10 +481,11 @@ async function proxyImageMedia(
   credential: GrokCredential,
   fetchImpl: typeof globalThis.fetch,
   mediaBaseUrl: string,
+  remoteSettings: GrokRelayRemoteSettings,
 ): Promise<void> {
   const body = normalizeImageMediaRequest(JSON.parse((await readBody(request)).toString("utf8")) as unknown);
   const payload: Record<string, unknown> = {
-    model: "grok-imagine-image-quality",
+    model: grokImageMediaModel(remoteSettings.mediaModels, body.kind),
     prompt: body.prompt,
     n: 1,
     resolution: "1k",
@@ -576,12 +587,16 @@ async function proxyWebFetch(
   request: IncomingMessage,
   response: ServerResponse,
   fetchImpl: typeof globalThis.fetch,
+  remoteSettings: GrokRelayRemoteSettings,
 ): Promise<void> {
   const payload = JSON.parse((await readBody(request)).toString("utf8")) as unknown;
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("web_fetch requires a JSON object");
   const record = payload as Record<string, unknown>;
   if (Object.keys(record).some((key) => key !== "url")) throw new Error("web_fetch accepts only a url field");
-  let current = normalizeWebFetchUrl(record.url);
+  if (remoteSettings.webFetch.proxyEndpoint) {
+    throw new Error("This Grok web_fetch policy requires an egress proxy that is unavailable in the browser relay.");
+  }
+  let current = normalizeWebFetchUrl(record.url, remoteSettings.webFetch.allowedDomains);
   for (let redirects = 0; redirects <= MAX_WEB_FETCH_REDIRECTS; redirects += 1) {
     const upstream = await fetchImpl(current, {
       method: "GET",
@@ -623,6 +638,7 @@ async function proxyWebFetch(
 
 export function createGrokRelay(options: GrokRelayOptions = {}): Plugin {
   const fetchImpl = options.fetch ?? globalThis.fetch;
+  let remoteSettings: GrokRelayRemoteSettings = { mediaModels: {}, webFetch: {} };
   return {
     name: "browser-agent-grok-relay",
     configureServer(server) {
@@ -648,7 +664,7 @@ export function createGrokRelay(options: GrokRelayOptions = {}): Plugin {
           if (request.method !== "GET") return json(response, 405, { error: { message: "Method not allowed." } });
           try {
             const credential = await readGrokCredential(authFileFromEnvironment(options.authFile));
-            await proxyBootstrap(
+            const resolvedRemoteSettings = await proxyBootstrap(
               response,
               credential,
               fetchImpl,
@@ -660,6 +676,7 @@ export function createGrokRelay(options: GrokRelayOptions = {}): Plugin {
               options.clientVersion ?? process.env.GROK_CLIENT_VERSION,
               grokClientModeFromRequest(request),
             );
+            if (resolvedRemoteSettings) remoteSettings = resolvedRemoteSettings;
           } catch (error) {
             json(response, 502, { error: { message: error instanceof Error ? error.message : String(error) } });
           }
@@ -686,7 +703,7 @@ export function createGrokRelay(options: GrokRelayOptions = {}): Plugin {
         if (path === "/api/grok/web-fetch") {
           if (request.method !== "POST") return json(response, 405, { error: { message: "Method not allowed." } });
           try {
-            await proxyWebFetch(request, response, fetchImpl);
+            await proxyWebFetch(request, response, fetchImpl, remoteSettings);
           } catch (error) {
             json(response, 502, { error: { message: error instanceof Error ? error.message : String(error) } });
           }
@@ -698,7 +715,7 @@ export function createGrokRelay(options: GrokRelayOptions = {}): Plugin {
             const credential = await readGrokCredential(authFileFromEnvironment(options.authFile));
             const mediaBaseUrl = (options.mediaBaseUrl ?? "https://api.x.ai/v1").replace(/\/$/u, "");
             if (path === "/api/grok/media/image") {
-              await proxyImageMedia(request, response, credential, fetchImpl, mediaBaseUrl);
+              await proxyImageMedia(request, response, credential, fetchImpl, mediaBaseUrl, remoteSettings);
             } else if (path === "/api/grok/media/video/start") {
               await proxyVideoStart(request, response, credential, fetchImpl, mediaBaseUrl);
             } else {

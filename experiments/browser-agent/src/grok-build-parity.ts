@@ -173,18 +173,21 @@ export const GROK_BUILD_TOOL_PARITY = {
   },
   web_fetch: {
     owner: "relay",
-    level: "exact",
-    evidence: ["test/grok-build-web-fetch.test.ts", "test/cloudflare-security.test.ts"],
+    level: "source-ported",
+    evidence: ["test/grok-build-web-fetch.test.ts", "test/cloudflare-security.test.ts", "worker-test/cloudflare-auth-session.test.ts"],
+    gap: "Default and remote allowed-domain policies, path scoping, explicit-empty denial, redirect control, SSRF rejection, bounded bodies, and distributed budgets are ported. A generic remote HTTP(S) forward-proxy endpoint cannot be expressed through Cloudflare Workers fetch; the relay fails closed when that optional enterprise setting is present.",
   },
   image_gen: {
     owner: "relay",
     level: "source-ported",
-    evidence: ["test/grok-build-media.test.ts", "test/cloudflare-security.test.ts"],
+    evidence: ["test/grok-build-media.test.ts", "test/cloudflare-security.test.ts", "worker-test/cloudflare-auth-session.test.ts"],
+    gap: "Native remote model override precedence is enforced from the encrypted server-side settings cache; provider-backed success, tier, and failure traffic corpora remain before exact.",
   },
   image_edit: {
     owner: "relay",
     level: "source-ported",
-    evidence: ["test/grok-build-media.test.ts", "test/cloudflare-security.test.ts"],
+    evidence: ["test/grok-build-media.test.ts", "test/cloudflare-security.test.ts", "worker-test/cloudflare-auth-session.test.ts"],
+    gap: "Native remote edit-model override precedence is enforced from the encrypted server-side settings cache; provider-backed success and multi-reference traffic corpora remain before exact.",
   },
   image_to_video: {
     owner: "relay",
