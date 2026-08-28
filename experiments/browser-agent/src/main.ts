@@ -541,6 +541,7 @@ async function runAgent(mode: "send-now" | "queue" = "send-now"): Promise<void> 
   syncRunAvailability();
 
   try {
+    let planResumePending = false;
     const profile = conformanceProfile ?? (conformanceOrigin ? await loadConformanceProfile(conformanceOrigin) : undefined);
     if (profile) taskInput.value = profile.task;
     if (!liveStartupProfile) {
@@ -646,14 +647,23 @@ async function runAgent(mode: "send-now" | "queue" = "send-now"): Promise<void> 
       });
       if (!profile && restoredAgentSession) {
         const resumedPlanTurn = await browserRuntime.resumePendingPlanApproval(activeRun.signal);
-        if (resumedPlanTurn) agentSession.enqueueSystemReminder(resumedPlanTurn);
+        if (resumedPlanTurn) {
+          agentSession.enqueueSystemReminder(resumedPlanTurn);
+          planResumePending = true;
+        }
       }
     }
     await telemetryLifecycle?.ready();
     let nextPrompt = submitted;
     let result: Awaited<ReturnType<GrokBuildSession["run"]>>;
-    while (true) {
+    if (planResumePending) {
+      result = await agentSession.resume(activeRun.signal, { requestId: `plan-resume-${Date.now()}` });
+      planResumePending = false;
+      if (nextPrompt) result = await agentSession.run(nextPrompt, activeRun.signal);
+    } else {
       result = await agentSession.run(nextPrompt, activeRun.signal);
+    }
+    while (true) {
       while (profile && conformanceRuntime?.hasPendingAutoWake()) {
         await telemetryLifecycle?.flush();
         telemetryLifecycle?.ensureLongPauses(profile.nativeLongPausesCount ?? 0);
@@ -662,6 +672,7 @@ async function runAgent(mode: "send-now" | "queue" = "send-now"): Promise<void> 
       if (profile || !livePrompts.hasQueued()) break;
       nextPrompt = livePrompts.takeQueuedPrefix() ?? "";
       if (!nextPrompt) break;
+      result = await agentSession.run(nextPrompt, activeRun.signal);
     }
     if (result.status === "limit") agentState.textContent = "Stopped";
     if (profile) {

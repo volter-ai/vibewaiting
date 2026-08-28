@@ -98,6 +98,7 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
   private awaitingPlanApproval = false;
   private planApprovalInFlight = false;
   private readonly asynchronousReminders: GrokBuildSystemReminderEvent[] = [];
+  private pendingNotificationPromptId: string | undefined;
   private readonly reportedTaskCompletions = new Set<string>();
 
   constructor(
@@ -156,6 +157,9 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
     for (let index = this.asynchronousReminders.length - 1; index >= 0; index -= 1) {
       if (drainedIds.has(this.asynchronousReminders[index]!.promptId)) this.asynchronousReminders.splice(index, 1);
     }
+    if (this.pendingNotificationPromptId && drainedIds.has(this.pendingNotificationPromptId)) {
+      this.pendingNotificationPromptId = undefined;
+    }
     const monitorEvents = pending.filter((entry) => entry.source === "monitor_event").map((entry) => entry.reminder);
     if (monitorEvents.length === 0) return pending.map((entry) => systemReminder(entry.reminder));
     const formatted = formatGrokMonitorEvents(monitorEvents);
@@ -173,6 +177,16 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
   }
 
   takeSystemReminder(promptId: string): string | undefined {
+    if (promptId.startsWith("notifications-")) {
+      const events = this.asynchronousReminders.filter((entry) => entry.promptId === promptId && entry.source === "monitor_event");
+      if (events.length === 0) return undefined;
+      for (let index = this.asynchronousReminders.length - 1; index >= 0; index -= 1) {
+        if (this.asynchronousReminders[index]?.promptId === promptId) this.asynchronousReminders.splice(index, 1);
+      }
+      if (this.pendingNotificationPromptId === promptId) this.pendingNotificationPromptId = undefined;
+      const formatted = formatGrokMonitorEvents(events.map((entry) => entry.reminder));
+      return formatted ? systemReminder(formatted) : undefined;
+    }
     const index = this.asynchronousReminders.findIndex((entry) => entry.promptId === promptId);
     if (index < 0) return undefined;
     const [entry] = this.asynchronousReminders.splice(index, 1);
@@ -612,7 +626,7 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
       }
       const event: GrokBuildSystemReminderEvent = {
         promptId: source === "monitor_event"
-          ? `monitor-${taskId}-${crypto.randomUUID()}`
+          ? this.pendingNotificationPromptId ??= `notifications-${crypto.randomUUID()}`
           : `task-completed-${taskId}`,
         taskId,
         source,

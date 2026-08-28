@@ -46,6 +46,44 @@ describe("Grok Build browser monitor", () => {
     });
   });
 
+  it("batches idle monitor events into one native notification-drain turn", async () => {
+    vi.useFakeTimers();
+    try {
+      let emit!: (value: string) => void;
+      const queued: Array<{ promptId: string; source: string }> = [];
+      const tools = new GrokBuildBrowserRuntime({
+        vfs: new VirtualFS(),
+        async run(_command, options) {
+          emit = (value) => options?.onStdout?.(value);
+          return new Promise((resolve) => options?.signal?.addEventListener("abort", () => {
+            resolve({ stdout: "", stderr: "", exitCode: 130 });
+          }, { once: true }));
+        },
+      }, "/", { onSystemReminderQueued(event) { queued.push(event); } });
+      const started = await tools.execute({
+        callId: "monitor", name: "monitor",
+        arguments: '{"command":"watch","description":"deploy","persistent":true}',
+      }, new AbortController().signal);
+      const taskId = /task ([0-9a-f-]+)/u.exec(started.output)?.[1] ?? "";
+      emit("READY\n");
+      await vi.advanceTimersByTimeAsync(200);
+      emit("DONE\n");
+      await vi.advanceTimersByTimeAsync(200);
+      expect(queued).toHaveLength(2);
+      expect(queued[0]).toMatchObject({ source: "monitor_event", promptId: expect.stringMatching(/^notifications-[0-9a-f-]{36}$/u) });
+      expect(queued[1]?.promptId).toBe(queued[0]?.promptId);
+      expect(tools.takeSystemReminder(queued[0]!.promptId)).toMatch(
+        new RegExp(`^<system-reminder>\\n2 monitor events from 1 monitor[\\s\\S]*task_id="${taskId}"[\\s\\S]*\\[1\\] READY[\\s\\S]*\\[2\\] DONE`, "u"),
+      );
+      await tools.execute({
+        callId: "kill", name: "kill_command_or_subagent",
+        arguments: JSON.stringify({ task_id: taskId }),
+      }, new AbortController().signal);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("rejects signed timeout values and preserves native zero-deadline behavior", async () => {
     vi.useFakeTimers();
     try {

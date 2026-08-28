@@ -24,8 +24,11 @@ describe("browser Grok relay", () => {
       "x-browser-agent-request": "workflow-completed-wf_0123456789abcdef0123456789abcdef-2",
     }).requestId).toBe("workflow-completed-wf_0123456789abcdef0123456789abcdef-2");
     expect(relayMetadataFromHeaders({
-      "x-browser-agent-request": `monitor-${id}-44444444-4444-4444-8444-444444444444`,
-    }).requestId).toBe(`monitor-${id}-44444444-4444-4444-8444-444444444444`);
+      "x-browser-agent-request": "plan-resume-1787893200000",
+    }).requestId).toBe("plan-resume-1787893200000");
+    expect(relayMetadataFromHeaders({
+      "x-browser-agent-request": "notifications-44444444-4444-4444-8444-444444444444",
+    }).requestId).toBe("notifications-44444444-4444-4444-8444-444444444444");
   });
   it("extracts a credential without depending on the issuer key", () => {
     expect(credentialFromAuthJson({
