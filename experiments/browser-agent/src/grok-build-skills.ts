@@ -31,6 +31,7 @@ export interface GrokBuildSkillInfo {
   scope: "local" | "bundled";
   disableModelInvocation: boolean;
   enabled: boolean;
+  paths?: string[];
 }
 
 function utf8Length(value: string): number {
@@ -107,6 +108,40 @@ function parseTopLevelFrontmatter(source: string): Record<string, string> {
   return values;
 }
 
+function parsePathsFrontmatter(content: string): string[] | undefined {
+  const trimmed = content.trimStart();
+  if (!trimmed.startsWith("---")) return;
+  const rest = trimmed.slice(3);
+  const closing = rest.indexOf("\n---");
+  if (closing < 0) return;
+  const lines = rest.slice(0, closing).split(/\r?\n/u);
+  const paths: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = /^paths:\s*(.*)$/u.exec(lines[index] ?? "");
+    if (!match) continue;
+    const inline = match[1]?.trim() ?? "";
+    if (inline.startsWith("[") && inline.endsWith("]")) {
+      for (const value of inline.slice(1, -1).split(",")) {
+        const path = unquoteScalar(value).trim();
+        if (path) paths.push(path);
+      }
+    } else if (inline) {
+      const path = unquoteScalar(inline).trim();
+      if (path) paths.push(path);
+    } else {
+      while (index + 1 < lines.length) {
+        const item = /^\s+-\s+(.+)$/u.exec(lines[index + 1] ?? "");
+        if (!item) break;
+        const path = unquoteScalar(item[1] ?? "").trim();
+        if (path) paths.push(path);
+        index += 1;
+      }
+    }
+    break;
+  }
+  return paths.length ? paths : undefined;
+}
+
 export function parseGrokBuildFrontmatterDocument(content: string): { frontmatter?: Record<string, string>; body: string } {
   const trimmed = content.trimStart();
   if (!trimmed.startsWith("---")) return { body: trimmed };
@@ -159,6 +194,7 @@ function parseSkill(path: string, content: string, scope: GrokBuildSkillInfo["sc
     : bodyDescription(document.body, name);
   const whenToUse = document.frontmatter?.["when-to-use"] ?? document.frontmatter?.when_to_use;
   const disabled = document.frontmatter?.["disable-model-invocation"] === "true";
+  const paths = parsePathsFrontmatter(content);
   if ((path.includes("/.cursor/") && CURSOR_DEFAULT_SKILLS.has(name)) || (path.includes("/.claude/") && CLAUDE_DEFAULT_SKILLS.has(name))) return;
   return {
     name,
@@ -168,6 +204,7 @@ function parseSkill(path: string, content: string, scope: GrokBuildSkillInfo["sc
     scope,
     disableModelInvocation: disabled,
     enabled: true,
+    ...(paths ? { paths } : {}),
   };
 }
 
@@ -226,6 +263,44 @@ export function discoverGrokBuildSkills(
       seenNames.add(skill.name);
       result.push(skill);
     }
+  }
+  return result;
+}
+
+/** Discover skill config directories encountered while walking from a touched path to the workspace root. */
+export function discoverGrokBuildSkillsNearPath(
+  vfs: GrokBuildBundleFileSystem & { readdirSync(path: string): string[] },
+  touchedPath: string,
+  workspacePath = "/",
+): GrokBuildSkillInfo[] {
+  const normalize = (value: string): string => {
+    const parts: string[] = [];
+    for (const part of value.replaceAll("\\", "/").split("/")) {
+      if (!part || part === ".") continue;
+      if (part === "..") parts.pop(); else parts.push(part);
+    }
+    return `/${parts.join("/")}`;
+  };
+  const root = normalize(workspacePath);
+  let directory = normalize(touchedPath);
+  if (isFile(vfs, directory) || /\.[^/]+$/u.test(directory.split("/").at(-1) ?? "")) {
+    directory = directory.slice(0, directory.lastIndexOf("/")) || "/";
+  }
+  const result: GrokBuildSkillInfo[] = [];
+  const seen = new Set<string>();
+  while (directory === root || directory.startsWith(`${root === "/" ? "" : root}/`)) {
+    for (const configName of [".grok", ".agents", ".claude", ".cursor"]) {
+      const config = directory === "/" ? `/${configName}` : `${directory}/${configName}`;
+      const paths = [...walkSkillFiles(vfs, `${config}/skills`), ...commandFiles(vfs, `${config}/commands`)];
+      for (const path of paths) {
+        if (seen.has(path)) continue;
+        seen.add(path);
+        const skill = parseSkill(path, vfs.readFileSync(path, "utf8"), "local");
+        if (skill) result.push(skill);
+      }
+    }
+    if (directory === root || directory === "/") break;
+    directory = directory.slice(0, directory.lastIndexOf("/")) || "/";
   }
   return result;
 }

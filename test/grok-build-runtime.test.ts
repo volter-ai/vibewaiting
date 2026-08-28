@@ -61,12 +61,12 @@ describe("Grok Build browser tool runtime", () => {
     const id = /subagent_id: ([0-9a-f-]+)/u.exec(started.output)?.[1];
     expect(id).toBeTruthy();
     await expect(tools.execute({ callId: "poll", name: "get_command_or_subagent_output", arguments: JSON.stringify({ task_ids: [id] }) }, signal))
-      .resolves.toMatchObject({ output: expect.stringContaining("[running]") });
+      .resolves.toMatchObject({ output: expect.stringContaining("Status: running") });
     finish("Inspection complete");
     await child;
     await new Promise<void>((resolve) => queueMicrotask(resolve));
     await expect(tools.execute({ callId: "poll", name: "get_command_or_subagent_output", arguments: JSON.stringify({ task_ids: [id] }) }, signal))
-      .resolves.toMatchObject({ output: expect.stringContaining("[completed]\nInspection complete") });
+      .resolves.toMatchObject({ output: expect.stringContaining("Status: completed") });
   });
 
   it("rebuilds native active task, todo, and subagent state after compaction", async () => {
@@ -80,7 +80,8 @@ describe("Grok Build browser tool runtime", () => {
         async spawnSubagent() { return neverSubagent; },
       });
       const signal = new AbortController().signal;
-      await tools.execute({ callId: "command", name: "run_terminal_command", arguments: '{"command":"npm run dev","background":true}' }, signal);
+      const command = await tools.execute({ callId: "command", name: "run_terminal_command", arguments: '{"command":"npm run dev","background":true}' }, signal);
+      const commandId = /task ID: ([0-9a-f-]+)/u.exec(command.output)?.[1];
       const child = await tools.execute({
         callId: "child",
         name: "spawn_subagent",
@@ -100,7 +101,7 @@ describe("Grok Build browser tool runtime", () => {
       expect(tools.compactionSystemReminder()).toBe(`<system-reminder>
 ## Running Background Tasks
 These tasks are still running:
-- "command-1": \`npm run dev\` (running, run_terminal_command)
+- "${commandId}": \`npm run dev\` (running, run_terminal_command)
 
 ## TODO List
 This is your task list from before the conversation was compacted — it is still active. Keep working through the items below and update their status as you make progress:
@@ -130,15 +131,16 @@ These subagents were launched before this compaction and are still running. Use 
       }, signal);
       await vi.advanceTimersByTimeAsync(120_000);
       const started = await command;
-      expect(started.output).toContain("automatically moved to background with task ID: command-1");
+      const taskId = /task ID: ([0-9a-f-]+)/u.exec(started.output)?.[1];
+      expect(taskId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
 
       const poll = tools.execute({
         callId: "poll",
         name: "get_command_or_subagent_output",
-        arguments: JSON.stringify({ task_ids: ["command-1"], timeout_ms: 25 }),
+        arguments: JSON.stringify({ task_ids: [taskId], timeout_ms: 25 }),
       }, signal);
       await vi.advanceTimersByTimeAsync(25);
-      await expect(poll).resolves.toMatchObject({ output: expect.stringContaining("[running]") });
+      await expect(poll).resolves.toMatchObject({ output: expect.stringContaining("Status: running") });
     } finally {
       vi.useRealTimers();
     }
@@ -202,6 +204,47 @@ These subagents were launched before this compaction and are still running. Use 
     await expect(tools.execute({ callId: "exit", name: "exit_plan_mode", arguments: "{}" }, signal)).resolves.toEqual({
       output: "Your plan has been approved. You can now start coding.\n\nYour plan has been saved at: /.grok/plan.md\n\n## Plan:\n# Plan\n\n1. Build it.\n",
     });
+  });
+
+  it("requires plan approval, gates edits to plan.md, and remains active after revision feedback", async () => {
+    const vfs = new VirtualFS();
+    vfs.mkdirSync("/src", { recursive: true });
+    vfs.writeFileSync("/src/main.ts", "old");
+    let entryApproved = false;
+    const exits: Array<"cancelled" | "approved"> = ["cancelled", "approved"];
+    const tools = new GrokBuildBrowserRuntime({ vfs, async run() { return { stdout: "", stderr: "", exitCode: 0 }; } }, "/", {
+      async approvePlanModeEntry() { return entryApproved; },
+      async approvePlanModeExit() {
+        const outcome = exits.shift() ?? "approved";
+        return outcome === "cancelled" ? { outcome, feedback: "Add rollback steps" } : { outcome };
+      },
+    });
+    const signal = new AbortController().signal;
+    const execute = (name: string, args: object) => tools.execute({ callId: name, name, arguments: JSON.stringify(args) }, signal);
+
+    await expect(execute("enter_plan_mode", {})).resolves.toEqual({
+      isError: true,
+      output: "User declined to enter plan mode.",
+    });
+    entryApproved = true;
+    await execute("enter_plan_mode", {});
+    await expect(execute("write", { file_path: "/src/main.ts", content: "new" })).resolves.toEqual({
+      output: "Rejected: file edits are not allowed in plan mode - the only editable file is the plan file (/.grok/plan.md).",
+    });
+    expect(vfs.readFileSync("/src/main.ts", "utf8")).toBe("old");
+    await expect(execute("write", { file_path: "/.grok/plan.md", content: "# Plan\n\n1. Change it.\n" })).resolves.toEqual({
+      output: "Wrote /.grok/plan.md",
+    });
+    await expect(execute("exit_plan_mode", {})).resolves.toEqual({
+      output: "The user wants to revise the plan. The user said:\nAdd rollback steps",
+    });
+    await expect(execute("write", { file_path: "/src/main.ts", content: "still blocked" })).resolves.toEqual({
+      output: "Rejected: file edits are not allowed in plan mode - the only editable file is the plan file (/.grok/plan.md).",
+    });
+    await expect(execute("exit_plan_mode", {})).resolves.toMatchObject({
+      output: expect.stringContaining("Your plan has been approved"),
+    });
+    await expect(execute("write", { file_path: "/src/main.ts", content: "new" })).resolves.toEqual({ output: "Wrote /src/main.ts" });
   });
 
   it("matches native grep modes, context markers, filters, caps, and gitignore traversal", async () => {

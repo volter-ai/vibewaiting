@@ -11,6 +11,13 @@ Responses-stream, and conversation replay behavior into TypeScript.
 - License: Apache-2.0
 - License text: `LICENSES/Apache-2.0.txt`
 
+The browser experiment also bundles Mozilla PDF.js (`pdfjs-dist` 6.2.108,
+Apache-2.0) for in-browser document rendering and a WebAssembly workflow runtime
+built with Rhai 1.25.1 (MIT OR Apache-2.0), wasm-bindgen (MIT OR Apache-2.0),
+Serde (MIT OR Apache-2.0), and SHA-2 (MIT OR Apache-2.0). Their exact transitive
+dependency versions are recorded in `package-lock.json` and
+`experiments/browser-agent/rhai-wasm/Cargo.lock`.
+
 The Vibewaiting CLI release bundles the production packages below. Exact versions and
 dependency relationships are also recorded in the release CycloneDX SBOM. License
 files supplied by each package remain beside that package under `node_modules` in the

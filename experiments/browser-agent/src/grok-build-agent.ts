@@ -59,6 +59,8 @@ export interface GrokBuildToolCall {
 export interface GrokBuildToolResult {
   output: string;
   isError?: boolean;
+  /** Data URLs embedded as input_image parts of the function_call_output. */
+  images?: readonly string[];
 }
 
 export interface GrokBuildToolRuntime {
@@ -101,6 +103,8 @@ export interface GrokBuildSessionOptions {
   compactionTranscriptHint?: string;
   compactionSystemReminder?: string;
   getCompactionSystemReminder?: () => string | undefined;
+  getPostToolSystemReminder?: (call: GrokBuildToolCall, result: GrokBuildToolResult) => string | undefined;
+  drainSystemReminders?: () => readonly string[];
   persistCompactionSegment?: (segment: {
     index: number;
     location: string;
@@ -165,6 +169,12 @@ export class GrokBuildSession {
     };
   }
 
+  enqueueSystemReminder(reminder: string): void {
+    if (!reminder.trim()) return;
+    this.input.push({ type: "message", role: "user", content: reminder });
+    this.checkpoint();
+  }
+
   private checkpoint(): void {
     this.options.onCheckpoint?.(this.snapshot());
   }
@@ -189,6 +199,9 @@ export class GrokBuildSession {
       signal.throwIfAborted();
       this.options.onEvent?.({ type: "turn_start", turn });
       await this.maybeCompact(signal);
+      for (const reminder of this.options.drainSystemReminders?.() ?? []) {
+        this.input.push({ type: "message", role: "user", content: reminder });
+      }
       const response = await this.sample(signal);
       const replay = responseToConversationInput(response.response);
       this.input.push(...replay);
@@ -228,7 +241,14 @@ export class GrokBuildSession {
         } catch (error) {
           result = { output: error instanceof Error ? error.message : String(error), isError: true };
         }
-        this.input.push(functionCallOutput(call.callId, result.output));
+        this.input.push(functionCallOutput(call.callId, result.images?.length
+          ? [
+              { type: "input_text", text: result.output },
+              ...result.images.map((imageUrl) => ({ type: "input_image" as const, image_url: imageUrl, detail: "auto" as const })),
+            ]
+          : result.output));
+        const reminder = this.options.getPostToolSystemReminder?.(call, result);
+        if (reminder) this.input.push({ type: "message", role: "user", content: reminder });
         this.checkpoint();
         this.options.onEvent?.({ type: "tool_end", turn, call, result });
       });

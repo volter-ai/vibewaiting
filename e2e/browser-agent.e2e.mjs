@@ -45,3 +45,48 @@ test("replays native Grok Build through an isolated browser sandbox with working
   await game.locator("body").press("Space", { timeout: 1_000 });
   await expect(game.locator("body")).not.toHaveText(initialGameText || "", { timeout: 1_000 });
 });
+
+test("renders native structured question and plan approval interactions", async ({ page }) => {
+  await page.route("**/api/grok/bundle/archive", (route) => route.fulfill({
+    status: 401,
+    contentType: "application/json",
+    body: '{"error":{"message":"UI-only test"}}',
+  }));
+  await page.goto("http://127.0.0.1:4175/", { waitUntil: "domcontentloaded", timeout: 1_000 });
+
+  await page.evaluate(() => {
+    window.__grokQuestionResult = import("/src/grok-build-question-dialog.ts").then(({ askGrokUserQuestions }) => askGrokUserQuestions([
+      {
+        question: "Which checks?",
+        options: [
+          { label: "Tests (Recommended)", description: "Run the test suite", preview: "npm test" },
+          { label: "Types", description: "Run TypeScript" },
+        ],
+        multi_select: true,
+      },
+    ], new AbortController().signal, { timeoutMs: 30_000 }));
+  });
+  await expect(page.getByRole("heading", { name: "Grok has a question" })).toBeVisible();
+  await page.getByText("Tests (Recommended)", { exact: true }).click();
+  await expect(page.locator(".grok-question-preview")).toHaveText("npm test");
+  await page.getByText("Other", { exact: true }).click();
+  await page.getByLabel("Other answer for Which checks?").fill("Also lint");
+  await page.getByRole("button", { name: "Submit answers" }).click();
+  await expect.poll(() => page.evaluate(() => window.__grokQuestionResult)).toBe('User has answered your questions: "Which checks?"="Tests (Recommended), Other" selected preview:\nnpm test user notes: Also lint. You can now continue with the user\'s answers in mind.');
+
+  await page.evaluate(() => {
+    window.__grokPlanEntry = import("/src/grok-build-plan-dialog.ts").then(({ approveGrokPlanEntry }) => approveGrokPlanEntry(new AbortController().signal));
+  });
+  await expect(page.getByRole("heading", { name: "Enter plan mode?" })).toBeVisible();
+  await page.getByRole("button", { name: "Enter plan mode" }).click();
+  await expect.poll(() => page.evaluate(() => window.__grokPlanEntry)).toBe(true);
+
+  await page.evaluate(() => {
+    window.__grokPlanExit = import("/src/grok-build-plan-dialog.ts").then(({ approveGrokPlanExit }) => approveGrokPlanExit("# Plan\n\n1. Build it.", new AbortController().signal));
+  });
+  await expect(page.getByRole("heading", { name: "Review implementation plan" })).toBeVisible();
+  await expect(page.locator(".grok-plan-preview")).toContainText("Build it");
+  await page.getByLabel("Plan revision feedback").fill("Add rollback steps");
+  await page.getByRole("button", { name: "Request changes" }).click();
+  await expect.poll(() => page.evaluate(() => window.__grokPlanExit)).toEqual({ outcome: "cancelled", feedback: "Add rollback steps" });
+});

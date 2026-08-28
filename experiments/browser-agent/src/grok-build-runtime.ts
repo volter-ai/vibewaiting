@@ -9,6 +9,11 @@ import {
   type GrokScheduledTaskEvent,
 } from "./grok-build-scheduler.js";
 import { GrokBuildFileSystemTools } from "./grok-build-filesystem.js";
+import {
+  GrokBuildBackgroundTasks,
+  type BrowserBackgroundTask,
+} from "./grok-build-background-tasks.js";
+import { GrokBuildMonitorEventStream } from "./grok-build-monitor.js";
 
 interface RunResult {
   stdout: string;
@@ -18,7 +23,12 @@ interface RunResult {
 
 export interface BrowserContainer {
   vfs: VirtualFS;
-  run(command: string, options?: { cwd?: string; signal?: AbortSignal }): Promise<RunResult>;
+  run(command: string, options?: {
+    cwd?: string;
+    signal?: AbortSignal;
+    onStdout?: (data: string) => void;
+    onStderr?: (data: string) => void;
+  }): Promise<RunResult>;
 }
 
 export interface GrokBuildBrowserServices {
@@ -34,6 +44,12 @@ export interface GrokBuildBrowserServices {
   webFetch?(url: string, signal: AbortSignal): Promise<string>;
   runScheduledForeground?(prompt: string, signal: AbortSignal): Promise<string>;
   onScheduledTaskEvent?(event: GrokScheduledTaskEvent): void;
+  approvePlanModeEntry?(signal: AbortSignal): Promise<boolean>;
+  approvePlanModeExit?(plan: string, signal: AbortSignal): Promise<{
+    outcome: "approved" | "cancelled" | "abandoned";
+    feedback?: string;
+  }>;
+  onMonitorEvent?(reminder: string): void;
 }
 
 export type { GrokScheduledTaskEvent } from "./grok-build-scheduler.js";
@@ -42,19 +58,6 @@ export {
   GrokRecordedToolRuntime,
   type GrokConformanceDriverProfile,
 } from "./grok-build-conformance-runtime.js";
-
-interface BackgroundTask {
-  id: string;
-  controller: AbortController;
-  promise: Promise<string>;
-  status: "running" | "completed" | "failed" | "cancelled";
-  output: string;
-  kind: "command" | "monitor" | "subagent" | "workflow";
-  command?: string;
-  description?: string;
-  subagentType?: string;
-  startedAt: number;
-}
 
 interface Todo {
   id: string;
@@ -66,12 +69,12 @@ type JsonObject = Record<string, unknown>;
 
 /** Browser implementation of Grok Build's complete advertised function-tool surface. */
 export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
-  private readonly tasks = new Map<string, BackgroundTask>();
+  private readonly background: GrokBuildBackgroundTasks;
   private readonly todos = new Map<string, Todo>();
   private readonly files: GrokBuildFileSystemTools;
   private readonly scheduler?: GrokBuildBrowserScheduler;
-  private nextTask = 1;
   private planMode = false;
+  private readonly asynchronousReminders: string[] = [];
 
   constructor(
     private readonly container: BrowserContainer,
@@ -80,10 +83,12 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
     private readonly allowedTools?: ReadonlySet<string>,
   ) {
     this.files = new GrokBuildFileSystemTools(container.vfs, workspacePath);
+    this.background = new GrokBuildBackgroundTasks(container, workspacePath);
+    this.planMode = this.restorePlanMode();
     if (!allowedTools || allowedTools.has("scheduler_create")) {
       this.scheduler = new GrokBuildBrowserScheduler(container.vfs, workspacePath, {
         spawnSubagent: (input, signal, id) => this.createSubagentTask(input, signal, id),
-        getSubagent: (id) => this.tasks.get(id),
+        getSubagent: (id) => this.background.get(id),
         ...(services.runScheduledForeground ? { runForeground: services.runScheduledForeground } : {}),
         ...(services.onScheduledTaskEvent ? { onEvent: services.onScheduledTaskEvent } : {}),
       });
@@ -92,7 +97,7 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
 
   compactionSystemReminder(now = Date.now()): string | undefined {
     const sections: string[] = [];
-    const commands = [...this.tasks.values()].filter((task) => task.status === "running" && task.kind !== "subagent");
+    const commands = [...this.background.values()].filter((task) => task.status === "running" && task.kind !== "subagent");
     if (commands.length > 0) {
       sections.push(`## Running Background Tasks\nThese tasks are still running:\n${commands.map((task) =>
         `- "${task.id}": \`${task.command ?? ""}\` (running, ${task.kind === "monitor" ? "monitor" : "run_terminal_command"})`).join("\n")}`);
@@ -105,7 +110,7 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
         : completed ? `\n(${completed} completed)` : cancelled ? `\n(${cancelled} cancelled)` : "";
       sections.push(`## TODO List\nThis is your task list from before the conversation was compacted — it is still active. Keep working through the items below and update their status as you make progress:\n${activeTodos.map((todo) => `- [${todo.status}] ${todo.id}: ${todo.content}`).join("\n")}${trailer}`);
     }
-    const subagents = [...this.tasks.values()].filter((task) => task.status === "running" && task.kind === "subagent");
+    const subagents = [...this.background.values()].filter((task) => task.status === "running" && task.kind === "subagent");
     if (subagents.length > 0) {
       sections.push(`## Running Subagents\nThese subagents were launched before this compaction and are still running. Use \`get_command_or_subagent_output\` with the subagent_id to check their status or retrieve results. Use \`kill_command_or_subagent\` with the subagent_id to cancel a subagent.\n${subagents.map((task) => {
         const type = task.subagentType ? `, type: \`${task.subagentType}\`` : "";
@@ -114,6 +119,10 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
       }).join("\n")}`);
     }
     return sections.length > 0 ? `<system-reminder>\n${sections.join("\n\n")}\n</system-reminder>` : undefined;
+  }
+
+  drainSystemReminders(): string[] {
+    return this.asynchronousReminders.splice(0);
   }
 
   async execute(call: GrokBuildToolCall, signal: AbortSignal): Promise<GrokBuildToolResult> {
@@ -128,16 +137,18 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
     } catch (error) {
       return failure(`Invalid arguments for ${call.name}: ${message(error)}`);
     }
+    const planRejection = this.planModeEditRejection(call.name, input);
+    if (planRejection) return { output: planRejection };
 
     try {
       const output = await this.dispatch(call.name, input, signal);
-      return { output };
+      return typeof output === "string" ? { output } : output;
     } catch (error) {
       return failure(message(error));
     }
   }
 
-  private async dispatch(name: string, input: JsonObject, signal: AbortSignal): Promise<string> {
+  private async dispatch(name: string, input: JsonObject, signal: AbortSignal): Promise<string | GrokBuildToolResult> {
     switch (name) {
       case "run_terminal_command": return this.runTerminal(input, signal);
       case "read_file": return this.files.readFile(input);
@@ -157,8 +168,8 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
         : noMcpToolsConfigured();
       case "use_tool": return requiredService(this.services.useTool, "use_tool")(string(input.tool_name, "tool_name"), object(input.tool_input, "tool_input"), signal);
       case "workflow": return requiredService(this.services.runWorkflow, "workflow")(input, signal);
-      case "enter_plan_mode": return this.enterPlanMode();
-      case "exit_plan_mode": return this.exitPlanMode();
+      case "enter_plan_mode": return this.enterPlanMode(signal);
+      case "exit_plan_mode": return this.exitPlanMode(signal);
       case "ask_user_question": return requiredService(this.services.askUser, "ask_user_question")(array(input.questions, "questions"), signal, { planMode: this.planMode });
       case "web_fetch": return requiredService(this.services.webFetch, "web_fetch")(string(input.url, "url"), signal);
       case "image_gen": return requiredService(this.services.generateImage, "image_gen")(input, signal);
@@ -198,33 +209,8 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
     return `Command started in background with task ID: ${task.id}`;
   }
 
-  private createCommandTask(command: string, parentSignal: AbortSignal, kind: BackgroundTask["kind"]): BackgroundTask {
-    const id = `${kind === "monitor" ? "monitor" : "command"}-${this.nextTask++}`;
-    const controller = new AbortController();
-    const task: BackgroundTask = {
-      id,
-      controller,
-      status: "running",
-      output: "",
-      promise: Promise.resolve(""),
-      kind,
-      command,
-      startedAt: Date.now(),
-    };
-    task.promise = this.container.run(command, {
-      cwd: this.workspacePath,
-      signal: AbortSignal.any([parentSignal, controller.signal]),
-    }).then((result) => {
-      task.status = "completed";
-      task.output = formatCommandResult(result);
-      return task.output;
-    }, (error: unknown) => {
-      task.status = controller.signal.aborted ? "cancelled" : "failed";
-      task.output = message(error);
-      return task.output;
-    });
-    this.tasks.set(id, task);
-    return task;
+  private createCommandTask(command: string, parentSignal: AbortSignal, kind: "command" | "monitor"): BrowserBackgroundTask {
+    return this.background.createCommand(command, parentSignal, kind);
   }
 
   private async spawnSubagent(input: JsonObject, parentSignal: AbortSignal): Promise<string> {
@@ -238,49 +224,24 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
     return `${output}\n\nsubagent_id: ${id}`;
   }
 
-  private createSubagentTask(input: JsonObject, parentSignal: AbortSignal, id: string): BackgroundTask {
+  private createSubagentTask(input: JsonObject, parentSignal: AbortSignal, id: string): BrowserBackgroundTask {
     const service = requiredService(this.services.spawnSubagent, "spawn_subagent");
-    const controller = new AbortController();
-    const task: BackgroundTask = {
+    return this.background.createExternal({
       id,
-      controller,
-      status: "running",
-      output: "",
-      promise: Promise.resolve(""),
       kind: "subagent",
+      parentSignal,
+      promise: (childSignal) => service(input, childSignal, id),
       ...(typeof input.description === "string" ? { description: input.description } : {}),
       subagentType: typeof input.subagent_type === "string" ? input.subagent_type : "general-purpose",
-      startedAt: Date.now(),
-    };
-    task.promise = service(input, AbortSignal.any([parentSignal, controller.signal]), id).then((output) => {
-      task.status = "completed";
-      task.output = output;
-      return output;
-    }, (error: unknown) => {
-      task.status = controller.signal.aborted ? "cancelled" : "failed";
-      task.output = message(error);
-      return task.output;
     });
-    this.tasks.set(id, task);
-    return task;
   }
 
   private killTask(input: JsonObject): string {
-    const id = string(input.task_id, "task_id");
-    const task = this.tasks.get(id);
-    if (!task) throw new Error(`Unknown task ID: ${id}`);
-    task.controller.abort();
-    task.status = "cancelled";
-    return `Task ${id} cancelled.`;
+    return this.background.kill(string(input.task_id, "task_id"));
   }
 
   private async getTaskOutput(input: JsonObject): Promise<string> {
-    const ids = (Array.isArray(input.task_ids) ? input.task_ids : []).map((value) => String(value));
-    if (ids.length === 0) return [...this.tasks.values()].map(formatTask).join("\n\n") || "No background tasks.";
-    const tasks = ids.map((id) => this.tasks.get(id) ?? (() => { throw new Error(`Unknown task ID: ${id}`); })());
-    const timeoutMs = Math.min(Math.max(0, integer(input.timeout_ms, 0)), 600_000);
-    if (timeoutMs > 0) await settleBefore(Promise.all(tasks.map((task) => task.promise)), timeoutMs, new AbortController().signal);
-    return tasks.map(formatTask).join("\n\n");
+    return this.background.output(input);
   }
 
   private todoWrite(input: JsonObject): string {
@@ -297,7 +258,10 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
     return [...this.todos.values()].map((todo) => `- [${todo.status}] ${todo.id}: ${todo.content}`).join("\n");
   }
 
-  private enterPlanMode(): string {
+  private async enterPlanMode(signal: AbortSignal): Promise<string> {
+    if (this.services.approvePlanModeEntry && !await this.services.approvePlanModeEntry(signal)) {
+      throw new Error("User declined to enter plan mode.");
+    }
     const planFile = this.planFilePath();
     let status: "empty" | "non-empty";
     if (this.container.vfs.existsSync(planFile)) {
@@ -310,20 +274,62 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
       this.container.vfs.writeFileSync(planFile, "");
       status = "empty";
     }
-    this.planMode = true;
+    this.setPlanMode(true);
     const message = "You have entered plan mode. You should now focus on exploring the codebase and creating an implementation plan.";
     const taskHint = "\n     You can use the spawn_subagent tool with subagent_type=\"explore\" to parallelize codebase exploration without filling your context window.";
     return `${message}\n\nWrite your plan to ${planFile}. The file exists and is ${status}.\n\nIn plan mode, you should:\n1. Thoroughly explore the codebase to understand existing patterns${taskHint}\n2. Identify similar features, codebase architecture, and understand trade-offs\n3. Use ask_user_question if you need to clarify the approach\n4. Design a concrete implementation strategy\n5. Write your plan to the plan file above\n6. When ready, use exit_plan_mode to present your plan to the user.`;
   }
 
-  private exitPlanMode(): string {
+  private async exitPlanMode(signal: AbortSignal): Promise<string> {
     const planFile = this.planFilePath();
     const content = this.container.vfs.existsSync(planFile) && this.container.vfs.statSync(planFile).isFile()
       ? this.container.vfs.readFileSync(planFile, "utf8")
       : "";
-    this.planMode = false;
-    if (!content.trim()) return "Plan mode exit approved. No plan content was found — you can proceed.";
+    if (!content.trim()) {
+      this.setPlanMode(false);
+      return "Plan mode exit approved. No plan content was found — you can proceed.";
+    }
+    const approval = this.services.approvePlanModeExit
+      ? await this.services.approvePlanModeExit(content, signal)
+      : { outcome: "approved" as const };
+    if (approval.outcome === "abandoned") {
+      this.setPlanMode(false);
+      return "The user chose to abandon the plan entirely (via the Abandon option in the plan approval dialog). Plan mode has been disabled. Do not call exit_plan_mode again unless the user explicitly asks to re-enter plan mode.";
+    }
+    if (approval.outcome === "cancelled") {
+      const feedback = approval.feedback?.trim();
+      return feedback
+        ? `The user wants to revise the plan. The user said:\n${feedback}`
+        : "The user wants to revise the plan. Ask the user what changes they would like to make.";
+    }
+    this.setPlanMode(false);
     return `Your plan has been approved. You can now start coding.\n\nYour plan has been saved at: ${planFile}\n\n## Plan:\n${content}`;
+  }
+
+  private planModeEditRejection(name: string, input: JsonObject): string | undefined {
+    if (!this.planMode || (name !== "search_replace" && name !== "write")) return;
+    const target = typeof input.file_path === "string" ? this.resolve(input.file_path) : "";
+    const planFile = this.planFilePath();
+    if (target === planFile) return;
+    return `Rejected: file edits are not allowed in plan mode - the only editable file is the plan file (${planFile}).`;
+  }
+
+  private setPlanMode(active: boolean): void {
+    this.planMode = active;
+    const path = join(this.workspacePath, ".grok/plan-mode.json");
+    this.ensureParent(path);
+    this.container.vfs.writeFileSync(path, JSON.stringify({ version: 1, active }));
+  }
+
+  private restorePlanMode(): boolean {
+    const path = join(this.workspacePath, ".grok/plan-mode.json");
+    if (!this.container.vfs.existsSync(path) || !this.container.vfs.statSync(path).isFile()) return false;
+    try {
+      const state = JSON.parse(this.container.vfs.readFileSync(path, "utf8")) as { version?: unknown; active?: unknown };
+      return state.version === 1 && state.active === true;
+    } catch {
+      return false;
+    }
   }
 
   private planFilePath(): string {
@@ -331,8 +337,31 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
   }
 
   private monitor(input: JsonObject, signal: AbortSignal): string {
-    const task = this.createCommandTask(string(input.command, "command"), signal, "monitor");
-    return `Monitor started with task ID: ${task.id}`;
+    const command = string(input.command, "command");
+    const description = string(input.description, "description");
+    const persistent = boolean(input.persistent, false);
+    const requestedTimeout = input.timeout_ms === undefined || input.timeout_ms === null
+      ? 36_000_000
+      : integer(input.timeout_ms, 36_000_000);
+    if (!persistent && requestedTimeout > 36_000_000) {
+      throw new Error("persistent must be true when timeout_ms exceeds 36000000ms");
+    }
+    let stream: GrokBuildMonitorEventStream | undefined;
+    const emit = (reminder: string): void => {
+      this.asynchronousReminders.push(reminder);
+      this.services.onMonitorEvent?.(reminder);
+    };
+    const task = this.background.createCommand(command, signal, "monitor", (chunk, current) => {
+      stream ??= new GrokBuildMonitorEventStream(current.id, description, emit);
+      stream.push(chunk);
+    });
+    stream ??= new GrokBuildMonitorEventStream(task.id, description, emit);
+    void task.promise.finally(() => stream?.flush());
+    const timeoutMs = persistent ? 0 : requestedTimeout;
+    if (timeoutMs > 0) setTimeout(() => { if (task.status === "running") task.controller.abort(); }, timeoutMs);
+    return persistent
+      ? `Monitor started (task ${task.id}, persistent -- runs until kill_task or session end).\nYou will be notified on each event. Keep working -- do not poll or sleep.\nEvents may arrive while you are waiting for the user -- an event is not their reply.`
+      : `Monitor started (task ${task.id}, timeout ${timeoutMs}ms).\nYou will be notified on each event. Keep working -- do not poll or sleep.\nEvents may arrive while you are waiting for the user -- an event is not their reply.`;
   }
 
   private ensureParent(path: string): void {
@@ -349,10 +378,6 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
 function formatCommandResult(result: RunResult): string {
   const output = [result.stdout, result.stderr].filter(Boolean).join(result.stdout && result.stderr ? "\n" : "");
   return output || `Process exited with code ${result.exitCode}`;
-}
-
-function formatTask(task: BackgroundTask): string {
-  return `Task ${task.id} [${task.status}]${task.output ? `\n${task.output}` : ""}`;
 }
 
 function normalize(path: string): string {

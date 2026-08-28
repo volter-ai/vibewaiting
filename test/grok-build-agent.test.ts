@@ -111,6 +111,33 @@ describe("browser-native Grok Build session", () => {
     expect(conversation[3]).toEqual({ type: "message", role: "user", content: "<user_query>\nBuild Pong\n</user_query>" });
   });
 
+  it("injects a newly discovered skill reminder immediately after its tool result", async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    const responses = [
+      stream({ output: [{ type: "function_call", call_id: "read", name: "read_file", arguments: '{"target_file":"/src/App.tsx"}' }] }),
+      stream({ output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "Done" }] }] }, "Done"),
+    ];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return responses.shift() ?? (() => { throw new Error("unexpected request"); })();
+    }));
+    const session = new GrokBuildSession({
+      endpoint: "/api/grok/responses",
+      environment: { os: "Browser", shell: "/bin/sh", workspacePath: "/", today: "2026-08-27" },
+      runtime: { async execute() { return { output: "file" }; } },
+      enableSessionTitle: false,
+      getPostToolSystemReminder: () => "<system-reminder>new skill</system-reminder>",
+    });
+
+    await session.run("Inspect", new AbortController().signal);
+    const secondInput = requests[1]?.input as Array<Record<string, unknown>>;
+    expect(secondInput.slice(-2)).toEqual([
+      { type: "function_call_output", call_id: "read", output: "file" },
+      { type: "message", role: "user", content: "<system-reminder>new skill</system-reminder>" },
+    ]);
+    vi.unstubAllGlobals();
+  });
+
   it("uses a full agent-definition prompt when a child overrides the system prompt", () => {
     const conversation = createInitialConversation("Inspect auth", {
       systemPrompt: "You are the read-only explore child.",

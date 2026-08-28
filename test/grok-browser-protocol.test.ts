@@ -109,6 +109,20 @@ describe("browser Grok Build Responses protocol", () => {
     ]);
   });
 
+  it("embeds read_file images inside the function_call_output content list", () => {
+    expect(functionCallOutput("image-call", [
+      { type: "input_text", text: "Read image file: /frame.png" },
+      { type: "input_image", image_url: "data:image/png;base64,AAAA", detail: "auto" },
+    ])).toEqual({
+      type: "function_call_output",
+      call_id: "image-call",
+      output: [
+        { type: "input_text", text: "Read image file: /frame.png" },
+        { type: "input_image", image_url: "data:image/png;base64,AAAA", detail: "auto" },
+      ],
+    });
+  });
+
   it("parses split Responses SSE chunks and requires a completed response", async () => {
     const encoder = new TextEncoder();
     const stream = new ReadableStream<Uint8Array>({

@@ -5,3 +5,4 @@ test-results/
 .env
 .vibewaiting/
 test/fixtures/grok-conformance/*.jsonl
+experiments/browser-agent/rhai-wasm/target/

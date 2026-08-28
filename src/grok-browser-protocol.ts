@@ -284,7 +284,12 @@ export function responseToConversationInput(response: GrokCompletedResponse): Gr
   return replay;
 }
 
-export function functionCallOutput(callId: string, output: string): GrokInputItem {
+export type GrokFunctionCallOutput = string | Array<
+  | { type: "input_text"; text: string }
+  | { type: "input_image"; image_url: string; detail?: "auto" | "low" | "high" }
+>;
+
+export function functionCallOutput(callId: string, output: GrokFunctionCallOutput): GrokInputItem {
   return { type: "function_call_output", call_id: callId, output };
 }
 
