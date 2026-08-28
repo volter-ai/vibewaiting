@@ -11,6 +11,9 @@ The current parity baseline is Grok Build `1.0.5` (`5115b46bc909`) at open-sourc
 revision `9684fa3cdbf2995e30ea8b9b637f1db008f144fc`. Core file reads, edits, bounded
 directory walks, parallel dispatch, completion ordering, and same-file FIFO locks are
 translated from that revision rather than inferred from a generic agent harness.
+The parity ledger measures implementation completeness separately from traffic proof:
+`partial` is unfinished browser code, `source-ported` is completed source translation
+with a published proof boundary, and `exact` has strict native corpus evidence.
 
 Live browser sessions fetch the native model catalog and fetch remote settings twice
 (early resolution followed by the native re-apply), with the same bounded retries and
@@ -61,6 +64,13 @@ and approval URL, and polls until the subscription is connected. Tokens and refr
 tokens remain encrypted in the Worker session object and are never returned to the page.
 
 ## Native transport conformance
+
+The deterministic control corpus pins ten upstream source-file hashes. Verify the
+checked-out native source before running its equivalence tests:
+
+```sh
+npm run verify:grok-native-control -- /tmp/xai-grok-build-source
+```
 
 `scripts/grok-conformance-proxy.mjs` records native Grok Build HTTP exchanges and then
 acts as a fail-closed replay oracle for the browser port. It compares method, path,

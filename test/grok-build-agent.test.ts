@@ -239,13 +239,16 @@ describe("browser-native Grok Build session", () => {
 
   it("samples the native turn-summary side call after normal completion", async () => {
     const requests: Array<{ headers: Headers; body: Record<string, unknown> }> = [];
+    let completionBookkeepingFinished = false;
     const responses = [
       stream({ output: [] }),
       stream({ output: [{ type: "message", content: [{ type: "output_text", text: "Done" }] }] }, "Done"),
       stream({ output: [{ type: "message", content: [{ type: "output_text", text: "Game shipped" }] }] }, "Game shipped"),
     ];
     vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
-      requests.push({ headers: new Headers(init?.headers), body: JSON.parse(String(init?.body)) as Record<string, unknown> });
+      const headers = new Headers(init?.headers);
+      if (headers.get("x-browser-agent-request-kind") === "turn-summary") expect(completionBookkeepingFinished).toBe(true);
+      requests.push({ headers, body: JSON.parse(String(init?.body)) as Record<string, unknown> });
       const response = responses.shift();
       if (!response) throw new Error("unexpected request");
       return response;
@@ -256,6 +259,7 @@ describe("browser-native Grok Build session", () => {
       runtime: { async execute() { return { output: "unused" }; } },
       enableTurnSummary: true,
       strictSideCalls: true,
+      beforeTurnSummary: async () => { await Promise.resolve(); completionBookkeepingFinished = true; },
     });
     await expect(session.run("Build Pong", new AbortController().signal)).resolves.toMatchObject({ status: "complete" });
     expect(requests).toHaveLength(3);
@@ -406,12 +410,14 @@ describe("browser-native Grok Build session", () => {
       return response;
     }));
     const events: string[] = [];
+    const onCompaction = vi.fn();
     const session = new GrokBuildSession({
       endpoint: "/api/grok/responses",
       environment: { os: "Browser", shell: "/bin/sh", workspacePath: "/", today: "2026-08-27" },
       runtime: { async execute() { return { output: "unused" }; } },
       contextWindow: 100,
       autoCompactThresholdPercent: 1,
+      onCompaction,
       onEvent(event) { events.push(event.type); },
     });
     await expect(session.run("Keep building", new AbortController().signal)).resolves.toMatchObject({ text: "Continued" });
@@ -426,6 +432,7 @@ describe("browser-native Grok Build session", () => {
     expect(String(resumedInput.at(-1)?.content)).toContain("Full verbatim rollouts of previous segments");
     expect(resumedInput.some((item) => String(item.content).includes("Pick up the last task as if the break never happened."))).toBe(false);
     expect(events).toEqual(expect.arrayContaining(["compaction_start", "compaction_end"]));
+    expect(onCompaction).toHaveBeenCalledOnce();
     expect(session.snapshot()).toMatchObject({ compactionCount: 1, estimatedTokens: 130 });
     vi.unstubAllGlobals();
   });

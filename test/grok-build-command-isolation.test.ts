@@ -42,8 +42,8 @@ describe("AlmostNode command execution isolation", () => {
     const signal = new AbortController().signal;
     const firstStart = await runtime.execute(tool("first-call", "first"), signal);
     const secondStart = await runtime.execute(tool("second-call", "second"), signal);
-    const firstId = /task ID: ([0-9a-f-]+)/u.exec(firstStart.output)?.[1] ?? "";
-    const secondId = /task ID: ([0-9a-f-]+)/u.exec(secondStart.output)?.[1] ?? "";
+    const firstId = /<task-id>([0-9a-f-]+)<\/task-id>/u.exec(firstStart.output)?.[1] ?? "";
+    const secondId = /<task-id>([0-9a-f-]+)<\/task-id>/u.exec(secondStart.output)?.[1] ?? "";
 
     expect(started).toEqual(["first"]);
     controls.get("first")?.emit("first-only\n");
@@ -159,7 +159,7 @@ async function microtasks(): Promise<void> {
 }
 
 function tool(callId: string, command: string) {
-  return { callId, name: "run_terminal_command", arguments: JSON.stringify({ command, background: true }) };
+  return { callId, name: "run_terminal_command", arguments: JSON.stringify({ command, description: `Run ${command}`, background: true }) };
 }
 
 function outputTool(callId: string, taskId: string) {

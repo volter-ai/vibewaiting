@@ -120,6 +120,45 @@ describe("Grok Build rich browser file reads", () => {
     const result = await runtime.execute({ callId: "pdf", name: "read_file", arguments: '{"target_file":"/doc.pdf","format":"text"}' }, signal);
     expect(result.output).toContain("1→--- Page 1 ---\n2→Hello PDF");
   });
+
+  it("matches the pinned native text-read overflow and integer edge corpus", async () => {
+    const vfs = new VirtualFS();
+    vfs.writeFileSync("/window.txt", "a\nb\nc");
+    vfs.writeFileSync("/huge.json", "z".repeat(120_000));
+    const runtime = new GrokBuildBrowserRuntime({ vfs, async run() { return { stdout: "", stderr: "", exitCode: 0 }; } });
+    const read = (input: Record<string, unknown>) => runtime.execute({
+      callId: crypto.randomUUID(), name: "read_file", arguments: JSON.stringify(input),
+    }, signal);
+
+    await expect(read({ target_file: "/window.txt", offset: "2.0", limit: 2 })).resolves.toEqual({ output: "2→b\nc" });
+    await expect(read({ target_file: "/window.txt", offset: "1e0", limit: 1 })).resolves.toEqual({ output: "1→a" });
+    await expect(read({ target_file: "/window.txt", offset: " 2 " })).resolves.toMatchObject({
+      isError: true, output: 'expected number, got string " 2 "',
+    });
+    await expect(read({ target_file: "/window.txt", offset: "0x2" })).resolves.toMatchObject({
+      isError: true, output: 'expected number, got string "0x2"',
+    });
+    await expect(read({ target_file: "/window.txt", limit: -1 })).resolves.toMatchObject({
+      isError: true, output: "Expected a non-negative integer",
+    });
+    await expect(read({ target_file: "/huge.json" })).resolves.toEqual({
+      output: "File content (30001 tokens) exceeds maximum allowed tokens (25000 tokens).\nPlease use offset and limit parameters to read a shorter range, or use the 'grep' to search for specific content.\nNote: the requested read is a single very long line, so line-based offset/limit cannot narrow it further. Use the 'run_terminal_command' tool to extract the parts you need (e.g. `jq`, `python3`, or `cut -c`).",
+    });
+    await expect(read({ target_file: "" })).resolves.toEqual({ isError: true, output: "Error: / is a directory, not a file." });
+  });
+
+  it("matches native write create/overwrite/nested/empty-content behavior", async () => {
+    const vfs = new VirtualFS();
+    const runtime = new GrokBuildBrowserRuntime({ vfs, async run() { return { stdout: "", stderr: "", exitCode: 0 }; } });
+    const write = (input: Record<string, unknown>) => runtime.execute({
+      callId: crypto.randomUUID(), name: "write", arguments: JSON.stringify(input),
+    }, signal);
+
+    await expect(write({ file_path: "/nested/new.txt", content: "first\n" })).resolves.toEqual({ output: "The file /nested/new.txt has been created." });
+    await expect(write({ file_path: "/nested/new.txt", content: "" })).resolves.toEqual({ output: "Wrote file successfully to /nested/new.txt." });
+    expect(vfs.readFileSync("/nested/new.txt", "utf8")).toBe("");
+    await expect(write({ file_path: "/nested/new.txt" })).resolves.toMatchObject({ isError: true });
+  });
 });
 
 describe("Grok Build browser background task control", () => {
@@ -127,8 +166,8 @@ describe("Grok Build browser background task control", () => {
     const vfs = new VirtualFS();
     const full = "x".repeat(45_000);
     const runtime = new GrokBuildBrowserRuntime({ vfs, async run() { return { stdout: full, stderr: "", exitCode: 0 }; } });
-    const started = await runtime.execute({ callId: "start", name: "run_terminal_command", arguments: '{"command":"generate","background":true}' }, signal);
-    const id = /task ID: ([0-9a-f-]+)/u.exec(started.output)?.[1];
+    const started = await runtime.execute({ callId: "start", name: "run_terminal_command", arguments: '{"command":"generate","description":"Generate output","background":true}' }, signal);
+    const id = /<task-id>([0-9a-f-]+)<\/task-id>/u.exec(started.output)?.[1];
     expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
     await new Promise<void>((resolve) => queueMicrotask(resolve));
 
@@ -149,8 +188,8 @@ describe("Grok Build browser background task control", () => {
           return new Promise((resolve) => options?.signal?.addEventListener("abort", () => resolve({ stdout: "", stderr: "", exitCode: 130 }), { once: true }));
         },
       });
-      const started = await runtime.execute({ callId: "start", name: "run_terminal_command", arguments: '{"command":"watch","background":true}' }, signal);
-      const id = /task ID: ([0-9a-f-]+)/u.exec(started.output)?.[1] ?? "";
+      const started = await runtime.execute({ callId: "start", name: "run_terminal_command", arguments: '{"command":"watch","description":"Watch files","background":true}' }, signal);
+      const id = /<task-id>([0-9a-f-]+)<\/task-id>/u.exec(started.output)?.[1] ?? "";
       const multi = await runtime.execute({ callId: "multi", name: "get_command_or_subagent_output", arguments: JSON.stringify({ task_ids: [id, id, "missing"] }) }, signal);
       expect(multi.output.match(new RegExp(`--- Task ${id}`, "gu"))).toHaveLength(1);
       expect(multi.output).toContain("--- Task missing [not_found] ---");
@@ -174,16 +213,16 @@ describe("Grok Build browser background task control", () => {
         return new Promise((resolve) => { release = resolve; });
       },
     });
-    const started = await runtime.execute({ callId: "live-start", name: "run_terminal_command", arguments: '{"command":"stream","background":true}' }, signal);
-    const id = /task ID: ([0-9a-f-]+)/u.exec(started.output)?.[1] ?? "";
+    const started = await runtime.execute({ callId: "live-start", name: "run_terminal_command", arguments: '{"command":"stream","description":"Stream output","background":true}' }, signal);
+    const id = /<task-id>([0-9a-f-]+)<\/task-id>/u.exec(started.output)?.[1] ?? "";
     const live = await runtime.execute({ callId: "live-poll", name: "get_command_or_subagent_output", arguments: JSON.stringify({ task_ids: [id] }) }, signal);
     expect(live.output).toContain("partial output\n\nUse timeout_ms to wait for completion.");
     release?.({ stdout: "", stderr: "", exitCode: 0 });
     await new Promise<void>((resolve) => queueMicrotask(resolve));
 
     const emptyRuntime = new GrokBuildBrowserRuntime({ vfs: new VirtualFS(), async run() { return { stdout: "", stderr: "", exitCode: 0 }; } });
-    const emptyStarted = await emptyRuntime.execute({ callId: "empty-start", name: "run_terminal_command", arguments: '{"command":"true","background":true}' }, signal);
-    const emptyId = /task ID: ([0-9a-f-]+)/u.exec(emptyStarted.output)?.[1] ?? "";
+    const emptyStarted = await emptyRuntime.execute({ callId: "empty-start", name: "run_terminal_command", arguments: '{"command":"true","description":"Complete without output","background":true}' }, signal);
+    const emptyId = /<task-id>([0-9a-f-]+)<\/task-id>/u.exec(emptyStarted.output)?.[1] ?? "";
     await new Promise<void>((resolve) => queueMicrotask(resolve));
     const empty = await emptyRuntime.execute({ callId: "empty-poll", name: "get_command_or_subagent_output", arguments: JSON.stringify({ task_ids: [emptyId] }) }, signal);
     expect(empty.output).toContain("Status: completed");
@@ -200,8 +239,8 @@ describe("Grok Build browser background task control", () => {
           return new Promise((resolve) => options?.signal?.addEventListener("abort", () => resolve({ stdout: "", stderr: "", exitCode: 130 }), { once: true }));
         },
       });
-      const started = await runtime.execute({ callId: "wait-start", name: "run_terminal_command", arguments: '{"command":"forever","background":true}' }, signal);
-      const id = /task ID: ([0-9a-f-]+)/u.exec(started.output)?.[1] ?? "";
+      const started = await runtime.execute({ callId: "wait-start", name: "run_terminal_command", arguments: '{"command":"forever","description":"Keep running","background":true}' }, signal);
+      const id = /<task-id>([0-9a-f-]+)<\/task-id>/u.exec(started.output)?.[1] ?? "";
       const pending = runtime.execute({ callId: "wait", name: "get_command_or_subagent_output", arguments: JSON.stringify({ task_ids: [id], timeout_ms: 2_400_000 }) }, signal);
       await vi.advanceTimersByTimeAsync(600_000);
       const waited = await pending;
@@ -221,8 +260,8 @@ describe("Grok Build browser background task control", () => {
           return new Promise((resolve) => options?.signal?.addEventListener("abort", () => resolve({ stdout: "before timeout", stderr: "", exitCode: 0 }), { once: true }));
         },
       });
-      const started = await runtime.execute({ callId: "timeout-call", name: "run_terminal_command", arguments: '{"command":"watch","background":true,"timeout":10}' }, signal);
-      const id = /task ID: ([0-9a-f-]+)/u.exec(started.output)?.[1] ?? "";
+      const started = await runtime.execute({ callId: "timeout-call", name: "run_terminal_command", arguments: '{"command":"watch","description":"Watch briefly","background":true,"timeout":10}' }, signal);
+      const id = /<task-id>([0-9a-f-]+)<\/task-id>/u.exec(started.output)?.[1] ?? "";
       await vi.advanceTimersByTimeAsync(10);
       const output = await runtime.execute({ callId: "timeout-poll", name: "get_command_or_subagent_output", arguments: JSON.stringify({ task_id: id }) }, signal);
       expect(output.output).toContain("Status: timed_out");
@@ -238,14 +277,46 @@ describe("Grok Build browser background task control", () => {
       vfs: new VirtualFS(),
       async run() { return { stdout: "done", stderr: "", exitCode: 0 }; },
     });
-    const started = await runtime.execute({ callId: "wake-call", name: "run_terminal_command", arguments: '{"command":"build","background":true}' }, signal);
-    const id = /task ID: ([0-9a-f-]+)/u.exec(started.output)?.[1] ?? "";
+    const started = await runtime.execute({ callId: "wake-call", name: "run_terminal_command", arguments: '{"command":"build","description":"Build project","background":true}' }, signal);
+    const id = /<task-id>([0-9a-f-]+)<\/task-id>/u.exec(started.output)?.[1] ?? "";
     await new Promise<void>((resolve) => queueMicrotask(resolve));
     await new Promise<void>((resolve) => queueMicrotask(resolve));
     expect(runtime.drainSystemReminders()).toEqual([
       `Background task "${id}" completed (exit code: 0).\nCommand: build | Duration: 0.0s\nUse get_command_or_subagent_output("${id}") to see the full output.`,
     ]);
     expect(runtime.drainSystemReminders()).toEqual([]);
+  });
+
+  it("matches native task-id coercion, duplicate-key rejection, and UTF-8 preview boundaries", async () => {
+    const output = "💡".repeat(10_001);
+    const runtime = new GrokBuildBrowserRuntime({
+      vfs: new VirtualFS(),
+      async run() { return { stdout: output, stderr: "", exitCode: 0 }; },
+    });
+    const started = await runtime.execute({
+      callId: "unicode-output", name: "run_terminal_command",
+      arguments: '{"command":"unicode","description":"Produce Unicode output","background":true}',
+    }, signal);
+    const id = /<task-id>([0-9a-f-]+)<\/task-id>/u.exec(started.output)?.[1] ?? "";
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    const poll = await runtime.execute({
+      callId: "unicode-poll", name: "get_command_or_subagent_output",
+      arguments: JSON.stringify({ task_ids: [id] }),
+    }, signal);
+    expect(poll.output).toContain(`${"💡".repeat(500)}\n\n[Output truncated - 40004 bytes total. Use read_file on /tmp/grok-build-session/terminal/unicode-output.log for full content]`);
+    expect(poll.output).toContain("[truncated - use read_file on output_file for full content]");
+
+    await expect(runtime.execute({
+      callId: "numeric-id", name: "get_command_or_subagent_output", arguments: '{"task_id":228}',
+    }, signal)).resolves.toEqual({ output: `Task 228 not found. Known task IDs: [${id}]` });
+    await expect(runtime.execute({
+      callId: "duplicate-id", name: "get_command_or_subagent_output", arguments: '{"task_ids":["a"],"task_id":"b"}',
+    }, signal)).resolves.toEqual({ isError: true, output: "duplicate field `task_ids`" });
+    await expect(runtime.execute({
+      callId: "too-many", name: "get_command_or_subagent_output",
+      arguments: JSON.stringify({ task_ids: Array.from({ length: 21 }, (_, index) => String(index)) }),
+    }, signal)).resolves.toEqual({ isError: true, output: "task_ids exceeds maximum of 20 entries." });
   });
 });
 

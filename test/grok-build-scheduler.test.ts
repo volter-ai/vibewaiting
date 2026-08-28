@@ -108,6 +108,57 @@ describe("Grok Build browser scheduler", () => {
     }
   });
 
+  it("advances cadence once when child dispatch fails and emits native foreground-shaped fire", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-27T20:00:00.000Z"));
+    try {
+      const events: Array<Record<string, unknown>> = [];
+      let attempts = 0;
+      const scheduler = new GrokBuildBrowserScheduler(new VirtualFS(), "/", {
+        spawnSubagent() { attempts += 1; throw new Error("dispatch unavailable"); },
+        onEvent(event) { events.push(event); },
+      });
+      const { id } = JSON.parse(scheduler.create({ interval: "1m", prompt: "Check CI", fire_immediately: true }));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(attempts).toBe(1);
+      expect(events.at(-1)).toMatchObject({ type: "fired", taskId: id, nextFireAt: "2026-08-27T20:01:00+00:00" });
+      expect(events.at(-1)).not.toHaveProperty("subagentId");
+      expect(JSON.parse(scheduler.list()).tasks[0].nextFireAt).toBe("2026-08-27T20:01:00+00:00");
+      scheduler.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("never carries failed-child output into a fresh native loop chain", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-27T20:00:00.000Z"));
+    try {
+      const calls: JsonObject[] = [];
+      const handles = new Map<string, ScheduledSubagentHandle>();
+      const scheduler = new GrokBuildBrowserScheduler(new VirtualFS(), "/", {
+        spawnSubagent(input, _signal, id) {
+          calls.push(input);
+          const handle = { status: "failed", output: "failed child details" } as const;
+          handles.set(id, handle);
+          return handle;
+        },
+        getSubagent: (id) => handles.get(id),
+      });
+      scheduler.create({ interval: "1m", prompt: "Check CI", fire_immediately: true });
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(calls).toHaveLength(2);
+      expect(String(calls[1]?.prompt)).not.toContain("failed child details");
+      expect(calls[1]).not.toHaveProperty("resume_from");
+      scheduler.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("rejects unsupported one-shot and invalid update requests", () => {
     const scheduler = new GrokBuildBrowserScheduler(new VirtualFS(), "/");
     expect(() => scheduler.create({ interval: "1m", prompt: "once", recurring: false })).toThrow("one-shot tasks are not supported");

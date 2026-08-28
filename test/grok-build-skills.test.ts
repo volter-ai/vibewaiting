@@ -44,6 +44,15 @@ description: >
   Absolute path: /.grok/bundled/skills/build-with-ai/SKILL.md`);
   });
 
+  it("caps multibyte descriptions and when-to-use by native character count", () => {
+    const vfs = new VirtualFS();
+    const long = "界".repeat(1_030);
+    skill(vfs, "/.grok/skills/unicode/SKILL.md", `---\nname: unicode\ndescription: ${long}\nwhen-to-use: ${long}\n---\n`);
+    const parsed = discoverGrokBuildSkills(vfs)[0];
+    expect([...parsed!.description]).toHaveLength(1_024);
+    expect([...parsed!.whenToUse!]).toHaveLength(1_024);
+  });
+
   it("derives a body description but omits model-disabled skills", () => {
     const vfs = new VirtualFS();
     skill(vfs, "/.agents/skills/browser/SKILL.md", "---\nname: browser\n---\n# Browser\n\nLaunch a browser for testing.\n");

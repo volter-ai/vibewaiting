@@ -43,6 +43,7 @@ import {
 } from "./grok-build-bootstrap.js";
 import { syncGrokBuildBundle } from "./grok-build-bundle.js";
 import {
+  createGrokBuildSkillReminder,
   discoverGrokBuildSkills,
   formatGrokBuildSkillListing,
 } from "./grok-build-skills.js";
@@ -177,6 +178,11 @@ function startBundleSync(): Promise<void> {
   bundleSync = syncGrokBuildBundle(container.vfs)
     .then((result) => {
       if (result.updated) {
+        if (rootSkillManager) {
+          rootSkillManager.updateStartupBaseline(discoverGrokBuildSkills(container.vfs));
+          const reminder = createGrokBuildSkillReminder(rootSkillManager.startupSkills());
+          if (reminder) agentSession?.enqueueSystemReminder(reminder);
+        }
         scheduleProjectSave?.();
         eventItem("", "Grok bundle updated", `${result.source} · ${result.manifest?.version ?? "unknown version"}`);
       }
@@ -486,10 +492,13 @@ async function runAgent(mode: "send-now" | "queue" = "send-now"): Promise<void> 
         ...(!profile ? { trace: { responsesEndpoint: relayEndpoint.value.trim() || "/api/grok/responses", tracer: rootOtlpTracer } } : {}),
       });
       telemetryLifecycle.start();
-      const browserRuntime = new GrokBuildBrowserRuntime(container, "/", browserServices);
-      rootBrowserRuntime = browserRuntime;
       const skillManager = new GrokBuildSkillManager(container.vfs, "/");
       rootSkillManager = skillManager;
+      const browserRuntime = new GrokBuildBrowserRuntime(container, "/", {
+        ...browserServices,
+        suggestSkillPath: (path) => skillManager.suggestSkillPath(path),
+      });
+      rootBrowserRuntime = browserRuntime;
       const startupSkillReminder = startupExtensionReminder(skillManager);
       conformanceRuntime = profile?.initialFiles?.length || profile?.fixture === "three-pong-starter-v1"
         ? new GrokConformanceToolRuntime(browserRuntime, profile.toolResults, profile.nativeWorkspacePath, "/")
@@ -528,6 +537,7 @@ async function runAgent(mode: "send-now" | "queue" = "send-now"): Promise<void> 
         ...(profile?.compactionTranscriptHint ? { compactionTranscriptHint: profile.compactionTranscriptHint } : {}),
         ...(profile?.compactionSystemReminder ? { compactionSystemReminder: profile.compactionSystemReminder } : {}),
         ...(!profile ? { getCompactionSystemReminder: () => currentCompactionReminder(browserRuntime) } : {}),
+        ...(!profile ? { onCompaction: () => skillManager.onCompaction() } : {}),
         ...(!profile ? { getPostToolSystemReminder: (call, result) => skillManager.afterToolCall(call, result) } : {}),
         ...(!profile ? { drainSystemReminders: () => [
           ...browserRuntime.drainSystemReminders(),
@@ -554,6 +564,7 @@ async function runAgent(mode: "send-now" | "queue" = "send-now"): Promise<void> 
         },
         ...(profile?.reasoningEffort ? { reasoningEffort: profile.reasoningEffort } : {}),
         enableTurnSummary: profile ? (profile.turnSummaryRequests ?? 0) > 0 : true,
+        beforeTurnSummary: () => telemetryLifecycle?.flush(),
         strictSideCalls: Boolean(profile),
         onEvent: eventHandler,
         ...(!profile && restoredAgentSession ? { restore: restoredAgentSession } : {}),

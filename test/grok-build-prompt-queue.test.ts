@@ -41,6 +41,9 @@ describe("Grok Build browser prompt queue source port", () => {
     expect(result).toContain("é".repeat(12_500));
     expect(result).not.toContain("é".repeat(12_501));
     expect(result).toContain("... [truncated]");
+    const crossingScalar = formatGrokBuildInterjection("€".repeat(10_000));
+    expect(crossingScalar).toContain("€".repeat(8_334));
+    expect(crossingScalar).not.toContain("€".repeat(8_335));
   });
 
   it("drains FIFO, sanitizes, preserves attachments, and never merges entries", () => {

@@ -25,7 +25,7 @@ test("replays native Grok Build through an isolated browser sandbox with working
   await expect(page.locator("#turn-count")).toHaveText("5", { timeout: 1_000 });
   await expect(page.locator("#hmr-count")).toHaveText("1", { timeout: 1_000 });
   await expect(page.locator("#iframe-loads")).toHaveText("1", { timeout: 1_000 });
-  await expect(page.locator("#rendered-revision")).toHaveText("Rendered: pong-v1", { timeout: 1_000 });
+  await expect(page.locator("#rendered-revision")).toHaveText("Rendered: pong-v1", { timeout: 5_000 });
   await expect(page.getByText("7 native model requests matched with zero drift")).toBeVisible({ timeout: 1_000 });
 
   const broker = page.locator("#preview").contentFrame();

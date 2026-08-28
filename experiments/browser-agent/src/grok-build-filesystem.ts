@@ -38,7 +38,7 @@ export class GrokBuildFileSystemTools {
   constructor(private readonly vfs: VirtualFS, private readonly workspacePath = "/") {}
 
   async readFile(input: FileToolInput): Promise<GrokBuildFileReadResult> {
-    const path = this.resolve(requiredString(input.target_file, "target_file"));
+    const path = this.resolve(requiredString(input.target_file, "target_file", true));
     if (!this.vfs.existsSync(path)) throw new Error(`Error: ${path} does not exist.`);
     if (this.vfs.statSync(path).isDirectory()) throw new Error(`Error: ${path} is a directory, not a file.`);
     const bytes = bytesOf(this.vfs.readFileSync(path));
@@ -54,7 +54,7 @@ export class GrokBuildFileSystemTools {
     const requestedOffset = input.offset === undefined || input.offset === null ? undefined : lenientSignedInteger(input.offset);
     const offset = skillMarkdown ? undefined : requestedOffset;
     const limit = skillMarkdown ? Number.MAX_SAFE_INTEGER : Math.min(
-      input.limit === undefined ? Number.MAX_SAFE_INTEGER : Math.max(0, integer(input.limit, 0)),
+      input.limit === undefined ? Number.MAX_SAFE_INTEGER : unsignedInteger(input.limit),
       1_000,
     );
     const startLine = resolveReadStartLine(content, offset);
@@ -199,7 +199,7 @@ export class GrokBuildFileSystemTools {
   }
 
   write(input: FileToolInput): string {
-    const path = this.resolve(requiredString(input.file_path, "file_path"));
+    const path = this.resolve(requiredString(input.file_path, "file_path", true));
     const existed = this.vfs.existsSync(path);
     const parent = path.slice(0, path.lastIndexOf("/")) || "/";
     this.vfs.mkdirSync(parent, { recursive: true });
@@ -484,6 +484,11 @@ function requiredString(value: unknown, name: string, allowEmpty = false): strin
 function integer(value: unknown, fallback: number): number {
   if (value === undefined || value === null) return fallback;
   if (!Number.isSafeInteger(value)) throw new Error("Expected an integer");
+  return value as number;
+}
+
+function unsignedInteger(value: unknown): number {
+  if (!Number.isSafeInteger(value) || Number(value) < 0) throw new Error("Expected a non-negative integer");
   return value as number;
 }
 

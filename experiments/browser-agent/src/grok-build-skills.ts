@@ -13,7 +13,7 @@ export type GrokBuildSkillFileSystem = GrokBuildBundleFileSystem & {
 };
 
 const MAX_NAME_BYTES = 64;
-const MAX_DESCRIPTION_BYTES = 1024;
+const MAX_DESCRIPTION_LENGTH = 1024;
 const MAX_BODY_PEEK_BYTES = 2048;
 const MAX_SKILL_WALK_DEPTH = 5;
 const MAX_LISTING_COMBINED_BYTES = 400;
@@ -48,6 +48,8 @@ export interface GrokBuildSkillDiscoveryOptions {
   gitRootPath?: string;
   /** Native `[skills].paths`: a direct SKILL.md file or recursively walked directory. */
   paths?: readonly string[];
+  /** Forked-worktree display prefix; runtime reads keep using workingDirectory. */
+  displayWorkingDirectory?: string;
 }
 
 function utf8Length(value: string): number {
@@ -69,6 +71,10 @@ function truncateUtf8(value: string, maximum: number): string {
     bytes += size;
   }
   return `${output}${marker}`;
+}
+
+function capCharacters(value: string, maximum: number): string {
+  return [...value].slice(0, maximum).join("");
 }
 
 function normalizeSkillName(value: string): string {
@@ -222,11 +228,11 @@ function bodyDescription(body: string, name: string): string {
     const trimmed = block.trim();
     if (!trimmed || /^(?:[-*+] |\d+\. |>|```|~~~|\|)/u.test(trimmed) || /^#{1,6}\s/u.test(trimmed)) continue;
     const description = stripInlineMarkdown(trimmed.replace(/\n/gu, " "));
-    if (description) return truncateUtf8(description, MAX_DESCRIPTION_BYTES);
+    if (description) return capCharacters(description, MAX_DESCRIPTION_LENGTH);
   }
   for (const line of peek.split(/\r?\n/u)) {
     const heading = /^#{1,6}\s+(.+)$/u.exec(line.trim());
-    if (heading) return truncateUtf8(stripInlineMarkdown(heading[1]!), MAX_DESCRIPTION_BYTES);
+    if (heading) return capCharacters(stripInlineMarkdown(heading[1]!), MAX_DESCRIPTION_LENGTH);
   }
   return name;
 }
@@ -240,7 +246,7 @@ function parseSkill(path: string, content: string, scope: GrokBuildSkillInfo["sc
   const name = candidates.map(normalizeSkillName).find(validSkillName);
   if (!name) return;
   const description = document.frontmatter?.description?.trim()
-    ? truncateUtf8(document.frontmatter.description.trim(), MAX_DESCRIPTION_BYTES)
+    ? capCharacters(document.frontmatter.description.trim(), MAX_DESCRIPTION_LENGTH)
     : bodyDescription(document.body, name);
   const whenToUse = document.frontmatter?.["when-to-use"] ?? document.frontmatter?.when_to_use;
   const disabled = document.frontmatter?.["disable-model-invocation"] === "true";
@@ -249,7 +255,7 @@ function parseSkill(path: string, content: string, scope: GrokBuildSkillInfo["sc
   return {
     name,
     description,
-    ...(whenToUse?.trim() ? { whenToUse: truncateUtf8(whenToUse.trim(), MAX_DESCRIPTION_BYTES) } : {}),
+    ...(whenToUse?.trim() ? { whenToUse: capCharacters(whenToUse.trim(), MAX_DESCRIPTION_LENGTH) } : {}),
     path,
     scope,
     disableModelInvocation: disabled,

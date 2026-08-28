@@ -90,8 +90,8 @@ export class GrokBuildBrowserScheduler {
   create(input: JsonObject): string {
     if (this.pendingRemoval) throw new Error(`scheduler removal for ${this.pendingRemoval.taskId} is pending`);
     const existingId = typeof input.task_id === "string" ? input.task_id : undefined;
-    const existing = existingId ? this.tasks.get(existingId) : undefined;
-    if (existingId && !existing) {
+    const existing = existingId !== undefined ? this.tasks.get(existingId) : undefined;
+    if (existingId !== undefined && !existing) {
       throw new Error(`no scheduled task with id ${existingId}; call scheduler_list to see active task ids`);
     }
     const intervalSecs = typeof input.interval === "string" ? parseInterval(input.interval) : existing?.intervalSecs;
@@ -134,7 +134,7 @@ export class GrokBuildBrowserScheduler {
   }
 
   async delete(input: JsonObject): Promise<string> {
-    const id = requiredString(input.id, "id");
+    const id = requiredString(input.id, "id", true);
     if (this.pendingRemoval?.taskId === id) {
       if (this.pendingRemovalAttempt) {
         await this.pendingRemovalAttempt;
@@ -326,7 +326,6 @@ export class GrokBuildBrowserScheduler {
           this.emitCreated(task, false);
           continue;
         }
-        const previousLastFiredAt = task.lastFiredAt;
         task.lastFiredAt = now;
         const humanSchedule = intervalToHuman(task.intervalSecs);
         const next = rfc3339(nextFireAt(task));
@@ -337,7 +336,7 @@ export class GrokBuildBrowserScheduler {
           subagentId = uuidV7();
           const previous = task.lastSubagentId ? this.hooks.getSubagent?.(task.lastSubagentId) : undefined;
           const restart = task.chainResetPending || task.iterationsSinceFresh >= LOOP_FRESH_CHAIN_EVERY || previous?.status !== "completed";
-          const priorSummary = restart && previous?.output ? truncateChars(previous.output, 600) : undefined;
+          const priorSummary = restart && previous?.status === "completed" && previous.output ? truncateChars(previous.output, 600) : undefined;
           try {
             this.hooks.spawnSubagent({
               prompt: formatLoopIterationPrompt(task, humanSchedule, priorSummary),
@@ -350,14 +349,15 @@ export class GrokBuildBrowserScheduler {
               ...(restart ? {} : { resume_from: task.lastSubagentId }),
             }, this.controller.signal, subagentId);
           } catch {
-            if (previousLastFiredAt === undefined) delete task.lastFiredAt;
-            else task.lastFiredAt = previousLastFiredAt;
-            this.persist();
-            continue;
+            // Native treats a failed spawn-channel send as a foreground fire:
+            // cadence remains advanced and a fired notification has no child.
+            subagentId = undefined;
           }
-          task.lastSubagentId = subagentId;
-          task.iterationsSinceFresh = restart ? 1 : task.iterationsSinceFresh + 1;
-          task.chainResetPending = false;
+          if (subagentId) {
+            task.lastSubagentId = subagentId;
+            task.iterationsSinceFresh = restart ? 1 : task.iterationsSinceFresh + 1;
+            task.chainResetPending = false;
+          }
         }
         this.persist();
         this.revision += 1;
@@ -491,8 +491,8 @@ function formatLoopIterationPrompt(task: ScheduledTask, humanSchedule: string, p
   return `<system-reminder>\nScheduled task ${task.id} (${humanSchedule}). Earlier iterations, if any, appear above.\nRun the task below. End with a short status: what changed or needs attention. The status is relayed to the main agent.\n${prior}</system-reminder>\n\n${task.prompt}`;
 }
 
-function requiredString(value: unknown, name: string): string {
-  if (typeof value !== "string" || !value) throw new Error(`${name} must be a non-empty string`);
+function requiredString(value: unknown, name: string, allowEmpty = false): string {
+  if (typeof value !== "string" || (!allowEmpty && !value)) throw new Error(`${name} must be a${allowEmpty ? "" : " non-empty"} string`);
   return value;
 }
 

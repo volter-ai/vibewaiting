@@ -10,11 +10,22 @@ import {
   validateGrokBuildMcpHttpConfig,
   waitForMcpReconnect,
 } from "./grok-build-mcp-transport-utils.js";
+import {
+  asMcpObject as asObject,
+  isMcpObject as isObject,
+  matchesMcpMessageEvent as matchesMessageEvent,
+  mcpResponseContainsId as responseContainsId,
+  parseMcpJson as parseJson,
+  parseMcpTool as parseTool,
+  toJsonRpcResponse,
+  type JsonRpcResponse,
+  type McpCallToolResult,
+  type McpJson,
+  type McpJsonObject,
+  type McpToolDescription,
+} from "./grok-build-mcp-wire.js";
 
-/** JSON values accepted by the Model Context Protocol wire format. */
-export type McpJson = null | boolean | number | string | McpJson[] | { [key: string]: McpJson };
-
-export type McpJsonObject = { [key: string]: McpJson };
+export type { McpCallToolResult, McpJson, McpJsonObject, McpToolDescription } from "./grok-build-mcp-wire.js";
 
 export interface GrokBuildMcpHttpConfig {
   name: string;
@@ -32,33 +43,6 @@ export interface GrokBuildMcpHttpConfig {
   enableEventStream?: boolean;
 }
 
-export interface McpToolDescription {
-  name: string;
-  description?: string;
-  inputSchema?: McpJsonObject;
-  _meta?: McpJsonObject;
-}
-
-export interface McpCallToolResult {
-  content?: McpJson[];
-  isError?: boolean;
-  is_error?: boolean;
-  structuredContent?: McpJson;
-}
-
-interface JsonRpcSuccess {
-  jsonrpc: "2.0";
-  id: string | number;
-  result: McpJson;
-}
-
-interface JsonRpcFailure {
-  jsonrpc: "2.0";
-  id: string | number | null;
-  error: { code: number; message: string; data?: McpJson };
-}
-
-type JsonRpcResponse = JsonRpcSuccess | JsonRpcFailure;
 
 const MCP_PROTOCOL_VERSION = "2025-11-25";
 const DEFAULT_STARTUP_TIMEOUT_MS = 30_000;
@@ -90,7 +74,11 @@ export class McpHttpError extends Error {
  * `Mcp-Session-Id`, sends `notifications/initialized`, and paginates tools/list.
  */
 export class GrokBuildMcpHttpClient {
-  private nextRequestId = 1;
+  // rmcp 2.1.0's AtomicU32 providers both begin at zero. The initialize
+  // request consumes request id 0, while the first post-handshake request
+  // gets request id 1 and progress token 0.
+  private nextRequestId = 0;
+  private nextProgressToken = 0;
   private sessionId: string | undefined;
   private negotiatedProtocolVersion = MCP_PROTOCOL_VERSION;
   private initialized = false;
@@ -128,6 +116,8 @@ export class GrokBuildMcpHttpClient {
     this.sessionId = undefined;
     this.initialized = false;
     this.negotiatedProtocolVersion = MCP_PROTOCOL_VERSION;
+    this.nextRequestId = 0;
+    this.nextProgressToken = 0;
   }
 
   async initialize(signal: AbortSignal): Promise<{ instructions?: string }> {
@@ -231,8 +221,17 @@ export class GrokBuildMcpHttpClient {
     onAuthRetry?: () => void,
   ): Promise<McpJson> {
     const id = this.nextRequestId++;
+    const wireParams = method === "initialize"
+      ? params
+      : {
+          _meta: {
+            ...(isObject(params._meta) ? params._meta : {}),
+            progressToken: this.nextProgressToken++,
+          },
+          ...Object.fromEntries(Object.entries(params).filter(([key]) => key !== "_meta")),
+        } as McpJsonObject;
     const responses = await this.post(
-      { jsonrpc: "2.0", id, method, params },
+      { jsonrpc: "2.0", id, method, params: wireParams },
       id,
       signal,
       timeoutMs,
@@ -452,47 +451,4 @@ export class GrokBuildMcpHttpClient {
       await waitForMcpReconnect(serverRetryMs ?? (failures ? exponential : 1_000), signal);
     }
   }
-}
-
-function parseTool(value: McpJson, server: string): McpToolDescription {
-  const tool = asObject(value, `tool from '${server}'`);
-  if (typeof tool.name !== "string" || !tool.name) throw new Error(`MCP server '${server}' returned a tool without a name.`);
-  const parsed: McpToolDescription = { name: tool.name };
-  if (typeof tool.description === "string") parsed.description = tool.description;
-  if (isObject(tool.inputSchema)) parsed.inputSchema = tool.inputSchema;
-  if (isObject(tool._meta)) parsed._meta = tool._meta;
-  return parsed;
-}
-
-function parseJson(text: string, source: string): McpJson {
-  try {
-    return JSON.parse(text) as McpJson;
-  } catch (cause) {
-    throw new Error(`Invalid JSON from ${source}: ${cause instanceof Error ? cause.message : String(cause)}`);
-  }
-}
-
-function toJsonRpcResponse(value: McpJson): JsonRpcResponse | undefined {
-  if (!isObject(value) || value.jsonrpc !== "2.0" || !(typeof value.id === "number" || typeof value.id === "string" || value.id === null)) return undefined;
-  if (!("result" in value) && !(isObject(value.error) && typeof value.error.code === "number" && typeof value.error.message === "string")) return undefined;
-  return value as unknown as JsonRpcResponse;
-}
-
-function asObject(value: McpJson, label: string): McpJsonObject {
-  if (!isObject(value)) throw new Error(`${label} must be a JSON object.`);
-  return value;
-}
-
-function isObject(value: McpJson | undefined): value is McpJsonObject {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function matchesMessageEvent(event: string | undefined): boolean {
-  return event === undefined || event === "" || event === "message";
-}
-
-function responseContainsId(value: McpJson, id: number): boolean {
-  return Array.isArray(value)
-    ? value.some((item) => isObject(item) && item.id === id)
-    : isObject(value) && value.id === id;
 }

@@ -11,10 +11,12 @@ import {
 import { GrokBuildFileSystemTools } from "./grok-build-filesystem.js";
 import {
   GrokBuildBackgroundTasks,
+  formatGrokBackgroundTaskStarted,
   type BrowserBackgroundTask,
 } from "./grok-build-background-tasks.js";
-import { GrokBuildMonitorEventStream } from "./grok-build-monitor.js";
+import { formatGrokMonitorEvents, GrokBuildMonitorEventStream } from "./grok-build-monitor.js";
 import { tryBrowserNodeCheck } from "./browser-node-check.js";
+import { parseGrokLenientU64, selfMatchingPkillError } from "./grok-build-command-input.js";
 import { installBrowserCommandIsolation } from "./grok-build-command-isolation.js";
 
 interface RunResult {
@@ -52,6 +54,7 @@ export interface GrokBuildBrowserServices {
     feedback?: string;
   }>;
   onMonitorEvent?(reminder: string): void;
+  suggestSkillPath?(requestedPath: string): string | undefined;
 }
 
 export type { GrokScheduledTaskEvent } from "./grok-build-scheduler.js";
@@ -130,7 +133,21 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
   }
 
   drainSystemReminders(): string[] {
-    return this.asynchronousReminders.splice(0);
+    const pending = this.asynchronousReminders.splice(0);
+    const monitorEvents = pending.filter((entry) => entry.startsWith('<monitor-event description="'));
+    if (monitorEvents.length === 0) return pending;
+    const formatted = formatGrokMonitorEvents(monitorEvents);
+    let inserted = false;
+    const drained: string[] = [];
+    for (const entry of pending) {
+      if (entry.startsWith('<monitor-event description="')) {
+        if (!inserted && formatted) drained.push(formatted);
+        inserted = true;
+      } else {
+        drained.push(entry);
+      }
+    }
+    return drained;
   }
 
   hasPendingPlanApproval(): boolean {
@@ -214,7 +231,7 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
   private async dispatch(name: string, input: JsonObject, signal: AbortSignal, callId: string): Promise<string | GrokBuildToolResult> {
     switch (name) {
       case "run_terminal_command": return this.runTerminal(input, signal, callId);
-      case "read_file": return this.files.readFile(input);
+      case "read_file": return this.readFile(input);
       case "search_replace": return this.files.searchReplace(input);
       case "list_dir": return this.files.listDir(input);
       case "grep": return this.files.grep(input);
@@ -244,8 +261,26 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
     }
   }
 
+  private async readFile(input: JsonObject): Promise<GrokBuildToolResult> {
+    try {
+      return await this.files.readFile(input);
+    } catch (error) {
+      const messageText = message(error);
+      const requested = typeof input.target_file === "string" ? this.resolve(input.target_file) : undefined;
+      const suggestion = requested && / does not exist\.$/u.test(messageText)
+        ? this.services.suggestSkillPath?.(requested)
+        : undefined;
+      return failure(suggestion
+        ? `${messageText}\nThe skill you are looking for is registered at:\n${suggestion}`
+        : messageText);
+    }
+  }
+
   private async runTerminal(input: JsonObject, signal: AbortSignal, callId: string): Promise<string> {
-    const command = string(input.command, "command");
+    const command = string(input.command, "command", true);
+    if (typeof input.description !== "string") throw new Error("missing field `description`");
+    const processSafetyError = selfMatchingPkillError(command);
+    if (processSafetyError) throw new Error(processSafetyError);
     if (boolean(input.background, false)) return this.startBackground(command, signal, backgroundTimeout(input.timeout), callId);
     const builtin = tryBrowserNodeCheck(this.container.vfs, this.workspacePath, command);
     if (builtin) return formatCommandResult(builtin);
@@ -261,14 +296,17 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
       }
       task.notificationSink = this.reminderSink("command");
       this.watchBackgroundCompletion(task);
-      return `Command automatically moved to background with task ID: ${task.id}`;
+      return formatGrokBackgroundTaskStarted(
+        task,
+        `Command "${command}" exceeded the default timeout and was automatically moved to background. Process is still running.`,
+      );
     }
     const controller = new AbortController();
     const timeoutMs = boundedCommandTimeout(input.timeout, 120_000);
     let timedOut = false;
     let stdout = "";
     let stderr = "";
-    const timer = window.setTimeout(() => {
+    const timer = globalThis.setTimeout(() => {
       timedOut = true;
       controller.abort(new DOMException("Command timed out", "TimeoutError"));
     }, timeoutMs);
@@ -288,7 +326,7 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
       const output = [stdout, stderr].filter(Boolean).join(stdout && stderr ? "\n" : "");
       return `exit: killed (timeout)${output ? `\n${output}` : ""}`;
     } finally {
-      window.clearTimeout(timer);
+      globalThis.clearTimeout(timer);
     }
   }
 
@@ -296,7 +334,7 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
     const task = this.createCommandTask(command, parentSignal, "command", maxRuntimeMs, callId);
     task.notificationSink = this.reminderSink("command");
     this.watchBackgroundCompletion(task);
-    return `Command started in background with task ID: ${task.id}`;
+    return formatGrokBackgroundTaskStarted(task, `Background task ${task.id} started`);
   }
 
   private watchBackgroundCompletion(task: BrowserBackgroundTask): void {
@@ -343,7 +381,7 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
   }
 
   private killTask(input: JsonObject): string {
-    return this.background.kill(string(input.task_id, "task_id"));
+    return this.background.kill(string(input.task_id, "task_id", true));
   }
 
   private async getTaskOutput(input: JsonObject): Promise<string> {
@@ -458,12 +496,12 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
   }
 
   private monitor(input: JsonObject, signal: AbortSignal, callId: string): string {
-    const command = string(input.command, "command");
-    const description = string(input.description, "description");
+    const command = string(input.command, "command", true);
+    const description = string(input.description, "description", true);
     const persistent = boolean(input.persistent, false);
     const requestedTimeout = input.timeout_ms === undefined || input.timeout_ms === null
       ? 36_000_000
-      : integer(input.timeout_ms, 36_000_000);
+      : strictUnsignedInteger(input.timeout_ms);
     if (!persistent && requestedTimeout > 36_000_000) {
       throw new Error("persistent must be true when timeout_ms exceeds 36000000ms");
     }
@@ -575,14 +613,15 @@ function sanitizeWorkspaceShellOutput(command: string, output: string, workspace
 }
 
 function boundedCommandTimeout(value: unknown, fallback: number): number {
-  const timeout = integer(value, fallback);
-  if (timeout < 0) throw new Error("Expected an integer greater than or equal to 0");
+  const timeout = value === undefined || value === null ? fallback : parseGrokLenientU64(value);
+  // A foreground zero means the configured default in native Grok Build.
+  if (timeout === 0) return fallback;
   return Math.min(timeout, 36_000_000);
 }
 
 function backgroundTimeout(value: unknown): number | undefined {
   if (value === undefined || value === null) return;
-  const timeout = boundedCommandTimeout(value, 0);
+  const timeout = parseGrokLenientU64(value);
   return timeout === 0 ? undefined : timeout;
 }
 
@@ -644,6 +683,11 @@ function string(value: unknown, name: string, allowEmpty = false): string {
 function integer(value: unknown, fallback: number): number {
   if (value === undefined || value === null) return fallback;
   if (!Number.isSafeInteger(value)) throw new Error("Expected an integer");
+  return value as number;
+}
+
+function strictUnsignedInteger(value: unknown): number {
+  if (!Number.isSafeInteger(value) || Number(value) < 0) throw new Error("Expected a non-negative integer");
   return value as number;
 }
 

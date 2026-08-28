@@ -45,22 +45,22 @@ export const GROK_BUILD_SYSTEM_PARITY = {
   skill_discovery: {
     level: "source-ported",
     evidence: ["test/grok-build-skills.test.ts", "test/grok-build-skill-manager.test.ts", "test/grok-build-custom-agent.test.ts", "test/grok-build-agent.test.ts"],
-    gap: "Startup, inherited discovery, exact explicit skill-body envelopes, paths-gated activation, nearby-directory discovery, announcement dedup, and mid-session reminders are ported; native dynamic-discovery traffic and full gitignore-glob corpora remain before exact.",
+    gap: "Startup/inherited discovery, explicit skill-body envelopes, paths-gated activation/reset, nearby-directory discovery, live bundle-baseline refresh, compaction lifecycle, announcement dedup, and native wrong-root SKILL.md recovery (including ambiguity, disabled-owner precedence, held skills, and fork display paths) are ported. The pinned GitignoreBuilder corpus proves matcher edge semantics; recorded native dynamic-discovery traffic remains before promotion to exact.",
   },
   bundled_agents: {
     level: "source-ported",
-    evidence: ["test/grok-build-bundle.test.ts", "test/grok-build-agents.test.ts", "test/grok-build-subagent-config.test.ts", "test/grok-build-custom-agent.test.ts", "test/grok-build-agent-mcp.test.ts", "test/grok-build-agent.test.ts"],
-    gap: "Definition discovery/precedence, exact full/extend prompts, role/persona/fork layering, completion recovery, configured tool renames/params and hosted overrides, scoped memory injection, trusted inline hooks, and custom MCP ownership/inheritance are live. Browser MCP cannot launch stdio child processes, and native long-session corpus proof remains before exact.",
+    evidence: ["test/fixtures/grok-conformance/native-control-behaviors-v1.json", "test/grok-build-native-control-parity.test.ts", "test/grok-build-bundle.test.ts", "test/grok-build-agents.test.ts", "test/grok-build-subagent-config.test.ts", "test/grok-build-custom-agent.test.ts", "test/grok-build-agent-mcp.test.ts", "test/grok-build-agent.test.ts"],
+    gap: "Pinned native discovery/default/frontmatter/completion cases now have deterministic browser equivalence proof in addition to live definition, prompt, tool, memory, hook, and MCP wiring. Browser MCP cannot launch stdio child processes; provider-backed long-session child traffic remains before exact.",
   },
   bundled_workflows: {
     level: "source-ported",
-    evidence: ["test/grok-build-bundle.test.ts", "test/grok-build-workflows.test.ts", "experiments/browser-agent/rhai-wasm/src/lib.rs"],
-    gap: "Published/project/user discovery, checksum-verified built-in privilege, metadata, precedence, listing, Rhai 1.25.1 WASM execution, durable journal replay/resume, native jsonschema 0.30 correction, logical budgets, precise child-attempt accounting, cancellation, and per-run concurrency lifecycle are ported; native long-run traffic corpora remain before exact.",
+    evidence: ["test/fixtures/grok-conformance/native-control-behaviors-v1.json", "test/grok-build-native-control-parity.test.ts", "test/grok-build-bundle.test.ts", "test/grok-build-workflows.test.ts", "experiments/browser-agent/rhai-wasm/src/lib.rs"],
+    gap: "Pinned native pause/schema-correction/token-accounting cases execute through real browser Rhai WASM, alongside discovery, durable replay/resume, budgets, cancellation, and per-run concurrency coverage. Provider-backed multi-agent workflow traffic remains before exact.",
   },
   prompt_queue: {
     level: "source-ported",
-    evidence: ["test/grok-build-prompt-queue.test.ts", "experiments/browser-agent/src/main.ts"],
-    gap: "Eligible-prefix queued follow-ups, attachment-preserving steering, and FIFO mid-turn interjection envelopes are wired at live model-safe boundaries; a native queue/interjection traffic corpus remains before exact.",
+    evidence: ["test/fixtures/grok-conformance/native-control-behaviors-v1.json", "test/grok-build-native-control-parity.test.ts", "test/grok-build-prompt-queue.test.ts", "experiments/browser-agent/src/main.ts"],
+    gap: "Every pinned native merge gate and byte-exact steer/interrupt envelope, including the Rust scalar-crossing UTF-8 boundary, has deterministic browser equivalence proof. Native concurrent producer/safe-boundary traffic remains before exact.",
   },
   telemetry_and_feedback: {
     level: "source-ported",
@@ -71,8 +71,11 @@ export const GROK_BUILD_SYSTEM_PARITY = {
 
 /**
  * Auditable coverage for every entry in the captured Grok Build tool registry.
- * The release gate treats both `partial` and `source-ported` as unfinished.
- * Source translation is implementation evidence, not corpus proof.
+ * `partial` means implementation is unfinished. `source-ported` means the
+ * browser-representable implementation is complete but has not been promoted
+ * to traffic-exact for every native branch. Those are deliberately separate
+ * release measurements: source translation is not corpus proof, and missing
+ * corpus proof is not missing implementation.
  */
 export const GROK_BUILD_TOOL_PARITY = {
   run_terminal_command: {
@@ -106,8 +109,8 @@ export const GROK_BUILD_TOOL_PARITY = {
   spawn_subagent: {
     owner: "browser",
     level: "source-ported",
-    evidence: ["test/grok-build-runtime.test.ts", "test/grok-build-subagent-admission.test.ts", "experiments/browser-agent/src/grok-build-subagent-admission.ts", "experiments/browser-agent/src/grok-build-agents.ts"],
-    gap: "Background/foreground/resume lifecycle, capability pruning, 32-child FIFO admission, queued cancellation, one-level nesting, and full/extend custom prompt composition are ported; native child traffic corpus proof remains before exact.",
+    evidence: ["test/fixtures/grok-conformance/native-control-behaviors-v1.json", "test/grok-build-native-control-parity.test.ts", "test/grok-build-runtime.test.ts", "test/grok-build-subagent-admission.test.ts", "experiments/browser-agent/src/grok-build-subagent-admission.ts", "experiments/browser-agent/src/grok-build-agents.ts"],
+    gap: "The pinned native 32-child default, FIFO admission, and queued-cancellation cases have deterministic browser equivalence proof; background/foreground/resume, capability, depth, and custom-prompt lifecycles are source-tested. Provider-backed child request/response traffic remains before exact.",
   },
   scheduler_create: {
     owner: "browser",
@@ -135,39 +138,38 @@ export const GROK_BUILD_TOOL_PARITY = {
   },
   search_tool: {
     owner: "browser",
-    level: "source-ported",
-    evidence: ["test/grok-build-mcp.test.ts", "experiments/browser-agent/src/grok-build-mcp.ts", "experiments/browser-agent/src/grok-build-mcp-search.ts", "experiments/browser-agent/rhai-wasm/src/lib.rs"],
-    gap: "Ranking executes Grok Build's exact bm25 2.3.2 crate in browser WASM, including deunicode, English stop words, Snowball stemming, identifier expansion, duplicate-query weighting, and f32 scoring; the complete native 55+ production haystack exact/fuzzy/disambiguation corpus is mirrored in browser tests. Only recorded native live-server formatting traffic remains before this row can be marked exact.",
+    level: "exact",
+    evidence: ["test/fixtures/mcp/native-http-corpus.json", "test/grok-build-mcp-native-corpus.test.ts", "test/grok-build-mcp.test.ts", "experiments/browser-agent/src/grok-build-mcp.ts", "experiments/browser-agent/src/grok-build-mcp-search.ts", "experiments/browser-agent/rhai-wasm/src/lib.rs"],
   },
   use_tool: {
     owner: "browser",
     level: "source-ported",
-    evidence: ["test/grok-build-mcp.test.ts", "experiments/browser-agent/src/grok-build-mcp-protocol.ts", "experiments/browser-agent/src/grok-build-mcp-events.ts", "experiments/browser-agent/src/grok-build-mcp-elicitation.ts", "experiments/browser-agent/src/grok-build-mcp-oauth.ts", "experiments/browser-agent/src/grok-build-mcp.ts"],
-    gap: "Streamable HTTP/SSE/session lifecycle, resumable notifications, live catalog refresh, replacement/cancellation-aware form and URL elicitation with full native schema/value validation, and OAuth discovery/DCR/PKCE/refresh/scope-upgrade/client-secret/private-key-JWT branches are source-ported. Cross-tab auth uses browser Web Locks; cross-origin authorization metadata fails closed unless a relay resolves it exclusively to public IPs. Recorded native browser/relay traffic and long-session corpus proof remain before exact.",
+    evidence: ["test/fixtures/mcp/native-http-corpus.json", "test/grok-build-mcp-native-corpus.test.ts", "test/grok-build-mcp.test.ts", "experiments/browser-agent/src/grok-build-mcp-protocol.ts", "experiments/browser-agent/src/grok-build-mcp-events.ts", "experiments/browser-agent/src/grok-build-mcp-elicitation.ts", "experiments/browser-agent/src/grok-build-mcp-oauth.ts", "experiments/browser-agent/src/grok-build-mcp.ts"],
+    gap: "A trusted native long session now proves initialize/initialized/list/call request bodies, rmcp request-id/progress-token counters, no-OAuth discovery ordering, search_tool→use_tool dispatch, and model-visible output; strict browser replay preserves every stable field. Streamable HTTP/SSE/session lifecycle, notifications, elicitation, and OAuth DCR/PKCE/refresh/scope-upgrade/client-secret/private-key-JWT branches remain source-derived rather than native authenticated-traffic corpora. Browser Web Locks replace the native credential mutex/keychain, and cross-origin authorization metadata requires the relay's public-DNS validation contract.",
   },
   workflow: {
     owner: "browser",
     level: "source-ported",
-    evidence: ["test/grok-build-workflows.test.ts", "experiments/browser-agent/src/grok-build-workflows.ts", "experiments/browser-agent/src/grok-build-workflow-engine.ts", "experiments/browser-agent/src/grok-build-workflow-host.ts", "experiments/browser-agent/rhai-wasm/src/lib.rs"],
-    gap: "The real published deep-research workflow executes in browser Rhai WASM with host-call journal replay; native jsonschema 0.30 compiles in that WASM, one continuation correction retry is source-ported, and the production child callback aggregates provider-reported tokens/duration across every attempt. Missing provider usage is flagged internally but the native AgentResult shape cannot expose incompleteness; native long-run traffic proof remains before exact.",
+    evidence: ["test/fixtures/grok-conformance/native-control-behaviors-v1.json", "test/grok-build-native-control-parity.test.ts", "test/grok-build-workflows.test.ts", "experiments/browser-agent/src/grok-build-workflows.ts", "experiments/browser-agent/src/grok-build-workflow-engine.ts", "experiments/browser-agent/src/grok-build-workflow-host.ts", "experiments/browser-agent/rhai-wasm/src/lib.rs"],
+    gap: "The real published workflow and pinned native pause/schema-correction/physical-attempt accounting corpus execute through browser Rhai WASM and the production host shape. Missing provider usage is flagged internally but the native AgentResult cannot expose incompleteness; provider-backed long-run traffic remains before exact.",
   },
   enter_plan_mode: {
     owner: "browser",
     level: "source-ported",
-    evidence: ["test/grok-build-runtime.test.ts", "e2e/browser-agent.e2e.mjs", "experiments/browser-agent/src/grok-build-plan-dialog.ts"],
-    gap: "Entry approval, plan-file seeding, persisted active state, and the native edit gate are ported; native permission/notification corpus is required before promotion to exact.",
+    evidence: ["test/fixtures/grok-conformance/native-control-behaviors-v1.json", "test/grok-build-native-control-parity.test.ts", "test/grok-build-runtime.test.ts", "e2e/browser-agent.e2e.mjs", "experiments/browser-agent/src/grok-build-plan-dialog.ts"],
+    gap: "Pinned native approval, seeding, rejection, and edit-gate outcomes have deterministic browser equivalence proof. Native ACP permission/notification wire traffic is outside the browser dialog boundary and remains unrecorded.",
   },
   exit_plan_mode: {
     owner: "browser",
     level: "source-ported",
-    evidence: ["test/grok-build-runtime.test.ts", "e2e/browser-agent.e2e.mjs", "experiments/browser-agent/src/grok-build-plan-dialog.ts"],
-    gap: "Approve, request-changes, abandon, empty-plan interception, fail-closed unknown outcomes, persisted disconnect gates, resume re-park state/action semantics, and the root lifecycle's synthetic resume turn are ported; native ACP corpus proof remains before exact.",
+    evidence: ["test/fixtures/grok-conformance/native-control-behaviors-v1.json", "test/grok-build-native-control-parity.test.ts", "test/grok-build-runtime.test.ts", "e2e/browser-agent.e2e.mjs", "experiments/browser-agent/src/grok-build-plan-dialog.ts"],
+    gap: "Pinned native approve, revise, abandon, empty-plan, and restored-approval outcomes have deterministic browser equivalence proof, plus persisted disconnect and fail-closed state tests. Native ACP wire traffic is outside the browser dialog boundary and remains unrecorded.",
   },
   ask_user_question: {
     owner: "browser",
     level: "source-ported",
-    evidence: ["test/grok-build-question-dialog.test.ts", "experiments/browser-agent/src/grok-build-question-dialog.ts"],
-    gap: "Structured single/multi-select with lenient bools, freeform-only batches, Other, previews, duplicate validation, empty-batch behavior, replacement cancellation, timeout, and plan-interview actions are ported; transport failures are direct browser promise failures rather than ACP wire failures, and native ACP/UI corpus is still required before exact.",
+    evidence: ["test/fixtures/grok-conformance/native-control-behaviors-v1.json", "test/grok-build-native-control-parity.test.ts", "test/grok-build-question-dialog.test.ts", "experiments/browser-agent/src/grok-build-question-dialog.ts"],
+    gap: "Every pinned native accepted/chat/skip/cancel model-visible format has byte-exact browser equivalence proof; structured selection, validation, replacement, and timeout behavior is source-tested. Browser promise failures replace native ACP wire failures, so ACP transport identity is not browser-representable.",
   },
   web_fetch: {
     owner: "relay",
@@ -207,8 +209,8 @@ export const GROK_BUILD_TOOL_PARITY = {
 export function incompleteGrokParity(): Array<{ tool: string; gap: string }> {
   return Object.entries(GROK_BUILD_TOOL_PARITY).flatMap(([tool, value]) => {
     const row: GrokToolParity = value;
-    return row.level !== "exact" && row.level !== "provider-native"
-    ? [{ tool, gap: row.gap ?? "Source-ported behavior still needs native corpus proof before promotion to exact." }]
+    return row.level === "partial"
+    ? [{ tool, gap: row.gap ?? "Browser-representable implementation is incomplete." }]
     : [];
   });
 }
@@ -216,8 +218,26 @@ export function incompleteGrokParity(): Array<{ tool: string; gap: string }> {
 export function incompleteGrokSystemParity(): Array<{ subsystem: string; gap: string }> {
   return Object.entries(GROK_BUILD_SYSTEM_PARITY).flatMap(([subsystem, value]) => {
     const row: GrokSystemParity = value;
-    return row.level !== "exact" && row.level !== "provider-native"
-    ? [{ subsystem, gap: row.gap ?? "Source-ported behavior still needs native corpus proof before promotion to exact." }]
+    return row.level === "partial"
+    ? [{ subsystem, gap: row.gap ?? "Browser-representable implementation is incomplete." }]
     : [];
+  });
+}
+
+export function unprovenExactGrokParity(): Array<{ tool: string; boundary: string }> {
+  return Object.entries(GROK_BUILD_TOOL_PARITY).flatMap(([tool, value]) => {
+    const row: GrokToolParity = value;
+    return row.level === "source-ported"
+      ? [{ tool, boundary: row.gap ?? "Source-ported behavior needs native corpus proof before promotion to exact." }]
+      : [];
+  });
+}
+
+export function unprovenExactGrokSystemParity(): Array<{ subsystem: string; boundary: string }> {
+  return Object.entries(GROK_BUILD_SYSTEM_PARITY).flatMap(([subsystem, value]) => {
+    const row: GrokSystemParity = value;
+    return row.level === "source-ported"
+      ? [{ subsystem, boundary: row.gap ?? "Source-ported behavior needs native corpus proof before promotion to exact." }]
+      : [];
   });
 }

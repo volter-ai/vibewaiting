@@ -35,7 +35,7 @@ describe("Grok Build browser tool runtime", () => {
     await execute("write", { file_path: "/src/new.js", content: "export {}" });
     expect(vfs.readFileSync("/src/new.js", "utf8")).toBe("export {}");
     vi.stubGlobal("window", { setTimeout, clearTimeout });
-    await expect(execute("run_terminal_command", { command: "echo ok", timeout: 1000 }))
+    await expect(execute("run_terminal_command", { command: "echo ok", description: "Print a test value", timeout: 1000 }))
       .resolves.toEqual({ output: "exit: 0\nok" });
     vi.unstubAllGlobals();
   });
@@ -44,6 +44,24 @@ describe("Grok Build browser tool runtime", () => {
     const { tools } = runtime();
     await expect(tools.execute({ callId: "1", name: "image_gen", arguments: JSON.stringify({ prompt: "Pong" }) }, new AbortController().signal))
       .resolves.toMatchObject({ isError: true, output: expect.stringContaining("service adapter") });
+  });
+
+  it("appends the native registered-skill recovery hint to a missing read", async () => {
+    const vfs = new VirtualFS();
+    const tools = new GrokBuildBrowserRuntime({
+      vfs,
+      async run() { return { stdout: "", stderr: "", exitCode: 0 }; },
+    }, "/", {
+      suggestSkillPath: (path) => path === "/wrong/review/SKILL.md" ? "/.grok/skills/review/SKILL.md" : undefined,
+    });
+    await expect(tools.execute({
+      callId: "read",
+      name: "read_file",
+      arguments: JSON.stringify({ target_file: "/wrong/review/SKILL.md" }),
+    }, new AbortController().signal)).resolves.toEqual({
+      isError: true,
+      output: "Error: /wrong/review/SKILL.md does not exist.\nThe skill you are looking for is registered at:\n/.grok/skills/review/SKILL.md",
+    });
   });
 
   it("reparents a live nested-child monitor registry and all later notifications to the root", async () => {
@@ -142,8 +160,8 @@ describe("Grok Build browser tool runtime", () => {
         async spawnSubagent() { return neverSubagent; },
       });
       const signal = new AbortController().signal;
-      const command = await tools.execute({ callId: "command", name: "run_terminal_command", arguments: '{"command":"npm run dev","background":true}' }, signal);
-      const commandId = /task ID: ([0-9a-f-]+)/u.exec(command.output)?.[1];
+      const command = await tools.execute({ callId: "command", name: "run_terminal_command", arguments: '{"command":"npm run dev","description":"Start development server","background":true}' }, signal);
+      const commandId = /<task-id>([0-9a-f-]+)<\/task-id>/u.exec(command.output)?.[1];
       const child = await tools.execute({
         callId: "child",
         name: "spawn_subagent",
@@ -193,7 +211,14 @@ These subagents were launched before this compaction and are still running. Use 
       }, signal);
       await vi.advanceTimersByTimeAsync(120_000);
       const started = await command;
-      expect(started.output).toBe("Command automatically moved to background with task ID: command");
+      expect(started.output).toBe(
+        '<task-id>command</task-id>\n' +
+        '<task-type>bash</task-type>\n' +
+        '<output-file>/tmp/grok-build-session/terminal/command.log</output-file>\n' +
+        '<status>running</status>\n' +
+        '<summary>Command "vite" exceeded the default timeout and was automatically moved to background. Process is still running.</summary>\n' +
+        'Use get_command_or_subagent_output with task_ids=["command"] when you need the output.',
+      );
       const taskId = "command";
 
       const poll = tools.execute({
@@ -236,7 +261,7 @@ These subagents were launched before this compaction and are still running. Use 
         name: "run_terminal_command",
         arguments: JSON.stringify({ command: "slow", description: "Exercise background timeout", background: true, timeout: 40 }),
       }, signal);
-      const taskId = /task ID: ([0-9a-f-]+)/u.exec(started.output)?.[1];
+      const taskId = /<task-id>([0-9a-f-]+)<\/task-id>/u.exec(started.output)?.[1];
       await vi.advanceTimersByTimeAsync(40);
       await expect(tools.execute({
         callId: "poll-timeout",
@@ -461,14 +486,14 @@ These subagents were launched before this compaction and are still running. Use 
     await expect(conformance.execute({
       callId: "ls",
       name: "run_terminal_command",
-      arguments: '{"command":"ls -la /private/tmp/native"}',
+      arguments: '{"command":"ls -la /private/tmp/native","description":"List project files"}',
     }, new AbortController().signal)).resolves.toEqual({ output: expected });
 
     const drift = new GrokConformanceToolRuntime(runtime, [{ callId: "ls", output: expected.replace("152", "153") }], "/private/tmp/native", "/");
     await expect(drift.execute({
       callId: "ls",
       name: "run_terminal_command",
-      arguments: '{"command":"ls -la /private/tmp/native"}',
+      arguments: '{"command":"ls -la /private/tmp/native","description":"List project files"}',
     }, new AbortController().signal)).rejects.toThrow("output drifted");
   });
 });

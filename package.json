@@ -46,6 +46,7 @@
     "build:rhai-wasm": "node experiments/browser-agent/rhai-wasm/build.mjs",
     "build:conformance": "tsc -p tsconfig.json",
     "conformance:proxy": "npm run build:conformance && node scripts/grok-conformance-proxy.mjs",
+    "verify:grok-native-control": "node scripts/verify-grok-native-control-fixture.mjs",
     "typecheck:worker": "tsc -p cloudflare/tsconfig.json",
     "deploy:browser-agent": "VITE_SANDBOX_ORIGIN=https://vibewaiting-browser-agent-sandbox.aaron-0ed.workers.dev npm run build:browser-agent && wrangler deploy",
     "deploy:browser-agent-sandbox": "npm run build:browser-agent && wrangler deploy --config wrangler.sandbox.jsonc",

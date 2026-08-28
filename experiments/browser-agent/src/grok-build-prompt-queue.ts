@@ -121,13 +121,14 @@ function formatSteeredQuery(note: string, text: string): string {
 function utf8TruncatePrompt(text: string): string {
   const encoded = new TextEncoder().encode(text);
   if (encoded.byteLength <= GROK_BUILD_LARGE_PROMPT_BYTES) return text;
-  let end = GROK_BUILD_LARGE_PROMPT_BYTES;
-  while (end > 0) {
-    try {
-      return `${new TextDecoder("utf-8", { fatal: true }).decode(encoded.slice(0, end))}... [truncated]`;
-    } catch {
-      end -= 1;
-    }
+  // Rust takes the last scalar whose *starting* byte offset is below the
+  // threshold, then includes that entire scalar even if it crosses 25,000.
+  let bytes = 0;
+  let codeUnits = 0;
+  for (const scalar of text) {
+    if (bytes >= GROK_BUILD_LARGE_PROMPT_BYTES) break;
+    bytes += new TextEncoder().encode(scalar).byteLength;
+    codeUnits += scalar.length;
   }
-  return "... [truncated]";
+  return `${text.slice(0, codeUnits)}... [truncated]`;
 }

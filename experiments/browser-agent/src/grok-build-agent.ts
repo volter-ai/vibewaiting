@@ -107,8 +107,11 @@ export interface GrokBuildSessionOptions {
   compactionTranscriptHint?: string;
   compactionSystemReminder?: string;
   getCompactionSystemReminder?: () => string | undefined;
+  onCompaction?: () => void;
   getPostToolSystemReminder?: (call: GrokBuildToolCall, result: GrokBuildToolResult) => string | undefined;
   drainSystemReminders?: () => readonly string[];
+  /** Await completion bookkeeping that native orders before the post-turn side call. */
+  beforeTurnSummary?: () => void | Promise<void>;
   persistCompactionSegment?: (segment: {
     index: number;
     location: string;
@@ -244,6 +247,7 @@ export class GrokBuildSession {
         this.options.onEvent?.({ type: "complete", turn, text: response.text });
         if (this.options.enableTurnSummary) {
           try {
+            await this.options.beforeTurnSummary?.();
             await this.createTurnSummary(signal);
           } catch (error) {
             if (this.options.strictSideCalls) throw error;
@@ -409,6 +413,7 @@ export class GrokBuildSession {
       transcriptHint,
       ...(systemReminder ? { systemReminder } : {}),
     }));
+    this.options.onCompaction?.();
     this.compactionCount += 1;
     this.measuredInputBytes = inputBytes(this.input);
     this.estimatedTokens = Math.ceil(this.measuredInputBytes / 4);

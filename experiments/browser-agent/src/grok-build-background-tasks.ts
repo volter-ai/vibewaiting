@@ -57,6 +57,16 @@ const MONITOR_OUTPUT_CHAR_LIMIT = 10 * 1024 * 1024;
 const RETAINED_LOG_BYTES = 64 * 1024 * 1024;
 const FRONT_BACK_MARKER = "\n\n... (output truncated) ...\n\n";
 
+/** Native `BackgroundTaskStarted::to_prompt_format` envelope. */
+export function formatGrokBackgroundTaskStarted(task: BrowserBackgroundTask, summary: string): string {
+  return `<task-id>${task.id}</task-id>\n` +
+    `<task-type>bash</task-type>\n` +
+    `<output-file>${task.outputFile}</output-file>\n` +
+    `<status>running</status>\n` +
+    `<summary>${summary}</summary>\n` +
+    `Use get_command_or_subagent_output with task_ids=["${task.id}"] when you need the output.`;
+}
+
 /** Stateful browser port of Grok Build's terminal/subagent task registry. */
 export class GrokBuildBackgroundTasks {
   private readonly tasks = new Map<string, BrowserBackgroundTask>();
@@ -124,11 +134,11 @@ export class GrokBuildBackgroundTasks {
       rawOutputBytes: 0,
       truncated: false,
     };
-    const timeout = maxRuntimeMs && maxRuntimeMs > 0 ? setTimeout(() => {
+    const timeout = maxRuntimeMs !== undefined ? setTimeout(() => {
       if (task.status !== "running") return;
       task.timedOut = true;
       controller.abort(new DOMException("Task timed out", "TimeoutError"));
-    }, maxRuntimeMs) : undefined;
+    }, Math.max(0, maxRuntimeMs)) : undefined;
     task.promise = runIsolatedBrowserCommand(this.container, command, {
       cwd: this.workspacePath,
       signal: AbortSignal.any([parentSignal, controller.signal]),
@@ -203,6 +213,9 @@ export class GrokBuildBackgroundTasks {
   }
 
   async output(input: Record<string, unknown>): Promise<string> {
+    if (Object.prototype.hasOwnProperty.call(input, "task_ids") && Object.prototype.hasOwnProperty.call(input, "task_id")) {
+      throw new Error("duplicate field `task_ids`");
+    }
     const ids = resolveTaskIds(input.task_ids ?? input.task_id);
     if (ids.length === 0) throw new Error("Provide a non-empty task_ids list.");
     if (ids.length > MAX_MULTI_TASK_IDS) throw new Error(`task_ids exceeds maximum of ${MAX_MULTI_TASK_IDS} entries.`);

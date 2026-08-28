@@ -129,9 +129,13 @@ export function lenientSignedInteger(value: unknown): number {
   if (typeof value !== "number" && typeof value !== "string") {
     throw new Error(`expected number, got ${JSON.stringify(value)}`);
   }
-  if (typeof value === "string" && value.length === 0) throw new Error('expected number, got string ""');
-  const number = typeof value === "number" ? value : Number(value);
-  if (Number.isNaN(number)) throw new Error(`expected number, got string "${value}"`);
+  if (typeof value === "string" && !/^[+-]?(?:(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|inf(?:inity)?|nan)$/iu.test(value)) {
+    throw new Error(`expected number, got string ${JSON.stringify(value)}`);
+  }
+  const normalized = typeof value === "string"
+    ? value.replace(/^\+?inf$/iu, "Infinity").replace(/^-inf$/iu, "-Infinity")
+    : value;
+  const number = typeof normalized === "number" ? normalized : Number(normalized);
   if (!Number.isFinite(number)) throw new Error("expected finite number");
   if (!Number.isInteger(number)) throw new Error(`expected whole number, got ${number}`);
   const exactLimit = 9_007_199_254_740_992;

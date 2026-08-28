@@ -128,13 +128,15 @@ export class GrokBuildBrowserSubagentRunner {
       enableEventStream: server.type === "sse",
     }]), { traceSink: createGrokBuildMcpOtlpTraceSink(trace.tracer) });
     let runtime!: GrokBuildBrowserRuntime;
+    let skillManager!: GrokBuildSkillManager;
     const subagentServices: GrokBuildBrowserServices = {
       ...this.options.services,
       ...(mcpCatalog.length ? { searchTools: browserMcp.services.searchTools, useTool: browserMcp.services.useTool } : {}),
       spawnSubagent: (childInput, childSignal, childId) => this.run(childInput, childSignal, childId, runtime),
+      suggestSkillPath: (path) => skillManager.suggestSkillPath(path),
     };
     runtime = new GrokBuildBrowserRuntime(container, cwd, subagentServices, allowed);
-    const skillManager = new GrokBuildSkillManager(container.vfs, cwd);
+    skillManager = new GrokBuildSkillManager(container.vfs, cwd);
     const rootSkills = this.options.rootSkillManager();
     const discoveredSkills = definition.inheritSkills && rootSkills
       ? rootSkills.startupSkills()
@@ -186,6 +188,7 @@ export class GrokBuildBrowserSubagentRunner {
       sessionId: subagentId,
       enableSessionTitle: false,
       ...(definition.discoverSkills ? { getPostToolSystemReminder: (call: Parameters<GrokBuildSkillManager["afterToolCall"]>[0], result: Parameters<GrokBuildSkillManager["afterToolCall"]>[1]) => skillManager.afterToolCall(call, result) } : {}),
+      ...(definition.discoverSkills ? { onCompaction: () => skillManager.onCompaction() } : {}),
       drainSystemReminders: () => runtime.drainSystemReminders(),
       ...(effectiveModel ? { model: effectiveModel } : {}),
       ...(runtimeConfig.reasoningEffort && runtimeConfig.reasoningEffort !== "max"

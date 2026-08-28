@@ -81,7 +81,7 @@ describe("Grok Build browser MCP protocol", () => {
 
     expect(requests[0]?.body).toEqual({
       jsonrpc: "2.0",
-      id: 1,
+      id: 0,
       method: "initialize",
       params: {
         protocolVersion: "2025-11-25",
@@ -100,7 +100,15 @@ describe("Grok Build browser MCP protocol", () => {
     expect(requests[1]?.headers.get("Mcp-Session-Id")).toBe("session-123");
     expect(requests[1]?.headers.get("MCP-Protocol-Version")).toBe("2025-11-25");
     expect(requests[0]?.init).toMatchObject({ credentials: "omit", redirect: "error" });
-    expect(requests.at(-1)?.body.params).toEqual({ cursor: "page-2" });
+    expect(requests[2]?.body).toMatchObject({
+      id: 1,
+      method: "tools/list",
+      params: { _meta: { progressToken: 0 } },
+    });
+    expect(requests.at(-1)?.body).toMatchObject({
+      id: 2,
+      params: { _meta: { progressToken: 1 }, cursor: "page-2" },
+    });
   });
 
   it("surfaces JSON-RPC errors with their native code", async () => {
@@ -704,7 +712,7 @@ describe("Grok Build browser MCP registry", () => {
     await expect(registry.useTool("jira", {}, new AbortController().signal)).rejects.toThrow("server__tool");
     await expect(registry.useTool("linear__save_issue", { title: "Broken build" }, new AbortController().signal))
       .resolves.toBe('Saved ISSUE-7\n{"type":"resource","resource":{"uri":"linear://ISSUE-7","text":"details"}}');
-    expect(calls.at(-1)?.params).toEqual({ name: "save_issue", arguments: { title: "Broken build" } });
+    expect(calls.at(-1)?.params).toEqual({ _meta: { progressToken: 1 }, name: "save_issue", arguments: { title: "Broken build" } });
   });
 
   it("turns MCP logical errors into native Failed to call output and bounds large payloads", async () => {

@@ -8,6 +8,7 @@ export interface GrokPdfReadResult {
 }
 
 const MAX_DOCUMENT_BYTES = 50 * 1024 * 1024;
+const PDF_TIMEOUT_MS = 60_000;
 
 export async function readGrokPdf(path: string, bytes: Uint8Array, input: GrokPdfInput): Promise<GrokPdfReadResult> {
   if (bytes.byteLength > MAX_DOCUMENT_BYTES) {
@@ -17,12 +18,38 @@ export async function readGrokPdf(path: string, bytes: Uint8Array, input: GrokPd
   if (format !== "image" && format !== "text") {
     return { output: `Invalid format '${format}'. Supported values: 'image' (default), 'text'.` };
   }
+  const timeoutMessage = `PDF processing timed out after 60s: ${path}`;
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      extractGrokPdf(path, bytes, input, format, controller.signal),
+      new Promise<GrokPdfReadResult>((resolve) => {
+        timer = setTimeout(() => {
+          controller.abort(new DOMException(timeoutMessage, "TimeoutError"));
+          resolve({ output: timeoutMessage });
+        }, PDF_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+async function extractGrokPdf(path: string, bytes: Uint8Array, input: GrokPdfInput, format: "image" | "text", signal: AbortSignal): Promise<GrokPdfReadResult> {
   try {
     const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
     pdfjs.GlobalWorkerOptions.workerSrc = typeof window === "undefined"
       ? new URL("../../../node_modules/pdfjs-dist/legacy/build/pdf.worker.min.mjs", import.meta.url).href
       : pdfWorkerUrl;
-    const documentHandle = await pdfjs.getDocument({ data: bytes.slice(), useSystemFonts: true }).promise;
+    signal.throwIfAborted();
+    const loadingTask = pdfjs.getDocument({ data: bytes.slice(), useSystemFonts: true });
+    const abortLoading = (): void => { void loadingTask.destroy(); };
+    signal.addEventListener("abort", abortLoading, { once: true });
+    let documentHandle: Awaited<typeof loadingTask.promise>;
+    try { documentHandle = await loadingTask.promise; }
+    finally { signal.removeEventListener("abort", abortLoading); }
+    signal.throwIfAborted();
     if (documentHandle.numPages === 0) return { output: "PDF has no pages" };
     let pageIndices: number[];
     try {
@@ -33,6 +60,7 @@ export async function readGrokPdf(path: string, bytes: Uint8Array, input: GrokPd
     if (format === "text") {
       const pageText: string[] = [];
       for (const index of pageIndices) {
+        signal.throwIfAborted();
         const page = await documentHandle.getPage(index + 1);
         const content = await page.getTextContent();
         pageText.push(`--- Page ${index + 1} ---\n${content.items.map((item) => "str" in item ? item.str : "").join(" ")}`);
@@ -42,6 +70,7 @@ export async function readGrokPdf(path: string, bytes: Uint8Array, input: GrokPd
     if (typeof document === "undefined") throw new Error("PDF page rendering requires a browser canvas");
     const images: string[] = [];
     for (const index of pageIndices) {
+      signal.throwIfAborted();
       const page = await documentHandle.getPage(index + 1);
       const viewport = page.getViewport({ scale: 150 / 72 });
       const canvas = document.createElement("canvas");
@@ -49,12 +78,18 @@ export async function readGrokPdf(path: string, bytes: Uint8Array, input: GrokPd
       canvas.height = Math.ceil(viewport.height);
       const context = canvas.getContext("2d");
       if (!context) throw new Error("PDF canvas context is unavailable");
-      await page.render({ canvas, canvasContext: context, viewport }).promise;
+      const rendering = page.render({ canvas, canvasContext: context, viewport });
+      const abortRendering = (): void => rendering.cancel();
+      signal.addEventListener("abort", abortRendering, { once: true });
+      try { await rendering.promise; }
+      finally { signal.removeEventListener("abort", abortRendering); }
+      signal.throwIfAborted();
       const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob((value) => value ? resolve(value) : reject(new Error("PDF page encoding failed")), "image/jpeg", 0.85));
       images.push(`data:image/jpeg;base64,${base64(new Uint8Array(await blob.arrayBuffer()))}`);
     }
     return { output: `Read PDF file: ${path} (${images.length} pages rendered, ${documentHandle.numPages} total)`, images };
   } catch (error) {
+    if (signal.aborted && signal.reason instanceof Error) return { output: signal.reason.message };
     return { output: `Failed to open PDF: ${error instanceof Error ? error.message : String(error)}` };
   }
 }

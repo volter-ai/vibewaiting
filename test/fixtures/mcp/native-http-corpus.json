@@ -1,0 +1,144 @@
+{
+  "provenance": {
+    "sourceRevision": "9684fa3cdbf2995e30ea8b9b637f1db008f144fc",
+    "nativeBinary": "grok 1.0.5 (5115b46bc909) [stable]",
+    "fixture": "test/fixtures/mcp/native-http-fixture.mjs",
+    "capture": "A trusted headless Grok session called search_tool and use_tool against the local deterministic HTTP fixture. Secrets, dynamic IDs, timestamps, and model text are not part of this corpus."
+  },
+  "nativeObserved": {
+    "oauthDiscovery": [
+      "/",
+      "/.well-known/oauth-protected-resource",
+      "/.well-known/oauth-authorization-server",
+      "/.well-known/openid-configuration"
+    ],
+    "requests": [
+      {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "initialize",
+        "params": {
+          "protocolVersion": "2025-11-25",
+          "capabilities": {
+            "extensions": {
+              "io.modelcontextprotocol/ui": {
+                "mimeTypes": ["text/html;profile=mcp-app"]
+              }
+            }
+          },
+          "clientInfo": {
+            "name": "grok-shell-parity_fixture",
+            "version": "1.0.5"
+          }
+        }
+      },
+      {
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+      },
+      {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/list",
+        "params": {
+          "_meta": { "progressToken": 0 }
+        }
+      },
+      {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+          "_meta": { "progressToken": 1 },
+          "name": "fixture_echo",
+          "arguments": { "message": "isolated-native-corpus" }
+        }
+      }
+    ],
+    "searchTool": {
+      "results": [
+        {
+          "server": "parity_fixture",
+          "tools": [
+            {
+              "tool_name": "parity_fixture__fixture_echo",
+              "description": "Echo a deterministic message for browser parity verification",
+              "score": 7.717595100402832,
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "message": { "type": "string", "description": "Message to echo" }
+                },
+                "required": ["message"]
+              }
+            },
+            {
+              "tool_name": "parity_fixture__fixture_sum",
+              "description": "Add two integers for deterministic verification",
+              "score": 3.5441153049468994,
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "a": { "type": "integer" },
+                  "b": { "type": "integer" }
+                },
+                "required": ["a", "b"]
+              }
+            }
+          ]
+        }
+      ],
+      "total_hidden_tools": 26,
+      "status": "ready",
+      "note": null
+    },
+    "useTool": "fixture:isolated-native-corpus"
+  },
+  "sourceExpected": {
+    "accept": "application/json, text/event-stream",
+    "discoveryProtocolVersion": "2024-11-05",
+    "sessionProtocolVersion": "2025-11-25",
+    "isolatedSearchTool": {
+      "results": [
+        {
+          "server": "parity_fixture",
+          "tools": [
+            {
+              "tool_name": "parity_fixture__fixture_echo",
+              "description": "Echo a deterministic message for browser parity verification",
+              "score": 1.1913596,
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "message": { "type": "string", "description": "Message to echo" }
+                },
+                "required": ["message"]
+              }
+            },
+            {
+              "tool_name": "parity_fixture__fixture_sum",
+              "description": "Add two integers for deterministic verification",
+              "score": 0.25333107,
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "a": { "type": "integer" },
+                  "b": { "type": "integer" }
+                },
+                "required": ["a", "b"]
+              }
+            }
+          ]
+        }
+      ],
+      "total_hidden_tools": 2,
+      "status": "ready",
+      "note": null
+    }
+  },
+  "versionDrift": {
+    "installedAccept": "text/event-stream, application/json",
+    "pinnedSourceAccept": "application/json, text/event-stream",
+    "explanation": "The installed binary predates pinned source revision 9684fa3c. Browser replay asserts the pinned source ordering and preserves the installed observation separately."
+  }
+}

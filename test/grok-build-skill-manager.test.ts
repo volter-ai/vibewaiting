@@ -2,6 +2,7 @@ import { VirtualFS } from "almostnode";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { GrokBuildSkillManager, grokBuildSkillPathsMatch } from "../experiments/browser-agent/src/grok-build-skill-manager.js";
+import type { GrokBuildSkillInfo } from "../experiments/browser-agent/src/grok-build-skills.js";
 
 function skill(vfs: VirtualFS, path: string, frontmatter: string): void {
   vfs.mkdirSync(path.slice(0, path.lastIndexOf("/")), { recursive: true });
@@ -10,6 +11,9 @@ function skill(vfs: VirtualFS, path: string, frontmatter: string): void {
 
 const ok = { output: "ok" };
 const call = (name: string, input: object) => ({ callId: name, name, arguments: JSON.stringify(input) });
+const info = (name: string, path: string, overrides: Partial<GrokBuildSkillInfo> = {}): GrokBuildSkillInfo => ({
+  name, path, description: name, scope: "local", disableModelInvocation: false, enabled: true, ...overrides,
+});
 
 describe("Grok Build session skill lifecycle", () => {
   it("withholds paths-gated skills until a successful matching file tool call", () => {
@@ -104,5 +108,79 @@ describe("Grok Build session skill lifecycle", () => {
     for (const entry of corpus.cases) {
       expect(grokBuildSkillPathsMatch(entry.patterns, `/repo/${entry.path}`, "/repo"), entry.id).toBe(entry.matched);
     }
+  });
+
+  it("suggests exactly one registered SKILL.md path for a stale root", () => {
+    const vfs = new VirtualFS();
+    skill(vfs, "/.grok/skills/code-review/SKILL.md", "name: code-review\ndescription: Review code");
+    const manager = new GrokBuildSkillManager(vfs);
+
+    expect(manager.suggestSkillPath("/wrong/root/code-review/SKILL.md"))
+      .toBe("/.grok/skills/code-review/SKILL.md");
+    expect(manager.suggestSkillPath("/.grok/skills/code-review/SKILL.md")).toBeUndefined();
+    expect(manager.suggestSkillPath("/wrong/root/code-review/README.md")).toBeUndefined();
+  });
+
+  it("fails closed for ambiguous registered skill suggestions", () => {
+    const vfs = new VirtualFS();
+    skill(vfs, "/.grok/skills/review/SKILL.md", "name: review\ndescription: One");
+    skill(vfs, "/custom/.grok/skills/review/SKILL.md", "name: review\ndescription: Two");
+    const manager = new GrokBuildSkillManager(vfs);
+    manager.afterToolCall(call("read_file", { target_file: "/custom/.grok/skills/review/SKILL.md" }), ok);
+
+    expect(manager.suggestSkillPath("/wrong/review/SKILL.md")).toBeUndefined();
+  });
+
+  it("matches native reload ownership, held-skill, and model-disabled suggestion semantics", () => {
+    const vfs = new VirtualFS();
+    for (const path of ["/repo/review/SKILL.md", "/repo/manual/SKILL.md", "/repo/gated/SKILL.md"]) {
+      vfs.mkdirSync(path.slice(0, path.lastIndexOf("/")), { recursive: true });
+      vfs.writeFileSync(path, "# Skill");
+    }
+    const manager = new GrokBuildSkillManager(vfs);
+    manager.updateStartupBaseline([
+      info("review", "/repo/review/SKILL.md"),
+      info("manual", "/repo/manual/SKILL.md", { disableModelInvocation: true }),
+      info("gated", "/repo/gated/SKILL.md", { paths: ["src/**"] }),
+    ]);
+    expect(manager.suggestSkillPath("/wrong/manual/SKILL.md")).toBe("/repo/manual/SKILL.md");
+    expect(manager.suggestSkillPath("/wrong/gated/SKILL.md")).toBe("/repo/gated/SKILL.md");
+
+    manager.updateStartupBaseline([info("review", "/repo/review/SKILL.md", { enabled: false })]);
+    expect(manager.suggestSkillPath("/wrong/review/SKILL.md")).toBeUndefined();
+    expect(manager.suggestSkillPath("/wrong/manual/SKILL.md")).toBeUndefined();
+  });
+
+  it("rewrites registered worktree suggestions to the model-visible cwd", () => {
+    const vfs = new VirtualFS();
+    vfs.mkdirSync("/real/worktree/.grok/skills/review", { recursive: true });
+    vfs.writeFileSync("/real/worktree/.grok/skills/review/SKILL.md", "# Review");
+    vfs.mkdirSync("/external", { recursive: true });
+    vfs.writeFileSync("/external/SKILL.md", "# External");
+    const manager = new GrokBuildSkillManager(vfs, "/real/worktree", { displayWorkingDirectory: "/display/project" });
+    manager.updateStartupBaseline([
+      info("review", "/real/worktree/.grok/skills/review/SKILL.md"),
+      info("external", "/external/SKILL.md"),
+    ]);
+    expect(manager.suggestSkillPath("/wrong/review/SKILL.md"))
+      .toBe("/display/project/.grok/skills/review/SKILL.md");
+    expect(manager.suggestSkillPath("/wrong/external/SKILL.md")).toBe("/external/SKILL.md");
+  });
+
+  it("re-hides activated conditional skills on native clear", () => {
+    const vfs = new VirtualFS();
+    vfs.mkdirSync("/src", { recursive: true });
+    vfs.writeFileSync("/src/main.ts", "export {};");
+    vfs.mkdirSync("/repo/gated", { recursive: true });
+    vfs.writeFileSync("/repo/gated/SKILL.md", "# Gated");
+    const manager = new GrokBuildSkillManager(vfs);
+    manager.updateStartupBaseline([info("gated", "/repo/gated/SKILL.md", { paths: ["src/**"] })]);
+
+    expect(manager.afterToolCall(call("read_file", { target_file: "/src/main.ts" }), ok)).toContain("gated");
+    expect(manager.discoveredSkills().map(({ name }) => name)).toEqual(["gated"]);
+    manager.onClear();
+    expect(manager.startupSkills()).toEqual([]);
+    expect(manager.discoveredSkills()).toEqual([]);
+    expect(manager.afterToolCall(call("read_file", { target_file: "/src/main.ts" }), ok)).toContain("gated");
   });
 });

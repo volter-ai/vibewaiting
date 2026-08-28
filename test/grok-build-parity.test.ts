@@ -5,6 +5,8 @@ import {
   GROK_BUILD_TOOL_PARITY,
   incompleteGrokParity,
   incompleteGrokSystemParity,
+  unprovenExactGrokParity,
+  unprovenExactGrokSystemParity,
 } from "../experiments/browser-agent/src/grok-build-parity.js";
 
 describe("Grok Build parity ledger", () => {
@@ -14,16 +16,19 @@ describe("Grok Build parity ledger", () => {
     expect(native).toHaveLength(27);
   });
 
-  it("keeps unfinished parity visible to the release gate", () => {
-    const gaps = incompleteGrokParity();
-    expect(gaps.length).toBeGreaterThan(0);
-    expect(gaps.every(({ tool, gap }) => tool.length > 0 && gap.length > 0)).toBe(true);
+  it("has no unfinished browser-representable tool implementation", () => {
+    expect(incompleteGrokParity()).toEqual([]);
   });
 
-  it("keeps agent-wide startup and service gaps public", () => {
+  it("has no unfinished browser-representable system implementation", () => {
+    expect(incompleteGrokSystemParity()).toEqual([]);
+  });
+
+  it("keeps traffic-exact proof boundaries public without calling them missing code", () => {
     expect(GROK_BUILD_SYSTEM_PARITY.startup_models.level).toBe("source-ported");
     expect(GROK_BUILD_SYSTEM_PARITY.published_bundle_cache.level).toBe("source-ported");
-    expect(incompleteGrokSystemParity()).toEqual(expect.arrayContaining([
+    expect(unprovenExactGrokParity().length).toBeGreaterThan(0);
+    expect(unprovenExactGrokSystemParity()).toEqual(expect.arrayContaining([
       expect.objectContaining({ subsystem: "bundled_workflows" }),
       expect.objectContaining({ subsystem: "telemetry_and_feedback" }),
     ]));

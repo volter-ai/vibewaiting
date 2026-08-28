@@ -1,0 +1,77 @@
+{
+  "sourceRevision": "9684fa3cdbf2995e30ea8b9b637f1db008f144fc",
+  "kind": "deterministic-native-source-equivalence",
+  "provenance": [
+    { "path": "crates/codegen/xai-prompt-queue/src/combine.rs", "sha256": "834194769a65257148de3037c70bfb224569e4e9f2939268d7e3897ac2d778f0" },
+    { "path": "crates/common/xai-interjection-core/src/format.rs", "sha256": "5aeb56a363ab1b6fe1da9120e5af12c779db8a39a98eaaf844f51bf5084455aa" },
+    { "path": "crates/codegen/xai-grok-agent/src/config.rs", "sha256": "466dd9c2a3111e6e31079f2b176ad14365c561667de1e3eb3dc1984bf3508f94" },
+    { "path": "crates/codegen/xai-grok-agent/src/discovery.rs", "sha256": "533e00afecf1f2d45c26504c0cb7f95ffc35c25fce3fb87d2c7a9c3aba8d9526" },
+    { "path": "crates/codegen/xai-grok-tools/src/implementations/grok_build/task/admission.rs", "sha256": "f9ef5b9f25ac09b29c88bec12a18f6f9e1443e81f42499df3a742623129df09b" },
+    { "path": "crates/codegen/xai-grok-tools/src/implementations/grok_build/ask_user_question/format.rs", "sha256": "1dee90371e462b0ec8bf46e362e4834caf9bf429104b9882c718d0835e7d13d9" },
+    { "path": "crates/codegen/xai-grok-tools/src/implementations/grok_build/enter_plan_mode/mod.rs", "sha256": "8d05ea38dacc8280c713a00c77985cf8be3681eb000dafa926f41a49d45cf073" },
+    { "path": "crates/codegen/xai-grok-tools/src/implementations/grok_build/exit_plan_mode/mod.rs", "sha256": "8ab19770ebd671ee419f9c3ad1d1748829da5ebb8ee78745450cc68d462f8fd7" },
+    { "path": "crates/codegen/xai-grok-shell/src/session/workflow/schema_contract.rs", "sha256": "5257be17b857c612671cfa72518875757ee7248e2caee5d43e75b08e240b692a" },
+    { "path": "crates/codegen/xai-workflow/src/engine.rs", "sha256": "267b26c1a4417430991a667e75533ae7102099f2f53e3797b1c75c81f93e13ea" }
+  ],
+  "promptQueue": {
+    "prefixCases": [
+      { "name": "three_plain_prompts_merge", "items": [{ "id": "a", "text": "one" }, { "id": "b", "text": "two" }, { "id": "c", "text": "three" }], "skipIds": [], "length": 3, "joined": "one\n\ntwo\n\nthree" },
+      { "name": "stops_at_bash", "items": [{ "id": "a", "text": "one" }, { "id": "b", "text": "two" }, { "id": "bash", "text": "ls", "isBash": true }, { "id": "c", "text": "three" }], "skipIds": [], "length": 2 },
+      { "name": "stops_at_non_prompt_kind", "items": [{ "id": "a", "text": "one" }, { "id": "b", "text": "two" }, { "id": "cmd", "text": "/compact", "isPlainPrompt": false }], "skipIds": [], "length": 2 },
+      { "name": "stops_at_expanded_skill", "items": [{ "id": "a", "text": "one" }, { "id": "sk", "text": "/commit", "isExpandedSkill": true }, { "id": "b", "text": "two" }], "skipIds": [], "length": 1 },
+      { "name": "stops_at_image_follower", "items": [{ "id": "a", "text": "one" }, { "id": "b", "text": "two" }, { "id": "img", "text": "see", "hasImages": true }], "skipIds": [], "length": 2 },
+      { "name": "front_image_may_merge", "items": [{ "id": "f", "text": "with image", "hasImages": true }, { "id": "b", "text": "two" }], "skipIds": [], "length": 2 },
+      { "name": "skips_row_under_edit", "items": [{ "id": "a", "text": "one" }, { "id": "edit", "text": "draft" }, { "id": "c", "text": "three" }], "skipIds": ["edit"], "length": 1 },
+      { "name": "ineligible_front_taken_alone", "items": [{ "id": "b", "text": "ls", "isBash": true }, { "id": "a", "text": "one" }], "skipIds": [], "length": 1 },
+      { "name": "empty", "items": [], "skipIds": [], "length": 0 }
+    ],
+    "interjection": "The user sent a message while you were working:\n<user_query>\nstop and fix the test first\n</user_query>\nMake sure to complete any unfinished tasks from previous turns.",
+    "interrupt": "The user interrupted the previous turn:\n<user_query>\ndo the other thing\n</user_query>\nMake sure to complete any unfinished tasks from previous turns.",
+    "crossingScalar": { "character": "€", "inputCount": 10000, "keptCount": 8334 }
+  },
+  "agents": {
+    "builtinNames": ["general-purpose", "explore", "plan"],
+    "definition": "---\nname: contract-agent\ndescription: Native contract fixture\npromptMode: extend\npermissionMode: dontAsk\ntools: [read_file, grep]\ndisallowedTools: [web_search]\ncompletionRequirement:\n  tool: my_agent__complete_task\n  reminder: You must call complete_task\n  recovery:\n    maxRetries: 5\n    baseDelayMs: 5000\n    maxDelayMs: 60000\n---\nYou are a helper.",
+    "expected": {
+      "name": "contract-agent",
+      "description": "Native contract fixture",
+      "promptMode": "extend",
+      "permissionMode": "dontAsk",
+      "tools": ["read_file", "grep"],
+      "disallowedTools": ["web_search"],
+      "promptBody": "You are a helper.",
+      "completionRequirement": { "tool": "my_agent__complete_task", "reminder": "You must call complete_task", "recovery": { "maxRetries": 5, "baseDelayMs": 5000, "maxDelayMs": 60000 } }
+    }
+  },
+  "subagents": {
+    "defaultMaxConcurrent": 32,
+    "fifo": ["first", "second", "third"],
+    "cancelledQueuedStarts": false
+  },
+  "questions": {
+    "questions": [
+      { "question": "Which database?", "options": [{ "label": "Redis", "description": "In-memory", "preview": "redis preview" }, { "label": "Postgres", "description": "Relational" }] },
+      { "question": "Which checks?", "options": [{ "label": "Tests", "description": "Unit tests" }, { "label": "Types", "description": "Type checking" }], "multi_select": true }
+    ],
+    "accepted": "User has answered your questions: \"Which database?\"=\"Redis\" selected preview:\nredis preview, \"Which checks?\"=\"Tests, Other\" user notes: Also run lint. You can now continue with the user's answers in mind.",
+    "chat": "The user wants to clarify these questions.\n    This means they may have additional information, context or questions for you.\n    Take their response into account and then reformulate the questions if appropriate.\n    Start by asking them what they would like to clarify.\n\n    Questions asked:\n- \"Which database?\"\n  Answer: Redis\n- \"Which checks?\"\n  (No answer provided)",
+    "skip": "The user has indicated they have provided enough answers for the plan interview.\nStop asking clarifying questions and proceed to finish the plan with the information you have.\n\nQuestions asked and answers provided:\n- \"Which database?\"\n  (No answer provided)\n- \"Which checks?\"\n  (No answer provided)",
+    "cancelled": "User declined to answer the questions. Continue with the task using your best judgment, or ask different questions."
+  },
+  "plan": {
+    "declinedEntry": "User declined to enter plan mode.",
+    "editGate": "Rejected: file edits are not allowed in plan mode - the only editable file is the plan file (/.grok/plan.md).",
+    "revision": "The user wants to revise the plan. The user said:\nAdd rollback steps",
+    "emptyExit": "Plan mode exit approved. No plan content was found — you can proceed.",
+    "abandoned": "The user chose to abandon the plan entirely (via the Abandon option in the plan approval dialog). Plan mode has been disabled. Do not call exit_plan_mode again unless the user explicitly asks to re-enter plan mode.",
+    "resumed": "The user approved the plan. Implement the plan in plan.md."
+  },
+  "workflow": {
+    "noArgs": { "status": "paused", "kind": "verification", "message": "No research query was provided. Run /deep-research <query>, or pass args.query." },
+    "schemaAttempts": [
+      { "success": true, "output": "I finished, but forgot JSON.", "totalTokensUsed": 11, "durationMs": 20 },
+      { "success": true, "output": "done\n```json\n{\"ok\":true}\n```", "totalTokensUsed": 7, "durationMs": 9 }
+    ],
+    "schemaResult": { "success": true, "output": { "ok": true }, "cancelled": false, "tokens_used": 18, "duration_ms": 29 }
+  }
+}

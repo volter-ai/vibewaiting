@@ -89,7 +89,7 @@ export class GrokBuildMonitorEventStream {
     this.buffer = lines.pop() ?? "";
     for (const line of lines) {
       const normalized = line.trim();
-      if (normalized) this.pending.push(truncate(normalized, LINE_LIMIT, "...(truncated)"));
+      if (normalized) this.pending.push(truncateNative(normalized, LINE_LIMIT, "...(truncated)"));
     }
     if (this.pending.length && this.timer === undefined) this.timer = setTimeout(() => this.flushBatch(), DEBOUNCE_MS);
   }
@@ -97,7 +97,7 @@ export class GrokBuildMonitorEventStream {
   flush(): void {
     const normalized = this.buffer.trim();
     this.buffer = "";
-    if (normalized) this.pending.push(truncate(normalized, LINE_LIMIT, "...(truncated)"));
+    if (normalized) this.pending.push(truncateNative(normalized, LINE_LIMIT, "...(truncated)"));
     this.flushBatch();
   }
 
@@ -105,7 +105,7 @@ export class GrokBuildMonitorEventStream {
     if (this.timer !== undefined) clearTimeout(this.timer);
     this.timer = undefined;
     if (!this.pending.length) return;
-    const text = truncate(this.pending.splice(0).join("\n"), BATCH_LIMIT, "\n...(truncated)");
+    const text = truncateNative(this.pending.splice(0).join("\n"), BATCH_LIMIT, "\n...(truncated)");
     const outcome = this.rateLimiter.process();
     if (outcome.type === "suppressed") return;
     const description = this.description.replaceAll('"', "'").replace(/[\r\n]/gu, " ");
@@ -120,10 +120,62 @@ export class GrokBuildMonitorEventStream {
   }
 }
 
-function truncate(value: string, maximumBytes: number, suffix: string): string {
+interface ParsedMonitorEvent {
+  taskId: string;
+  description: string;
+  inner: string;
+}
+
+/** Final model-facing projection of native's buffered monitor event drain. */
+export function formatGrokMonitorEvents(events: readonly string[], taskOutputTool = "get_command_or_subagent_output"): string | undefined {
+  if (events.length === 0) return undefined;
+  const parsed = events.map(parseMonitorEvent);
+  if (parsed.length === 1) {
+    const event = parsed[0]!;
+    return `<monitor-event task_id="${event.taskId}">\n[${event.description || "event"}] ${event.inner}\n</monitor-event>`;
+  }
+  const groups = new Map<string, ParsedMonitorEvent[]>();
+  for (const event of parsed) {
+    const group = groups.get(event.taskId);
+    if (group) group.push(event);
+    else groups.set(event.taskId, [event]);
+  }
+  let output = `${parsed.length} monitor events from ${groups.size} ${groups.size === 1 ? "monitor" : "monitors"} (use ${taskOutputTool} to identify each monitor):`;
+  for (const [taskId, group] of groups) {
+    const description = group.find((event) => event.description)?.description || "event";
+    output += `\n\n<monitor description="${description}" task_id="${taskId}">`;
+    for (let index = 0; index < group.length; index += 1) output += `\n[${index + 1}] ${group[index]!.inner}`;
+    output += "\n</monitor>";
+  }
+  return output;
+}
+
+function parseMonitorEvent(value: string): ParsedMonitorEvent {
+  const prefix = '<monitor-event description="';
+  const openEnd = value.indexOf(">\n", prefix.length);
+  const close = "\n</monitor-event>";
+  if (!value.startsWith(prefix) || openEnd < 0 || !value.endsWith(close)) {
+    return { taskId: "unknown", description: "event", inner: value };
+  }
+  const open = value.slice(prefix.length, openEnd);
+  const anchor = open.lastIndexOf('" task_id="');
+  if (anchor < 0 || !open.endsWith('"')) return { taskId: "unknown", description: "event", inner: value };
+  return {
+    description: sanitizeDescription(open.slice(0, anchor)),
+    taskId: open.slice(anchor + 11, -1),
+    inner: value.slice(openEnd + 2, -close.length),
+  };
+}
+
+function sanitizeDescription(value: string): string {
+  return value.replaceAll('"', "'").replace(/[\r\n]/gu, " ");
+}
+
+function truncateNative(value: string, maximumBytes: number, suffix: string): string {
   if (new TextEncoder().encode(value).length <= maximumBytes) return value;
-  const suffixBytes = new TextEncoder().encode(suffix).length;
-  return `${utf8Prefix(value, Math.max(0, maximumBytes - suffixBytes))}${suffix}`;
+  // Rust's monitor truncators retain `maximumBytes` of payload and append the
+  // marker afterwards; the marker is intentionally outside the payload cap.
+  return `${utf8Prefix(value, maximumBytes)}${suffix}`;
 }
 
 function utf8Prefix(value: string, maximumBytes: number): string {

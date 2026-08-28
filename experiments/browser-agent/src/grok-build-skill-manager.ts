@@ -18,8 +18,11 @@ type SkillVfs = GrokBuildSkillFileSystem;
 
 /** Session-scoped port of Grok Build's startup, conditional, and path-driven skill lifecycle. */
 export class GrokBuildSkillManager {
-  private readonly startup: GrokBuildSkillInfo[];
+  private startup: GrokBuildSkillInfo[];
   private readonly held = new Map<string, GrokBuildSkillInfo>();
+  private readonly discovered: GrokBuildSkillInfo[] = [];
+  private readonly activatedConditionalPaths = new Set<string>();
+  private readonly dynamicHeldPaths = new Set<string>();
   private readonly discoveredPaths = new Set<string>();
   private readonly announcedNames = new Set<string>();
   private readonly checkedDirectories = new Set<string>();
@@ -42,6 +45,86 @@ export class GrokBuildSkillManager {
     return this.startup;
   }
 
+  discoveredSkills(): readonly GrokBuildSkillInfo[] {
+    return this.discovered;
+  }
+
+  /** Native plugin/bundle reload semantics: current baseline owns duplicate paths. */
+  updateStartupBaseline(skills: readonly GrokBuildSkillInfo[]): void {
+    const incomingPaths = new Set(skills.map((skill) => canonicalGrokBuildSkillPath(this.vfs, skill.path)));
+    for (const [path, skill] of [...this.held]) {
+      const canonical = canonicalGrokBuildSkillPath(this.vfs, skill.path);
+      if (!this.dynamicHeldPaths.has(canonical) || incomingPaths.has(canonical)) this.held.delete(path);
+    }
+    this.startup = [];
+    for (const skill of skills) {
+      const canonical = canonicalGrokBuildSkillPath(this.vfs, skill.path);
+      if (skill.paths?.length && !this.activatedConditionalPaths.has(canonical)) this.held.set(skill.path, skill);
+      else this.startup.push(skill);
+    }
+    this.rebuildKnownPaths();
+  }
+
+  onCompaction(): void {
+    this.announcedNames.clear();
+    this.checkedDirectories.clear();
+  }
+
+  onClear(): void {
+    this.discovered.splice(0);
+    this.checkedDirectories.clear();
+    this.announcedNames.clear();
+    this.activatedConditionalPaths.clear();
+    const unconditional: GrokBuildSkillInfo[] = [];
+    for (const skill of this.startup) {
+      if (skill.paths?.length) this.held.set(skill.path, skill);
+      else unconditional.push(skill);
+    }
+    this.startup = unconditional;
+    this.rebuildKnownPaths();
+  }
+
+  /** Native wrong-root recovery for a failed read of a registered SKILL.md. */
+  suggestSkillPath(requestedPath: string): string | undefined {
+    const normalizedRequest = resolvePath(requestedPath, this.workspacePath);
+    const requestedName = skillNameFromPath(normalizedRequest);
+    if (!requestedName) return;
+    const ownedPaths = new Set<string>();
+    let matchCount = 0;
+    let suggestion: string | undefined;
+    for (const skill of [...this.startup, ...this.held.values(), ...this.discovered]) {
+      const canonical = canonicalGrokBuildSkillPath(this.vfs, skill.path);
+      if (ownedPaths.has(canonical)) continue;
+      ownedPaths.add(canonical);
+      if (!skill.enabled) continue;
+      const directoryName = skillNameFromPath(skill.path);
+      if (skill.name !== requestedName && directoryName !== requestedName) continue;
+      matchCount += 1;
+      if (matchCount > 1) return;
+      if (canonical === canonicalGrokBuildSkillPath(this.vfs, normalizedRequest)) continue;
+      if (!this.vfs.existsSync(skill.path) || !this.vfs.statSync(skill.path).isFile()) continue;
+      suggestion = this.displayPath(skill.path);
+    }
+    return matchCount === 1 ? suggestion : undefined;
+  }
+
+  private displayPath(path: string): string {
+    const display = this.discoveryOptions.displayWorkingDirectory;
+    if (!display) return path;
+    const real = normalizePath(this.workspacePath);
+    const normalized = normalizePath(path);
+    if (normalized !== real && !normalized.startsWith(`${real}/`)) return path;
+    const relative = normalized === real ? "" : normalized.slice(real.length + 1);
+    return resolvePath(relative, display);
+  }
+
+  private rebuildKnownPaths(): void {
+    this.discoveredPaths.clear();
+    for (const skill of [...this.startup, ...this.held.values(), ...this.discovered]) {
+      this.discoveredPaths.add(canonicalGrokBuildSkillPath(this.vfs, skill.path));
+    }
+  }
+
   /** Native runs this reconciliation after successful path-producing tool calls. */
   afterToolCall(call: GrokBuildToolCall, result: GrokBuildToolResult): string | undefined {
     if (result.isError) return;
@@ -50,8 +133,12 @@ export class GrokBuildSkillManager {
     const newlyAvailable: GrokBuildSkillInfo[] = [];
 
     for (const skill of this.held.values()) {
-      if (!skill.paths?.length || !paths.some((path) => matchesAnyPath(skill.paths!, path, this.workspacePath))) continue;
-      this.held.delete(skill.path);
+      const canonical = canonicalGrokBuildSkillPath(this.vfs, skill.path);
+      if (this.activatedConditionalPaths.has(canonical)
+        || !skill.paths?.length
+        || !paths.some((path) => matchesAnyPath(skill.paths!, path, this.workspacePath))) continue;
+      this.activatedConditionalPaths.add(canonical);
+      if (!this.discovered.some((entry) => canonicalGrokBuildSkillPath(this.vfs, entry.path) === canonical)) this.discovered.push(skill);
       if (!this.announcedNames.has(skill.name)) newlyAvailable.push(skill);
     }
 
@@ -74,8 +161,12 @@ export class GrokBuildSkillManager {
         // skill is therefore always held until a later matching tool call.
         if (skill.paths?.length) {
           this.held.set(skill.path, skill);
+          this.dynamicHeldPaths.add(canonical);
         } else if (!this.announcedNames.has(skill.name)) {
+          this.discovered.push(skill);
           newlyAvailable.push(skill);
+        } else {
+          this.discovered.push(skill);
         }
       }
     }
@@ -87,6 +178,14 @@ export class GrokBuildSkillManager {
     });
     return createGrokBuildSkillReminder(deduplicated);
   }
+}
+
+function skillNameFromPath(path: string): string | undefined {
+  const normalized = path.replaceAll("\\", "/").replace(/\/+$/u, "");
+  if (!normalized.endsWith("/SKILL.md")) return;
+  const parent = normalized.slice(0, -"/SKILL.md".length);
+  const name = parent.slice(parent.lastIndexOf("/") + 1);
+  return name || undefined;
 }
 
 function inputObject(call: GrokBuildToolCall): Record<string, unknown> | undefined {
