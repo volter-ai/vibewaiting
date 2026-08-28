@@ -8,7 +8,7 @@ export type GrokScheduledTaskEvent =
   | { type: "removed"; taskId: string; reason: "deleted" | "expired" };
 
 export interface ScheduledSubagentHandle {
-  readonly status: "running" | "completed" | "failed" | "cancelled";
+  readonly status: "running" | "completed" | "failed" | "cancelled" | "timed_out";
   readonly output: string;
 }
 

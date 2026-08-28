@@ -74,7 +74,7 @@ export const GROK_BUILD_TOOL_PARITY = {
     owner: "browser",
     level: "source-ported",
     evidence: ["test/grok-build-runtime.test.ts", "test/browser-node-check.test.ts", "e2e/browser-agent.e2e.mjs"],
-    gap: "Native exit headers, omitted-timeout foreground completion, and the recorded Pong npm/node syntax check now match strictly; broader shell/process-group, timeout, redirection, and native command corpora remain before exact.",
+    gap: "Native exit headers, omitted-timeout foreground completion, explicit foreground timeout framing, positive background timeout enforcement, and the recorded Pong npm/node syntax check now match; broader shell/process-group TERM-to-KILL escalation, redirection, and native command corpora remain before exact.",
   },
   read_file: {
     owner: "browser",
@@ -96,7 +96,7 @@ export const GROK_BUILD_TOOL_PARITY = {
     owner: "browser",
     level: "source-ported",
     evidence: ["test/grok-build-runtime.test.ts", "test/grok-build-rich-files-and-tasks.test.ts", "experiments/browser-agent/src/grok-build-background-tasks.ts"],
-    gap: "Live output, full VFS logs, UTF-8-safe previews, soft wrapping, empty-output wording, capped-wait advisories, single/multi cards, ID normalization, poll/wait-all, and typed terminal outcomes are ported. Browser logs use task-UUID VFS paths rather than native tool-call session paths; explicit background timeout/timed_out propagation, native timing corpus, and detailed live-subagent progress metadata remain before exact.",
+    gap: "Live output, full VFS logs, UTF-8-safe previews, soft wrapping, empty-output wording, capped-wait advisories, single/multi cards, ID normalization, poll/wait-all, positive background timeout enforcement, and timed_out propagation are ported. Browser logs use task-UUID VFS paths rather than native tool-call session paths; native timing corpus and detailed live-subagent progress metadata remain before exact.",
   },
   spawn_subagent: {
     owner: "browser",

@@ -184,7 +184,7 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
 
   private async runTerminal(input: JsonObject, signal: AbortSignal): Promise<string> {
     const command = string(input.command, "command");
-    if (boolean(input.background, false)) return this.startBackground(command, signal);
+    if (boolean(input.background, false)) return this.startBackground(command, signal, backgroundTimeout(input.timeout));
     const builtin = tryBrowserNodeCheck(this.container.vfs, this.workspacePath, command);
     if (builtin) return formatCommandResult(builtin);
     if (input.timeout === undefined || input.timeout === null) {
@@ -196,26 +196,38 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
       return `Command automatically moved to background with task ID: ${task.id}`;
     }
     const controller = new AbortController();
-    const timeoutMs = Math.min(integer(input.timeout, 120_000), 36_000_000);
-    const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+    const timeoutMs = boundedCommandTimeout(input.timeout, 120_000);
+    let timedOut = false;
+    let stdout = "";
+    let stderr = "";
+    const timer = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort(new DOMException("Command timed out", "TimeoutError"));
+    }, timeoutMs);
     try {
       const result = await this.container.run(command, {
         cwd: this.workspacePath,
         signal: AbortSignal.any([signal, controller.signal]),
+        onStdout: (chunk) => { stdout += chunk; },
+        onStderr: (chunk) => { stderr += chunk; },
       });
       return formatCommandResult(result);
+    } catch (error) {
+      if (!timedOut) throw error;
+      const output = [stdout, stderr].filter(Boolean).join(stdout && stderr ? "\n" : "");
+      return `exit: killed (timeout)${output ? `\n${output}` : ""}`;
     } finally {
       window.clearTimeout(timer);
     }
   }
 
-  private startBackground(command: string, parentSignal: AbortSignal): string {
-    const task = this.createCommandTask(command, parentSignal, "command");
+  private startBackground(command: string, parentSignal: AbortSignal, maxRuntimeMs?: number): string {
+    const task = this.createCommandTask(command, parentSignal, "command", maxRuntimeMs);
     return `Command started in background with task ID: ${task.id}`;
   }
 
-  private createCommandTask(command: string, parentSignal: AbortSignal, kind: "command" | "monitor"): BrowserBackgroundTask {
-    return this.background.createCommand(command, parentSignal, kind);
+  private createCommandTask(command: string, parentSignal: AbortSignal, kind: "command" | "monitor", maxRuntimeMs?: number): BrowserBackgroundTask {
+    return this.background.createCommand(command, parentSignal, kind, undefined, maxRuntimeMs);
   }
 
   private async spawnSubagent(input: JsonObject, parentSignal: AbortSignal): Promise<string> {
@@ -383,6 +395,18 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
 function formatCommandResult(result: RunResult): string {
   const output = [result.stdout, result.stderr].filter(Boolean).join(result.stdout && result.stderr ? "\n" : "");
   return `exit: ${result.exitCode}${output ? `\n${output}` : ""}`;
+}
+
+function boundedCommandTimeout(value: unknown, fallback: number): number {
+  const timeout = integer(value, fallback);
+  if (timeout < 0) throw new Error("Expected an integer greater than or equal to 0");
+  return Math.min(timeout, 36_000_000);
+}
+
+function backgroundTimeout(value: unknown): number | undefined {
+  if (value === undefined || value === null) return;
+  const timeout = boundedCommandTimeout(value, 0);
+  return timeout === 0 ? undefined : timeout;
 }
 
 function normalize(path: string): string {

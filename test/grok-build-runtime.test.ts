@@ -150,6 +150,49 @@ These subagents were launched before this compaction and are still running. Use 
     }
   });
 
+  it("renders explicit foreground timeouts and tracks positive background timeouts", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("window", { setTimeout, clearTimeout });
+    try {
+      const vfs = new VirtualFS();
+      const tools = new GrokBuildBrowserRuntime({
+        vfs,
+        run(_command, options) {
+          options?.onStdout?.("partial output");
+          return new Promise((_resolve, reject) => {
+            options?.signal?.addEventListener("abort", () => reject(options.signal?.reason), { once: true });
+          });
+        },
+      });
+      const signal = new AbortController().signal;
+      const foreground = tools.execute({
+        callId: "foreground-timeout",
+        name: "run_terminal_command",
+        arguments: JSON.stringify({ command: "slow", description: "Exercise timeout", timeout: 25 }),
+      }, signal);
+      await vi.advanceTimersByTimeAsync(25);
+      await expect(foreground).resolves.toEqual({ output: "exit: killed (timeout)\npartial output" });
+
+      const started = await tools.execute({
+        callId: "background-timeout",
+        name: "run_terminal_command",
+        arguments: JSON.stringify({ command: "slow", description: "Exercise background timeout", background: true, timeout: 40 }),
+      }, signal);
+      const taskId = /task ID: ([0-9a-f-]+)/u.exec(started.output)?.[1];
+      await vi.advanceTimersByTimeAsync(40);
+      await expect(tools.execute({
+        callId: "poll-timeout",
+        name: "get_command_or_subagent_output",
+        arguments: JSON.stringify({ task_ids: [taskId] }),
+      }, signal)).resolves.toMatchObject({
+        output: expect.stringMatching(/Status: timed_out[\s\S]*partial output/u),
+      });
+    } finally {
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
+  });
+
   it("preserves native trailing-newline rendering", async () => {
     const { vfs, tools } = runtime();
     vfs.writeFileSync("/src/trailing.txt", "first\nsecond\n");

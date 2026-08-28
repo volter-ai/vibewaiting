@@ -20,7 +20,7 @@ export interface BrowserBackgroundTask {
   id: string;
   controller: AbortController;
   promise: Promise<string>;
-  status: "running" | "completed" | "failed" | "cancelled";
+  status: "running" | "completed" | "failed" | "cancelled" | "timed_out";
   output: string;
   kind: "command" | "monitor" | "subagent" | "workflow";
   command?: string;
@@ -31,6 +31,8 @@ export interface BrowserBackgroundTask {
   exitCode?: number;
   outputFile: string;
   rawOutputBytes: number;
+  explicitlyCancelled?: boolean;
+  timedOut?: boolean;
 }
 
 export interface ExternalTaskOptions {
@@ -69,6 +71,7 @@ export class GrokBuildBackgroundTasks {
     parentSignal: AbortSignal,
     kind: "command" | "monitor",
     onOutput?: (chunk: string, task: BrowserBackgroundTask) => void,
+    maxRuntimeMs?: number,
   ): BrowserBackgroundTask {
     const id = uuidV7();
     const controller = new AbortController();
@@ -97,6 +100,11 @@ export class GrokBuildBackgroundTasks {
       outputFile,
       rawOutputBytes: 0,
     };
+    const timeout = maxRuntimeMs && maxRuntimeMs > 0 ? setTimeout(() => {
+      if (task.status !== "running") return;
+      task.timedOut = true;
+      controller.abort(new DOMException("Task timed out", "TimeoutError"));
+    }, maxRuntimeMs) : undefined;
     task.promise = this.container.run(command, {
       cwd: this.workspacePath,
       signal: AbortSignal.any([parentSignal, controller.signal]),
@@ -107,11 +115,12 @@ export class GrokBuildBackgroundTasks {
       this.finish(task, output, result.exitCode === 0 ? "completed" : "failed", result.exitCode);
       return task.output;
     }, (error: unknown) => {
-      const cancelled = controller.signal.aborted;
-      const output = error instanceof Error ? error.message : String(error);
-      this.finish(task, output, cancelled ? "cancelled" : "failed", cancelled ? undefined : 1);
+      const timedOut = Boolean(task.timedOut && !task.explicitlyCancelled);
+      const cancelled = Boolean(task.explicitlyCancelled);
+      const output = streamed ? combined : timedOut || cancelled ? "" : error instanceof Error ? error.message : String(error);
+      this.finish(task, output, timedOut ? "timed_out" : cancelled ? "cancelled" : "failed", timedOut || cancelled ? undefined : 1);
       return task.output;
-    });
+    }).finally(() => { if (timeout !== undefined) clearTimeout(timeout); });
     this.tasks.set(id, task);
     return task;
   }
@@ -158,6 +167,7 @@ export class GrokBuildBackgroundTasks {
         : "already_exited: Task had already completed";
     }
     task.controller.abort(new DOMException("Task terminated", "AbortError"));
+    task.explicitlyCancelled = true;
     task.status = "cancelled";
     task.endedAt = Date.now();
     return task.kind === "subagent"
