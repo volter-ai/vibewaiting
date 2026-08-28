@@ -5,7 +5,7 @@ const conformanceCorpus = process.env.GROK_CONFORMANCE_CORPUS ?? "test/fixtures/
 export default defineConfig({
   testDir: "./e2e",
   testMatch: ["browser-agent.e2e.mjs", "browser-agent-long.e2e.mjs"],
-  timeout: 10_000,
+  timeout: 20_000,
   expect: { timeout: 1_000 },
   fullyParallel: false,
   workers: 1,

@@ -2,6 +2,32 @@ import { test, expect } from "@playwright/test";
 
 test.skip(Boolean(process.env.GROK_LONG_CONFORMANCE_CORPUS), "The opt-in long corpus has its own generic assertions.");
 
+test.afterEach(async ({ page, context }, testInfo) => {
+  if (testInfo.status === testInfo.expectedStatus) return;
+  const frames = await Promise.all(page.frames().map(async (frame) => {
+    let serviceWorker;
+    if (frame.url().includes("sandbox.")) {
+      serviceWorker = await frame.evaluate(async () => {
+        const registration = await navigator.serviceWorker.getRegistration().catch(() => undefined);
+        return {
+          controller: navigator.serviceWorker.controller?.state,
+          active: registration?.active?.state,
+          waiting: registration?.waiting?.state,
+          installing: registration?.installing?.state,
+        };
+      }).catch((error) => ({ error: error instanceof Error ? error.message : String(error) }));
+    }
+    return { url: frame.url(), serviceWorker };
+  }));
+  console.error(JSON.stringify({
+    event: "browser_agent_failure_state",
+    runtimeStatus: await page.locator("#runtime-status").textContent().catch(() => undefined),
+    agentState: await page.locator("#agent-state").textContent().catch(() => undefined),
+    serviceWorkers: context.serviceWorkers().map((worker) => worker.url()),
+    frames,
+  }));
+});
+
 async function expectTextEventually(locator, expected, attempts = 5) {
   let failure;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -15,13 +41,31 @@ async function expectTextEventually(locator, expected, attempts = 5) {
   throw failure;
 }
 
+async function stubAuthenticatedStartup(page, archiveMessage) {
+  await page.route("**/api/grok/models", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: '{"data":[{"id":"grok-4.6","model":"grok-4.6","context_window":500000}]}',
+  }));
+  await page.route("**/api/grok/settings", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: '{"default_model":"grok-4.6"}',
+  }));
+  await page.route("**/api/grok/bundle/archive", (route) => route.fulfill({
+    status: 401,
+    contentType: "application/json",
+    body: JSON.stringify({ error: { message: archiveMessage } }),
+  }));
+}
+
 test("replays native Grok Build through an isolated browser sandbox with working HMR and gameplay", async ({ page }) => {
   await page.goto("http://127.0.0.1:4175/?conformance=http%3A%2F%2F127.0.0.1%3A4319", {
     waitUntil: "domcontentloaded",
     timeout: 10_000,
   });
 
-  await expectTextEventually(page.locator("#agent-state"), "Complete");
+  await expectTextEventually(page.locator("#agent-state"), "Complete", 12);
   await expect(page.locator("#turn-count")).toHaveText("5", { timeout: 1_000 });
   await expect(page.locator("#hmr-count")).toHaveText("1", { timeout: 1_000 });
   await expect(page.locator("#iframe-loads")).toHaveText("1", { timeout: 1_000 });
@@ -63,11 +107,7 @@ test("replays native Grok Build through an isolated browser sandbox with working
 });
 
 test("renders native structured question and plan approval interactions", async ({ page }) => {
-  await page.route("**/api/grok/bundle/archive", (route) => route.fulfill({
-    status: 401,
-    contentType: "application/json",
-    body: '{"error":{"message":"UI-only test"}}',
-  }));
+  await stubAuthenticatedStartup(page, "UI-only test");
   await page.goto("http://127.0.0.1:4175/", { waitUntil: "domcontentloaded", timeout: 10_000 });
 
   await page.evaluate(() => {
@@ -108,11 +148,7 @@ test("renders native structured question and plan approval interactions", async 
 });
 
 test("commits browser projects across reload and recovers the prior verified snapshot", async ({ page }) => {
-  await page.route("**/api/grok/bundle/archive", (route) => route.fulfill({
-    status: 401,
-    contentType: "application/json",
-    body: '{"error":{"message":"storage test"}}',
-  }));
+  await stubAuthenticatedStartup(page, "storage test");
   await page.goto("http://127.0.0.1:4175/", { waitUntil: "domcontentloaded", timeout: 10_000 });
   await expect(page.locator("#runtime-status")).toContainText("Browser sandbox ready", { timeout: 10_000 });
 

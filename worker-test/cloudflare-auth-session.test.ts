@@ -33,6 +33,31 @@ function env(current: string, previous?: string): never {
   } as never;
 }
 
+function serviceEnv(overrides: Record<string, unknown> = {}): never {
+  const namespace = {
+    get: () => ({ fetch: () => Response.json({}) }),
+    idFromName: (name: string) => name,
+  };
+  const limiter = { limit: async () => ({ success: true }) };
+  return {
+    ASSETS: { fetch: async () => new Response("asset") },
+    SESSIONS: namespace,
+    RATE_GATE: namespace,
+    AUTH_RATE_LIMITER: limiter,
+    CHAT_IP_RATE_LIMITER: limiter,
+    CHAT_USER_RATE_LIMITER: limiter,
+    RELAY_ENABLED: "true",
+    INFERENCE_ENABLED: "false",
+    MEDIA_ENABLED: "true",
+    WEB_FETCH_ENABLED: "true",
+    XAI_CLIENT_VERSION: "1.0.5",
+    XAI_OAUTH_CLIENT_ID: "browser-client",
+    SESSION_ENCRYPTION_KEY: encryptionKey(6),
+    CF_VERSION_METADATA: { id: "version-1", tag: "test", timestamp: "2026-08-28T00:00:00Z" },
+    ...overrides,
+  } as never;
+}
+
 function request(path: string, method = "GET"): Request {
   return new Request(`https://durable.internal${path}`, { method });
 }
@@ -254,11 +279,37 @@ describe("distributed relay budgets", () => {
   });
 
   it("fails closed when the global relay kill switch is off", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
     const response = await worker.fetch(
       new Request("https://agent.example/api/grok/models"),
-      { RELAY_ENABLED: "false" } as never,
+      serviceEnv({ RELAY_ENABLED: "false" }),
     );
     expect(response.status).toBe(503);
     expect(await response.json()).toMatchObject({ error: { message: "The Grok relay is temporarily disabled." } });
+  });
+
+  it("reports deployment health and fails readiness on an invalid secret", async () => {
+    const logs: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((value) => logs.push(String(value)));
+    const healthy = await worker.fetch(new Request("https://agent.example/api/health"), serviceEnv());
+    expect(await healthy.json()).toEqual({ ok: true, version: "version-1" });
+    expect(healthy.headers.get("X-Vibewaiting-Version")).toBe("version-1");
+    expect(healthy.headers.get("Server-Timing")).toMatch(/^worker;dur=/u);
+
+    const ready = await worker.fetch(new Request("https://agent.example/api/ready"), serviceEnv());
+    expect(await ready.json()).toMatchObject({
+      ready: true,
+      checks: "passed",
+      capabilities: { relay: true, inference: false, media: true, webFetch: true },
+    });
+    const notReady = await worker.fetch(new Request("https://agent.example/api/ready"), serviceEnv({
+      SESSION_ENCRYPTION_KEY: "invalid",
+    }));
+    expect(notReady.status).toBe(503);
+    expect(await notReady.json()).toMatchObject({ ready: false, checks: ["session_encryption"] });
+    expect(logs.map((line) => JSON.parse(line))).toEqual(expect.arrayContaining([
+      expect.objectContaining({ event: "api_request", route: "health", status: 200, version: "version-1" }),
+      expect.objectContaining({ event: "api_request", route: "ready", status: 503, version: "version-1" }),
+    ]));
   });
 });

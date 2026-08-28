@@ -682,6 +682,7 @@ server.on("hmr-update", () => {
 
 async function start(): Promise<void> {
   try {
+    runtimeStatus.textContent = "Preparing browser project…";
     sandboxMode.textContent = `Isolated sandbox · ${new URL(sandboxOrigin).host}`;
     if (conformanceOrigin) {
       conformanceProfile = await loadConformanceProfile(conformanceOrigin);
@@ -718,6 +719,7 @@ async function start(): Promise<void> {
         }
       }).catch((error) => console.warn("Could not inspect browser storage persistence", error));
     }
+    runtimeStatus.textContent = "Loading workflow registry…";
     const workflowHost = new GrokBuildBrowserWorkflowHost({
       vfs: container.vfs,
       workspacePath: "/",
@@ -739,6 +741,7 @@ async function start(): Promise<void> {
       },
     });
     browserServices.runWorkflow = (input, signal) => workflowManager!.run(input, signal);
+    runtimeStatus.textContent = "Starting virtual server…";
     const httpServer = {
       listening: true,
       address: () => ({ port: VIRTUAL_PORT, address: "0.0.0.0", family: "IPv4" }),
@@ -761,6 +764,7 @@ async function start(): Promise<void> {
     bootstrap.searchParams.set("parentOrigin", location.origin);
     bootstrap.searchParams.set("nonce", sandboxNonce);
     bootstrap.searchParams.set("port", String(VIRTUAL_PORT));
+    runtimeStatus.textContent = "Connecting isolated sandbox…";
     preview.src = bootstrap.href;
 
     // Do not let the agent mutate files until the cross-origin bridge and the

@@ -48,8 +48,8 @@
     "conformance:proxy": "npm run build:conformance && node scripts/grok-conformance-proxy.mjs",
     "verify:grok-native-control": "node scripts/verify-grok-native-control-fixture.mjs",
     "typecheck:worker": "tsc -p cloudflare/tsconfig.json",
-    "deploy:browser-agent": "VITE_SANDBOX_ORIGIN=https://vibewaiting-browser-agent-sandbox.aaron-0ed.workers.dev npm run build:browser-agent && wrangler deploy",
-    "deploy:browser-agent-sandbox": "npm run build:browser-agent && wrangler deploy --config wrangler.sandbox.jsonc",
+    "deploy:browser-agent": "node scripts/deploy-browser-agent.mjs",
+    "deploy:browser-agent:dry-run": "node scripts/deploy-browser-agent.mjs --dry-run",
     "verify:store-identity": "node scripts/verify-extension-identity.mjs",
     "verify:store-assets": "node scripts/verify-store-assets.mjs",
     "package:release": "node scripts/package-release.mjs",
@@ -61,9 +61,11 @@
     "test": "vitest run",
     "test:widget": "npm run build:widget && playwright test",
     "test:browser-agent-e2e": "npm run build:conformance && playwright test --config playwright.browser-agent.config.mjs",
-    "check": "npm run verify:store-identity && npm run verify:store-assets && npm run typecheck && npm test && npm run build",
+    "check": "npm run verify:store-identity && npm run verify:store-assets && npm run typecheck && npm test && npm audit --audit-level=moderate && npm run build",
     "check:browser": "npm run check && npm run test:widget",
+    "check:browser-agent": "npm run typecheck && npm test && npm audit --audit-level=moderate && npm run build:browser-agent && npm run test:browser-agent-e2e",
     "smoke": "node scripts/smoke-harness.mjs",
+    "smoke:browser-agent": "node scripts/smoke-browser-agent-deploy.mjs",
     "smoke:sessions": "npm run build && node scripts/smoke-sessions.mjs"
   },
   "dependencies": {

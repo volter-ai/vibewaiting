@@ -4,5 +4,6 @@ release/
 test-results/
 .env
 .vibewaiting/
+.wrangler/
 test/fixtures/grok-conformance/*.jsonl
 experiments/browser-agent/rhai-wasm/target/

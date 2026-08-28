@@ -52,6 +52,7 @@ const MAX_REQUEST_HEADERS = 128;
 const MAX_REQUEST_HEADER_CHARS = 65_536;
 const MAX_REQUEST_BODY_BYTES = 16 * 1024 * 1024;
 const MAX_RESPONSE_BODY_BYTES = 32 * 1024 * 1024;
+const SANDBOX_HANDSHAKE_TIMEOUT_MS = 15_000;
 const HTTP_METHODS = new Set(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]);
 const HTTP_HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u;
 
@@ -147,6 +148,8 @@ export class BrowserSandboxBridge {
   private resolveInitialPreview!: () => void;
   private rejectInitialPreview!: (error: Error) => void;
   private readonly activeRequestIds = new Set<number>();
+  private readonly readyTimer: ReturnType<typeof globalThis.setTimeout>;
+  private readonly initialPreviewTimer: ReturnType<typeof globalThis.setTimeout>;
 
   constructor(private readonly options: BrowserSandboxBridgeOptions) {
     this.ready = new Promise<void>((resolve, reject) => {
@@ -157,6 +160,12 @@ export class BrowserSandboxBridge {
       this.resolveInitialPreview = resolve;
       this.rejectInitialPreview = reject;
     });
+    this.readyTimer = globalThis.setTimeout(() => {
+      this.rejectReady(new Error("Sandbox bridge handshake timed out."));
+    }, SANDBOX_HANDSHAKE_TIMEOUT_MS);
+    this.initialPreviewTimer = globalThis.setTimeout(() => {
+      this.rejectInitialPreview(new Error("Generated preview startup timed out."));
+    }, SANDBOX_HANDSHAKE_TIMEOUT_MS);
     window.addEventListener("message", this.onMessage);
   }
 
@@ -171,8 +180,10 @@ export class BrowserSandboxBridge {
         this.send({ type: "response", id: requestId, error: error instanceof Error ? error.message : String(error) });
       });
     } else if (envelope.type === "ready") {
+      globalThis.clearTimeout(this.readyTimer);
       this.resolveReady();
     } else if (envelope.type === "preview-load") {
+      globalThis.clearTimeout(this.initialPreviewTimer);
       this.options.onPreviewLoad?.();
       this.resolveInitialPreview();
     } else if (envelope.type === "rendered") {
@@ -181,6 +192,8 @@ export class BrowserSandboxBridge {
     } else if (envelope.type === "error") {
       const message = (envelope.payload as { message?: string } | undefined)?.message || "Sandbox bridge failed.";
       const error = new Error(message);
+      globalThis.clearTimeout(this.readyTimer);
+      globalThis.clearTimeout(this.initialPreviewTimer);
       this.rejectReady(error);
       this.rejectInitialPreview(error);
       this.options.onError?.(error);

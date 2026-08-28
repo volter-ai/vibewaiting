@@ -9,6 +9,7 @@ import {
   GrokBuildBrowserWorkflowHost,
   GrokBuildJournalRhaiEngine,
   GrokBuildWorkflowRegistry,
+  createGrokBuildBrowserWorkflowManager,
   extractGrokBuildWorkflowMeta,
   formatGrokBuildWorkflowListing,
   mergeGrokBuildExtensionListings,
@@ -30,6 +31,17 @@ function write(vfs: VirtualFS, path: string, source: string): void {
 }
 
 describe("Grok Build browser workflows", () => {
+  it("creates the startup registry without initializing the Rhai evaluator", async () => {
+    const vfs = new VirtualFS();
+    const host = { call: vi.fn(async () => undefined) };
+    const manager = await createGrokBuildBrowserWorkflowManager(vfs, host, {
+      builtins: [{ script: workflow("startup-flow") }],
+    });
+
+    expect(manager.listing()).toContain("startup-flow");
+    expect(host.call).not.toHaveBeenCalled();
+  });
+
   it("extracts native pure-literal metadata and enforces native validation bounds", () => {
     expect(extractGrokBuildWorkflowMeta(workflow("review-pr", "Review a PR", "When reviewing changes"))).toEqual({
       name: "review-pr",

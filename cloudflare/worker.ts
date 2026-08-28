@@ -86,6 +86,7 @@ interface Env {
   XAI_OAUTH_CLIENT_ID: string;
   SESSION_ENCRYPTION_KEY: string;
   SESSION_ENCRYPTION_KEY_PREVIOUS?: string;
+  CF_VERSION_METADATA?: WorkerVersionMetadata;
 }
 
 interface DeviceState {
@@ -147,6 +148,66 @@ function json(value: unknown, status = 200, headers?: HeadersInit): Response {
 function error(message: string, status: number, retryAfter?: number): Response {
   const headers = retryAfter ? { "Retry-After": String(retryAfter) } : undefined;
   return json({ error: { message } }, status, headers);
+}
+
+function deploymentVersion(env: Env): string {
+  return env.CF_VERSION_METADATA?.id ?? "development";
+}
+
+function readinessIssues(env: Env): string[] {
+  const issues: string[] = [];
+  if (!env.ASSETS || typeof env.ASSETS.fetch !== "function") issues.push("assets");
+  for (const [name, binding] of [["sessions", env.SESSIONS], ["rate_gate", env.RATE_GATE]] as const) {
+    if (!binding || typeof binding.get !== "function" || typeof binding.idFromName !== "function") issues.push(name);
+  }
+  for (const [name, limiter] of [
+    ["auth_rate_limiter", env.AUTH_RATE_LIMITER],
+    ["chat_ip_rate_limiter", env.CHAT_IP_RATE_LIMITER],
+    ["chat_user_rate_limiter", env.CHAT_USER_RATE_LIMITER],
+  ] as const) {
+    if (!limiter || typeof limiter.limit !== "function") issues.push(name);
+  }
+  for (const [name, value] of [
+    ["relay_flag", env.RELAY_ENABLED],
+    ["inference_flag", env.INFERENCE_ENABLED],
+    ["media_flag", env.MEDIA_ENABLED],
+    ["web_fetch_flag", env.WEB_FETCH_ENABLED],
+  ] as const) {
+    if (value !== "true" && value !== "false") issues.push(name);
+  }
+  if (!env.XAI_CLIENT_VERSION || !env.XAI_OAUTH_CLIENT_ID) issues.push("xai_client");
+  try {
+    if (fromBase64Url(env.SESSION_ENCRYPTION_KEY).byteLength !== 32) issues.push("session_encryption");
+  } catch {
+    issues.push("session_encryption");
+  }
+  return issues;
+}
+
+function apiMetricRoute(url: URL, method: string): string {
+  const telemetry = normalizeGrokTelemetryRoute(url.pathname, method);
+  if (telemetry) {
+    if (telemetry.upstreamPath.endsWith("/signals")) return "grok.telemetry.signals";
+    if (telemetry.upstreamPath.endsWith("/turn-deltas")) return "grok.telemetry.turn_deltas";
+    if (telemetry.upstreamPath === "/v1/traces") return "grok.telemetry.traces";
+    return "grok.telemetry.config";
+  }
+  return url.pathname
+    .replace(/^\/api\//u, "")
+    .replaceAll("/", ".")
+    .replace(/[^a-z0-9_.-]/giu, "_") || "api.root";
+}
+
+function logApiMetric(request: Request, env: Env, response: Response, startedAt: number): void {
+  const url = new URL(request.url);
+  console.log(JSON.stringify({
+    event: "api_request",
+    route: apiMetricRoute(url, request.method),
+    method: request.method,
+    status: response.status,
+    durationMs: Math.max(0, Date.now() - startedAt),
+    version: deploymentVersion(env),
+  }));
 }
 
 function stringValue(value: unknown): string | undefined {
@@ -1191,6 +1252,23 @@ function releaseAfterStream(stream: ReadableStream<Uint8Array>, release: () => P
 
 async function handleApi(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
+  if (url.pathname === "/api/health" && request.method === "GET") {
+    return json({ ok: true, version: deploymentVersion(env) });
+  }
+  if (url.pathname === "/api/ready" && request.method === "GET") {
+    const issues = readinessIssues(env);
+    return json({
+      ready: issues.length === 0,
+      version: deploymentVersion(env),
+      checks: issues.length === 0 ? "passed" : issues,
+      capabilities: {
+        relay: env.RELAY_ENABLED === "true",
+        inference: env.INFERENCE_ENABLED === "true",
+        media: env.MEDIA_ENABLED === "true",
+        webFetch: env.WEB_FETCH_ENABLED === "true",
+      },
+    }, issues.length === 0 ? 200 : 503);
+  }
   const mutation = request.method !== "GET" && request.method !== "HEAD";
   if (mutation && !isTrustedMutation(request)) return error("Cross-origin requests are not allowed.", 403);
   const telemetryRoute = normalizeGrokTelemetryRoute(url.pathname, request.method);
@@ -1222,7 +1300,27 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname.startsWith("/api/")) return handleApi(request, env);
+    if (url.pathname.startsWith("/api/")) {
+      const startedAt = Date.now();
+      let response: Response;
+      try {
+        response = await handleApi(request, env);
+      } catch (cause) {
+        console.error(JSON.stringify({
+          event: "api_exception",
+          route: apiMetricRoute(url, request.method),
+          method: request.method,
+          errorName: cause instanceof Error ? cause.name : "UnknownError",
+          version: deploymentVersion(env),
+        }));
+        response = error("The browser-agent service encountered an unexpected error.", 500);
+      }
+      logApiMetric(request, env, response, startedAt);
+      const headers = new Headers(response.headers);
+      headers.set("Server-Timing", `worker;dur=${Math.max(0, Date.now() - startedAt)}`);
+      headers.set("X-Vibewaiting-Version", deploymentVersion(env));
+      return new Response(response.body, { status: response.status, headers });
+    }
     return env.ASSETS.fetch(request);
   },
 } satisfies ExportedHandler<Env>;

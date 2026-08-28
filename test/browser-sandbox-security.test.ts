@@ -7,10 +7,21 @@ import {
   THREE_MODULE_ASSET_PATH,
 } from "../experiments/browser-agent/sandbox-service-worker-hardening.js";
 import { validateSandboxRequest } from "../experiments/browser-agent/src/browser-sandbox-bridge.js";
+import { resolveSandboxOrigin } from "../experiments/browser-agent/src/sandbox-protocol.js";
 
 const almostnodeWorker = readFileSync(new URL("../node_modules/almostnode/dist/__sw__.js", import.meta.url), "utf8");
 
 describe("browser-agent sandbox hardening", () => {
+  it("uses canonical loopback hosts as distinct local origins", () => {
+    const location = (hostname: string, origin: string) => ({
+      hostname, origin, protocol: "http:", port: "4175",
+    }) as Location;
+    expect(resolveSandboxOrigin(location("127.0.0.1", "http://127.0.0.1:4175"))).toBe("http://localhost:4175");
+    expect(resolveSandboxOrigin(location("localhost", "http://localhost:4175"))).toBe("http://127.0.0.1:4175");
+    expect(() => resolveSandboxOrigin(location("localhost", "http://localhost:4175"), "http://localhost:4175"))
+      .toThrow(/different origin/u);
+  });
+
   it("injects a deny-by-default generated-page policy and client-aware network guard", () => {
     const hardened = hardenSandboxServiceWorker(almostnodeWorker);
     expect(GENERATED_PREVIEW_CSP).toContain("connect-src 'self' blob:");

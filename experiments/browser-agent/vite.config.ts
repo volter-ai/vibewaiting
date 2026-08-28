@@ -165,7 +165,7 @@ export default defineConfig({
     host: "127.0.0.1",
     port: 4175,
     strictPort: true,
-    allowedHosts: ["127.0.0.1", "localhost", "sandbox.localhost"],
+    allowedHosts: ["127.0.0.1", "localhost"],
     headers: {
       "Access-Control-Allow-Origin": "*",
     },

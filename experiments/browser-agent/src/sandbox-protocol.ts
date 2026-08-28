@@ -18,7 +18,7 @@ export function resolveSandboxOrigin(pageLocation: Location, configured?: string
   if (configured) {
     origin = new URL(configured).origin;
   } else if (pageLocation.hostname === "127.0.0.1") {
-    origin = `${pageLocation.protocol}//sandbox.localhost:${pageLocation.port}`;
+    origin = `${pageLocation.protocol}//localhost:${pageLocation.port}`;
   } else if (pageLocation.hostname === "localhost") {
     origin = `${pageLocation.protocol}//127.0.0.1:${pageLocation.port}`;
   } else {
@@ -30,4 +30,3 @@ export function resolveSandboxOrigin(pageLocation: Location, configured?: string
   }
   return origin;
 }
-

@@ -2,7 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Modified for the Vibewaiting browser port, 2026.
 
-import type { GrokBuildWorkflowEngine, GrokBuildWorkflowOutcome } from "./grok-build-workflow-engine.js";
+import type {
+  GrokBuildWorkflowEngine,
+  GrokBuildWorkflowHost,
+  GrokBuildWorkflowOutcome,
+  GrokBuildWorkflowValidationReport,
+} from "./grok-build-workflow-engine.js";
 import {
   GrokBuildWorkflowRegistry,
   extractGrokBuildWorkflowMeta,
@@ -371,23 +376,56 @@ function restoredOutcome(status: string, detail?: string): GrokBuildWorkflowOutc
   return { status: "paused", kind: kinds[status] ?? "verification", message: detail ?? "workflow paused" };
 }
 
-/** Creates the functional browser manager with the checked-in Rhai WASM evaluator. */
+class GrokBuildLazyWorkflowEngine implements GrokBuildWorkflowEngine {
+  private loading: Promise<GrokBuildWorkflowEngine> | undefined;
+
+  constructor(
+    private readonly host: GrokBuildWorkflowHost,
+    private readonly storage: GrokBuildVfsWorkflowJournalStorage,
+  ) {}
+
+  run(
+    script: string,
+    args: unknown,
+    options: Parameters<GrokBuildWorkflowEngine["run"]>[2],
+  ): Promise<GrokBuildWorkflowOutcome> {
+    return this.engine().then((engine) => engine.run(script, args, options));
+  }
+
+  validate(
+    script: string,
+    args: unknown,
+    options: Parameters<GrokBuildWorkflowEngine["validate"]>[2],
+  ): Promise<GrokBuildWorkflowValidationReport> {
+    return this.engine().then((engine) => engine.validate(script, args, options));
+  }
+
+  private engine(): Promise<GrokBuildWorkflowEngine> {
+    this.loading ??= Promise.all([
+      import("./grok-build-rhai-wasm.js"),
+      import("./grok-build-workflow-engine.js"),
+    ]).then(async ([{ loadGrokBuildRhaiWasm }, { GrokBuildJournalRhaiEngine }]) => new GrokBuildJournalRhaiEngine(
+      await loadGrokBuildRhaiWasm(),
+      this.host,
+      this.storage,
+    ));
+    return this.loading;
+  }
+}
+
+/** Creates the browser manager immediately and loads the 6 MiB Rhai WASM only on first workflow use. */
 export async function createGrokBuildBrowserWorkflowManager(
   vfs: GrokBuildWorkflowFileSystem,
-  host: import("./grok-build-workflow-engine.js").GrokBuildWorkflowHost,
+  host: GrokBuildWorkflowHost,
   options: GrokBuildWorkflowManagerOptions = {},
 ): Promise<GrokBuildBrowserWorkflowManager> {
-  const [{ loadGrokBuildRhaiWasm }, { GrokBuildJournalRhaiEngine }] = await Promise.all([
-    import("./grok-build-rhai-wasm.js"),
-    import("./grok-build-workflow-engine.js"),
-  ]);
-  const module = await loadGrokBuildRhaiWasm();
   const runRoot = normalizeGrokBuildWorkflowPath(options.runRoot ?? "/.grok/workflow-runs");
   const managedBundledWorkflowPaths = options.managedBundledWorkflowPaths
     ?? await managedGrokBuildBundledWorkflowPaths(vfs);
+  const storage = new GrokBuildVfsWorkflowJournalStorage(vfs, runRoot);
   return new GrokBuildBrowserWorkflowManager(
     vfs,
-    new GrokBuildJournalRhaiEngine(module, host, new GrokBuildVfsWorkflowJournalStorage(vfs, runRoot)),
+    new GrokBuildLazyWorkflowEngine(host, storage),
     { ...options, managedBundledWorkflowPaths },
   );
 }
