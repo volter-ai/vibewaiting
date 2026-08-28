@@ -36,7 +36,7 @@ export interface BrowserContainer {
 }
 
 export interface GrokBuildBrowserServices {
-  spawnSubagent?(input: JsonObject, signal: AbortSignal, subagentId: string): Promise<string>;
+  spawnSubagent?(input: JsonObject, signal: AbortSignal, subagentId: string): Promise<string | GrokBuildSubagentExecutionResult>;
   searchTools?(query: string, limit: number, signal: AbortSignal): Promise<string>;
   useTool?(name: string, input: JsonObject, signal: AbortSignal): Promise<string>;
   runWorkflow?(input: JsonObject, signal: AbortSignal): Promise<string>;
@@ -54,7 +54,23 @@ export interface GrokBuildBrowserServices {
     feedback?: string;
   }>;
   onMonitorEvent?(reminder: string): void;
+  onSystemReminderQueued?(event: GrokBuildSystemReminderEvent): void;
   suggestSkillPath?(requestedPath: string): string | undefined;
+}
+
+export interface GrokBuildSubagentExecutionResult {
+  output: string;
+  success: boolean;
+  durationMs: number;
+  toolCalls?: number;
+  turns?: number;
+}
+
+export interface GrokBuildSystemReminderEvent {
+  promptId: string;
+  taskId: string;
+  source: "command_completed" | "monitor_completed" | "monitor_event" | "subagent_completed";
+  reminder: string;
 }
 
 export type { GrokScheduledTaskEvent } from "./grok-build-scheduler.js";
@@ -81,7 +97,7 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
   private planMode = false;
   private awaitingPlanApproval = false;
   private planApprovalInFlight = false;
-  private readonly asynchronousReminders: string[] = [];
+  private readonly asynchronousReminders: GrokBuildSystemReminderEvent[] = [];
   private readonly reportedTaskCompletions = new Set<string>();
 
   constructor(
@@ -132,22 +148,35 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
     return sections.length > 0 ? `<system-reminder>\n${sections.join("\n\n")}\n</system-reminder>` : undefined;
   }
 
-  drainSystemReminders(): string[] {
-    const pending = this.asynchronousReminders.splice(0);
-    const monitorEvents = pending.filter((entry) => entry.startsWith('<monitor-event description="'));
-    if (monitorEvents.length === 0) return pending.map(systemReminder);
+  drainSystemReminders(options: { includeAutoWake?: boolean } = {}): string[] {
+    const includeAutoWake = options.includeAutoWake ?? true;
+    const pending = this.asynchronousReminders.filter((entry) => includeAutoWake || entry.source === "monitor_event");
+    if (pending.length === 0) return [];
+    const drainedIds = new Set(pending.map((entry) => entry.promptId));
+    for (let index = this.asynchronousReminders.length - 1; index >= 0; index -= 1) {
+      if (drainedIds.has(this.asynchronousReminders[index]!.promptId)) this.asynchronousReminders.splice(index, 1);
+    }
+    const monitorEvents = pending.filter((entry) => entry.source === "monitor_event").map((entry) => entry.reminder);
+    if (monitorEvents.length === 0) return pending.map((entry) => systemReminder(entry.reminder));
     const formatted = formatGrokMonitorEvents(monitorEvents);
     let inserted = false;
     const drained: string[] = [];
     for (const entry of pending) {
-      if (entry.startsWith('<monitor-event description="')) {
+      if (entry.source === "monitor_event") {
         if (!inserted && formatted) drained.push(formatted);
         inserted = true;
       } else {
-        drained.push(entry);
+        drained.push(entry.reminder);
       }
     }
     return drained.map(systemReminder);
+  }
+
+  takeSystemReminder(promptId: string): string | undefined {
+    const index = this.asynchronousReminders.findIndex((entry) => entry.promptId === promptId);
+    if (index < 0) return undefined;
+    const [entry] = this.asynchronousReminders.splice(index, 1);
+    return entry ? systemReminder(entry.reminder) : undefined;
   }
 
   hasPendingPlanApproval(): boolean {
@@ -198,7 +227,7 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
       if (task.status !== "running" || (task.kind !== "command" && task.kind !== "monitor")) continue;
       const transferred = this.background.take(task.id);
       if (!transferred || (transferred.kind !== "command" && transferred.kind !== "monitor")) continue;
-      transferred.notificationSink = parent.reminderSink(transferred.kind);
+      transferred.notificationSink = parent.reminderSink(transferred.kind, transferred.id);
       parent.background.adopt(transferred);
       reparented.push(transferred.id);
     }
@@ -294,7 +323,7 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
           exitCode: task.exitCode ?? (task.status === "failed" ? 1 : 0),
         });
       }
-      task.notificationSink = this.reminderSink("command");
+      task.notificationSink = this.reminderSink("command", task.id);
       this.watchBackgroundCompletion(task);
       return formatGrokBackgroundTaskStarted(
         task,
@@ -332,7 +361,7 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
 
   private startBackground(command: string, parentSignal: AbortSignal, maxRuntimeMs: number | undefined, callId: string): string {
     const task = this.createCommandTask(command, parentSignal, "command", maxRuntimeMs, callId);
-    task.notificationSink = this.reminderSink("command");
+    task.notificationSink = this.reminderSink("command", task.id);
     this.watchBackgroundCompletion(task);
     return formatGrokBackgroundTaskStarted(task, `Background task ${task.id} started`);
   }
@@ -355,6 +384,7 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
     const id = crypto.randomUUID();
     const task = this.createSubagentTask(input, parentSignal, id);
     if (boolean(input.background, true)) {
+      this.watchSubagentCompletion(task);
       return `Subagent started in background.\nsubagent_id: ${id}\nUse get_command_or_subagent_output with task_ids: ["${id}"] to retrieve its result.`;
     }
     const output = await task.promise;
@@ -367,16 +397,45 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
     const completionOutputCap = Number.isSafeInteger(input.completion_output_cap) && Number(input.completion_output_cap) >= 0
       ? Number(input.completion_output_cap)
       : undefined;
-    return this.background.createExternal({
+    let task!: BrowserBackgroundTask;
+    task = this.background.createExternal({
       id,
       kind: "subagent",
       parentSignal,
       promise: async (childSignal) => {
-        const output = await service(input, childSignal, id);
+        const result = await service(input, childSignal, id);
+        const output = typeof result === "string" ? result : result.output;
+        if (typeof result !== "string") {
+          if (result.toolCalls !== undefined) task.toolCalls = result.toolCalls;
+          if (result.turns !== undefined) task.turns = result.turns;
+          task.completionDurationMs = result.durationMs;
+          if (!result.success) throw new Error(output);
+        }
         return completionOutputCap === undefined ? output : capCompletionOutput(output, completionOutputCap);
       },
       ...(typeof input.description === "string" ? { description: input.description } : {}),
       subagentType: typeof input.subagent_type === "string" ? input.subagent_type : "general-purpose",
+    });
+    return task;
+  }
+
+  private watchSubagentCompletion(task: BrowserBackgroundTask): void {
+    void task.promise.then(() => {
+      if (task.explicitlyCancelled || this.reportedTaskCompletions.has(task.id)) return;
+      this.reportedTaskCompletions.add(task.id);
+      const status = task.status === "completed" ? "successfully" : "with failure";
+      const duration = (task.completionDurationMs ?? Math.max(0, (task.endedAt ?? Date.now()) - task.startedAt)) / 1_000;
+      const reminder = `Background subagent "${task.id}" (${task.subagentType ?? "general-purpose"}: "${task.description ?? ""}") completed ${status}.\n` +
+        `Duration: ${duration.toFixed(1)}s | Tool calls: ${task.toolCalls ?? 0} | Turns: ${task.turns ?? 0}\n` +
+        `Use get_command_or_subagent_output("${task.id}") to see the full output.`;
+      const event: GrokBuildSystemReminderEvent = {
+        promptId: `subagent-completed-${task.id}`,
+        taskId: task.id,
+        source: "subagent_completed",
+        reminder,
+      };
+      this.asynchronousReminders.push(event);
+      this.services.onSystemReminderQueued?.(event);
     });
   }
 
@@ -391,7 +450,7 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
     for (const id of waited) {
       this.reportedTaskCompletions.add(id);
       for (let index = this.asynchronousReminders.length - 1; index >= 0; index -= 1) {
-        if (this.asynchronousReminders[index]?.includes(`"${id}"`)) this.asynchronousReminders.splice(index, 1);
+        if (this.asynchronousReminders[index]?.taskId === id) this.asynchronousReminders.splice(index, 1);
       }
     }
     return output;
@@ -524,7 +583,7 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
       stream.push(chunk);
     }, persistent ? undefined : requestedTimeout, join("/tmp/grok-build-session/terminal", `monitor-${outputName}.log`));
     task.description = description;
-    task.notificationSink = this.reminderSink("monitor");
+    task.notificationSink = this.reminderSink("monitor", task.id);
     stream ??= new GrokBuildMonitorEventStream(task.id, description, emit);
     void task.promise.finally(() => {
       stream?.flush();
@@ -541,10 +600,27 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
     this.container.vfs.mkdirSync(parent, { recursive: true });
   }
 
-  private reminderSink(kind: "command" | "monitor"): (reminder: string) => void {
+  private reminderSink(kind: "command" | "monitor", taskId: string): (reminder: string) => void {
     return (reminder) => {
-      this.asynchronousReminders.push(reminder);
+      const monitorEvent = kind === "monitor" && reminder.startsWith('<monitor-event description="');
+      const source = monitorEvent ? "monitor_event" : kind === "monitor" ? "monitor_completed" : "command_completed";
+      if (source === "monitor_completed") {
+        for (let index = this.asynchronousReminders.length - 1; index >= 0; index -= 1) {
+          const pending = this.asynchronousReminders[index];
+          if (pending?.taskId === taskId && pending.source === "monitor_event") this.asynchronousReminders.splice(index, 1);
+        }
+      }
+      const event: GrokBuildSystemReminderEvent = {
+        promptId: source === "monitor_event"
+          ? `monitor-${taskId}-${crypto.randomUUID()}`
+          : `task-completed-${taskId}`,
+        taskId,
+        source,
+        reminder,
+      };
+      this.asynchronousReminders.push(event);
       if (kind === "monitor") this.services.onMonitorEvent?.(reminder);
+      this.services.onSystemReminderQueued?.(event);
     };
   }
 
@@ -675,7 +751,7 @@ async function settleBefore<T>(promise: Promise<T>, timeoutMs: number, signal: A
   }
 }
 
-function requiredService<T extends (...args: never[]) => Promise<string>>(service: T | undefined, name: string): T {
+function requiredService<T extends (...args: never[]) => Promise<unknown>>(service: T | undefined, name: string): T {
   if (!service) throw new Error(`${name} requires an explicitly configured browser/serverless service adapter.`);
   return service;
 }

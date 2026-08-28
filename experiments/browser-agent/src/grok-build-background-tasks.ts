@@ -27,6 +27,9 @@ export interface BrowserBackgroundTask {
   command?: string;
   description?: string;
   subagentType?: string;
+  toolCalls?: number;
+  turns?: number;
+  completionDurationMs?: number;
   startedAt: number;
   endedAt?: number;
   exitCode?: number;

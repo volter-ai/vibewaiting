@@ -100,8 +100,11 @@ function validUuid(value: string | undefined): string | undefined {
 
 function validMainRequestId(value: string | undefined): string | undefined {
   if (validUuid(value)) return value;
-  const prefix = "task-completed-";
-  return value?.startsWith(prefix) && validUuid(value.slice(prefix.length)) ? value : undefined;
+  for (const prefix of ["task-completed-", "subagent-completed-"] as const) {
+    if (value?.startsWith(prefix) && validUuid(value.slice(prefix.length))) return value;
+  }
+  const monitor = value?.match(/^monitor-([0-9a-f-]{36})-([0-9a-f-]{36})$/iu);
+  return monitor && validUuid(monitor[1]) && validUuid(monitor[2]) ? value : undefined;
 }
 
 function validSideCallId(

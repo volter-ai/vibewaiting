@@ -119,11 +119,13 @@ describe("Grok Build browser tool runtime", () => {
     const vfs = new VirtualFS();
     let finish!: (value: string) => void;
     const child = new Promise<string>((resolve) => { finish = resolve; });
+    const wakes: Array<{ promptId: string; source: string }> = [];
     const tools = new GrokBuildBrowserRuntime({ vfs, async run() { return { stdout: "", stderr: "", exitCode: 0 }; } }, "/", {
       async spawnSubagent(_input, _signal, id) {
         expect(id).toMatch(/^[0-9a-f-]{36}$/u);
         return child;
       },
+      onSystemReminderQueued(event) { wakes.push(event); },
     });
     const signal = new AbortController().signal;
     const search = await tools.execute({ callId: "search", name: "search_tool", arguments: '{"query":"linear"}' }, signal);
@@ -145,8 +147,34 @@ describe("Grok Build browser tool runtime", () => {
     finish("Inspection complete");
     await child;
     await new Promise<void>((resolve) => queueMicrotask(resolve));
+    expect(wakes).toEqual([]);
+    expect(tools.takeSystemReminder(`subagent-completed-${id}`)).toBeUndefined();
     await expect(tools.execute({ callId: "poll", name: "get_command_or_subagent_output", arguments: JSON.stringify({ task_ids: [id] }) }, signal))
       .resolves.toMatchObject({ output: expect.stringContaining("Status: completed") });
+  });
+
+  it("auto-wakes an idle parent with native background-subagent metadata", async () => {
+    const wakes: Array<{ promptId: string; source: string }> = [];
+    const tools = new GrokBuildBrowserRuntime({
+      vfs: new VirtualFS(),
+      async run() { return { stdout: "", stderr: "", exitCode: 0 }; },
+    }, "/", {
+      async spawnSubagent() {
+        return { output: "Reviewed", success: true, durationMs: 1_250, toolCalls: 3, turns: 2 };
+      },
+      onSystemReminderQueued(event) { wakes.push(event); },
+    });
+    const started = await tools.execute({
+      callId: "spawn",
+      name: "spawn_subagent",
+      arguments: '{"prompt":"Inspect","description":"Inspect files","subagent_type":"explore","background":true}',
+    }, new AbortController().signal);
+    const id = /subagent_id: ([0-9a-f-]+)/u.exec(started.output)?.[1] ?? "";
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(wakes).toEqual([expect.objectContaining({ promptId: `subagent-completed-${id}`, source: "subagent_completed" })]);
+    expect(tools.takeSystemReminder(`subagent-completed-${id}`)).toMatch(
+      new RegExp(`^<system-reminder>\\nBackground subagent "${id}" \\(explore: "Inspect files"\\) completed successfully\\.\\nDuration: .* \\| Tool calls: 3 \\| Turns: 2`, "u"),
+    );
   });
 
   it("rebuilds native active task, todo, and subagent state after compaction", async () => {

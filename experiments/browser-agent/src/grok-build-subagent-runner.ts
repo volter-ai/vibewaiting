@@ -59,10 +59,8 @@ export class GrokBuildBrowserSubagentRunner {
   async run(
     input: Record<string, unknown>, signal: AbortSignal, subagentId: string,
     parentRuntime = this.options.rootRuntime(),
-  ): Promise<string> {
-    const result = await this.admission.run(signal, () => this.runAdmitted(input, signal, subagentId, parentRuntime));
-    if (!result.success) throw new Error(result.error ?? result.output);
-    return result.output || `Subagent ${subagentId} completed.`;
+  ): Promise<GrokBuildWorkflowSubagentResult> {
+    return this.admission.run(signal, () => this.runAdmitted(input, signal, subagentId, parentRuntime));
   }
 
   async runAdmitted(
@@ -172,6 +170,8 @@ export class GrokBuildBrowserSubagentRunner {
     const baseSnapshot = prior?.snapshot ?? (input.fork_context === true ? this.options.parentSnapshot() : undefined);
     let latest = baseSnapshot ? subagentSnapshotWithSystemPrompt(baseSnapshot, systemPrompt, subagentId) : undefined;
     const completionTracker = new GrokBuildCompletionTracker(configured.canonicalToolName);
+    let turns = 0;
+    let toolCalls = 0;
     const session = new GrokBuildSession({
       endpoint,
       environment: {
@@ -194,7 +194,12 @@ export class GrokBuildBrowserSubagentRunner {
       ...(runtimeConfig.reasoningEffort && runtimeConfig.reasoningEffort !== "max"
         ? { reasoningEffort: runtimeConfig.reasoningEffort as "none" | "minimal" | "low" | "medium" | "high" | "xhigh" } : {}),
       maxTurns: definition.maxTurns ?? 100,
-      onEvent(event) { completionTracker.event(event); trace.record(event); },
+      onEvent(event) {
+        if (event.type === "turn_start") turns += 1;
+        if (event.type === "tool_start") toolCalls += 1;
+        completionTracker.event(event);
+        trace.record(event);
+      },
       ...(latest ? { restore: latest } : {}),
       onCheckpoint: (snapshot) => {
         latest = snapshot;
@@ -226,6 +231,8 @@ export class GrokBuildBrowserSubagentRunner {
         ...(result.status === "limit" ? { error: "Subagent reached its maximum turn limit." } : {}),
         totalTokensUsed: usage.totalTokensUsed,
         durationMs: Math.max(0, Math.round(performance.now() - started)),
+        toolCalls,
+        turns,
         ...(usage.incomplete ? { usageIncomplete: true } : {}),
       };
     } catch (error) {
@@ -237,6 +244,8 @@ export class GrokBuildBrowserSubagentRunner {
         childSessionId: subagentId, success: false, output: message, error: message,
         totalTokensUsed: usage.totalTokensUsed,
         durationMs: Math.max(0, Math.round(performance.now() - started)),
+        toolCalls,
+        turns,
         ...(usage.incomplete ? { usageIncomplete: true } : {}),
       };
     } finally {

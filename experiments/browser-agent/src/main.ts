@@ -10,6 +10,7 @@ import {
   GrokRecordedToolRuntime,
   type GrokConformanceDriverProfile,
   type GrokBuildBrowserServices,
+  type GrokBuildSubagentExecutionResult,
 } from "./grok-build-runtime.js";
 import {
   resolveSandboxOrigin,
@@ -68,6 +69,7 @@ import { GrokBuildBrowserSubagentRunner } from "./grok-build-subagent-runner.js"
 import {
   GrokBuildLivePromptCoordinator,
 } from "./grok-build-prompt-queue.js";
+import { GrokBuildAutoWakeCoordinator } from "./grok-build-auto-wake.js";
 import { missingBrowserAgentCapabilities } from "./browser-capabilities.js";
 
 const VIRTUAL_PORT = 4176;
@@ -149,6 +151,7 @@ const agentIdleWaiters = new Set<() => void>();
 const livePrompts = new GrokBuildLivePromptCoordinator();
 let scheduledForegroundQueue: Promise<void> = Promise.resolve();
 let subagentRunner: GrokBuildBrowserSubagentRunner;
+let autoWakeCoordinator: GrokBuildAutoWakeCoordinator;
 const configuredSandboxOrigin = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env?.VITE_SANDBOX_ORIGIN;
 const sandboxOrigin = resolveSandboxOrigin(location, configuredSandboxOrigin);
 const sandboxNonce = crypto.randomUUID();
@@ -399,7 +402,16 @@ const browserServices: GrokBuildBrowserServices = {
   approvePlanModeEntry: (signal) => approveGrokPlanEntry(signal),
   approvePlanModeExit: (plan, signal) => approveGrokPlanExit(plan, signal),
   onMonitorEvent: (reminder) => eventItem("command", "Monitor event", reminder),
+  onSystemReminderQueued: (event) => {
+    if (!conformanceOrigin) autoWakeCoordinator?.enqueue(event.promptId);
+  },
 };
+autoWakeCoordinator = new GrokBuildAutoWakeCoordinator({
+  waitForIdle: () => waitForAgentIdle(new AbortController().signal),
+  claimReminder: (promptId) => rootBrowserRuntime?.takeSystemReminder(promptId),
+  runWake: runLiveAutoWake,
+  onError: (error) => eventItem("error", "Background wake failed", error instanceof Error ? error.message : String(error)),
+});
 subagentRunner = new GrokBuildBrowserSubagentRunner({
   container,
   services: browserServices,
@@ -466,12 +478,32 @@ function notifyAgentIdle(): void {
   agentIdleWaiters.clear();
 }
 
+async function runLiveAutoWake(promptId: string, reminder: string): Promise<void> {
+  if (conformanceOrigin || !agentSession) return;
+  const controller = new AbortController();
+  activeRun = controller;
+  agentSession.enqueueSystemReminder(reminder);
+  syncRunAvailability();
+  stopButton.disabled = false;
+  agentState.textContent = "Handling background completion";
+  try {
+    await telemetryLifecycle?.ready();
+    const result = await agentSession.resume(controller.signal, { requestId: promptId });
+    agentState.textContent = result.status === "limit" ? "Stopped" : "Complete";
+  } finally {
+    activeRun = undefined;
+    stopButton.disabled = true;
+    syncRunAvailability();
+    notifyAgentIdle();
+  }
+}
+
 function runBrowserSubagent(
   input: Record<string, unknown>,
   signal: AbortSignal,
   subagentId: string,
   parentRuntime = rootBrowserRuntime,
-): Promise<string> {
+): Promise<string | GrokBuildSubagentExecutionResult> {
   return subagentRunner.run(input, signal, subagentId, parentRuntime);
 }
 async function runAgent(mode: "send-now" | "queue" = "send-now"): Promise<void> {
@@ -562,7 +594,7 @@ async function runAgent(mode: "send-now" | "queue" = "send-now"): Promise<void> 
         drainSystemReminders: (phase) => profile
           ? conformanceRuntime?.drainSystemReminders(phase) ?? []
           : [
-              ...browserRuntime.drainSystemReminders(),
+              ...browserRuntime.drainSystemReminders({ includeAutoWake: false }),
               ...workflowCompletionReminders.splice(0),
               ...livePrompts.drainInterjections().map((entry) => entry.text),
             ],
@@ -613,7 +645,7 @@ async function runAgent(mode: "send-now" | "queue" = "send-now"): Promise<void> 
       while (profile && conformanceRuntime?.hasPendingAutoWake()) {
         await telemetryLifecycle?.flush();
         telemetryLifecycle?.ensureLongPauses(profile.nativeLongPausesCount ?? 0);
-        result = await agentSession.resume(activeRun.signal);
+        result = await agentSession.resume(activeRun.signal, { terminalSampleOnly: true });
       }
       if (profile || !livePrompts.hasQueued()) break;
       nextPrompt = livePrompts.takeQueuedPrefix() ?? "";
@@ -663,6 +695,7 @@ async function resetProject(): Promise<void> {
   recordedRuntime = undefined;
   rootBrowserRuntime = undefined;
   rootSkillManager = undefined;
+  autoWakeCoordinator.clear();
   livePrompts.clear();
   clearVirtualFileSystem(container.vfs, "/", ["/.grok/bundled"]);
   seedProject(conformanceProfile);

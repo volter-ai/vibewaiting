@@ -144,6 +144,13 @@ export interface GrokBuildSessionUsage {
   incomplete: boolean;
 }
 
+export interface GrokBuildResumeOptions {
+  /** Native prompt id for the synthetic turn that caused this wake. */
+  requestId?: string;
+  /** Recorded headless sessions can end immediately after the first provider sample. */
+  terminalSampleOnly?: boolean;
+}
+
 export class GrokBuildSession {
   private readonly sessionId: string;
   private requestId: string;
@@ -204,11 +211,25 @@ export class GrokBuildSession {
     return this.runInternal(task, signal, false);
   }
 
-  async resume(signal: AbortSignal): Promise<{ status: "complete" | "limit"; text: string }> {
-    return this.runInternal("", signal, true, `task-completed-${crypto.randomUUID()}`, 1);
+  async resume(signal: AbortSignal, options: GrokBuildResumeOptions = {}): Promise<{ status: "complete" | "limit"; text: string }> {
+    return this.runInternal(
+      "",
+      signal,
+      true,
+      options.requestId ?? `task-completed-${crypto.randomUUID()}`,
+      options.terminalSampleOnly ? 1 : undefined,
+      options.terminalSampleOnly ?? false,
+    );
   }
 
-  private async runInternal(task: string, signal: AbortSignal, resume: boolean, requestId?: string, turnLimit?: number): Promise<{ status: "complete" | "limit"; text: string }> {
+  private async runInternal(
+    task: string,
+    signal: AbortSignal,
+    resume: boolean,
+    requestId?: string,
+    turnLimit?: number,
+    terminalSampleOnly = false,
+  ): Promise<{ status: "complete" | "limit"; text: string }> {
     this.options.onEvent?.({ type: "run_start", task });
     this.requestId = requestId ?? crypto.randomUUID();
     this.promptIndex += 1;
@@ -255,7 +276,7 @@ export class GrokBuildSession {
           continue;
         }
         this.options.onEvent?.({ type: "complete", turn, text: response.text });
-        if (this.options.enableTurnSummary) {
+        if (!resume && this.options.enableTurnSummary) {
           try {
             await this.options.beforeTurnSummary?.();
             await this.createTurnSummary(signal);
@@ -267,7 +288,7 @@ export class GrokBuildSession {
         return { status: "complete", text: response.text };
       }
       if (turn === maxTurns) {
-        if (resume) {
+        if (terminalSampleOnly) {
           this.checkpoint();
           return { status: "complete", text: response.text };
         }

@@ -29,6 +29,8 @@ export interface GrokBuildWorkflowSubagentResult {
   backgrounded?: boolean;
   totalTokensUsed: number;
   durationMs: number;
+  toolCalls?: number;
+  turns?: number;
   usageIncomplete?: boolean;
 }
 
@@ -97,6 +99,8 @@ function normalizeSubagentResult(
     ...(result.usageIncomplete === true ? { usageIncomplete: true } : {}),
     totalTokensUsed: finiteNonnegative(result.totalTokensUsed, "totalTokensUsed"),
     durationMs: finiteNonnegative(result.durationMs, "durationMs"),
+    ...(result.toolCalls !== undefined ? { toolCalls: finiteNonnegative(result.toolCalls, "toolCalls") } : {}),
+    ...(result.turns !== undefined ? { turns: finiteNonnegative(result.turns, "turns") } : {}),
   };
 }
 

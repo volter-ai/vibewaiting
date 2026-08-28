@@ -9,11 +9,17 @@ import {
 } from "../experiments/browser-agent/grok-relay.js";
 
 describe("browser Grok relay", () => {
-  it("preserves native task-completion request identifiers", () => {
+  it("preserves native synthetic-wake request identifiers", () => {
     const id = "33333333-3333-4333-8333-333333333333";
     expect(relayMetadataFromHeaders({
       "x-browser-agent-request": `task-completed-${id}`,
     }).requestId).toBe(`task-completed-${id}`);
+    expect(relayMetadataFromHeaders({
+      "x-browser-agent-request": `subagent-completed-${id}`,
+    }).requestId).toBe(`subagent-completed-${id}`);
+    expect(relayMetadataFromHeaders({
+      "x-browser-agent-request": `monitor-${id}-44444444-4444-4444-8444-444444444444`,
+    }).requestId).toBe(`monitor-${id}-44444444-4444-4444-8444-444444444444`);
   });
   it("extracts a credential without depending on the issuer key", () => {
     expect(credentialFromAuthJson({

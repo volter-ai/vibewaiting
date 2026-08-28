@@ -218,6 +218,41 @@ describe("browser-native Grok Build session", () => {
     vi.unstubAllGlobals();
   });
 
+  it("runs a native synthetic completion prompt as a full multi-step agent turn", async () => {
+    const requests: Array<{ headers: Headers; body: Record<string, unknown> }> = [];
+    const responses = [
+      stream({ output: [{ type: "message", content: [{ type: "output_text", text: "Started" }] }] }, "Started"),
+      stream({ output: [{ type: "function_call", call_id: "inspect", name: "read_file", arguments: "{}" }] }),
+      stream({ output: [{ type: "message", content: [{ type: "output_text", text: "Handled" }] }] }, "Handled"),
+    ];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      requests.push({ headers: new Headers(init?.headers), body: JSON.parse(String(init?.body)) as Record<string, unknown> });
+      return responses.shift() ?? (() => { throw new Error("unexpected request"); })();
+    }));
+    const execute = vi.fn(async () => ({ output: "background output" }));
+    const events: Array<{ type: string; synthetic?: boolean }> = [];
+    const session = new GrokBuildSession({
+      endpoint: "/api/grok/responses",
+      environment: { os: "Browser", shell: "/bin/sh", workspacePath: "/", today: "2026-08-27" },
+      runtime: { execute },
+      enableSessionTitle: false,
+      enableTurnSummary: false,
+      onEvent: (event) => events.push(event),
+    });
+    await session.run("Start", new AbortController().signal);
+    session.enqueueSystemReminder("<system-reminder>done</system-reminder>");
+    const requestId = "task-completed-33333333-3333-4333-8333-333333333333";
+    await expect(session.resume(new AbortController().signal, { requestId })).resolves.toEqual({ status: "complete", text: "Handled" });
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(requests.slice(1).map((request) => request.headers.get("x-browser-agent-request"))).toEqual([requestId, requestId]);
+    expect(events.filter((event) => event.type === "assistant").slice(-2)).toEqual([
+      expect.objectContaining({ synthetic: true }),
+      expect.objectContaining({ synthetic: true }),
+    ]);
+    expect(requests).toHaveLength(3);
+    vi.unstubAllGlobals();
+  });
+
   it("uses a full agent-definition prompt when a child overrides the system prompt", () => {
     const conversation = createInitialConversation("Inspect auth", {
       systemPrompt: "You are the read-only explore child.",
