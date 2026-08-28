@@ -18,6 +18,7 @@ type RemoteAccessStatus =
   | "starting";
 
 interface RemoteAccessSnapshot {
+  activeProvider?: Exclude<RemoteAccessProvider, "auto">;
   capabilities: unknown[];
   enabled: boolean;
   error?: string;
@@ -26,6 +27,19 @@ interface RemoteAccessSnapshot {
   stability?: "stable" | "temporary";
   status: RemoteAccessStatus;
 }
+
+interface RemoteAccessCapability {
+  detail: string;
+  provider: Exclude<RemoteAccessProvider, "auto">;
+  status: "needs-setup" | "ready" | "unavailable";
+}
+
+const REMOTE_ACCESS_PROVIDERS: readonly RemoteAccessProvider[] = [
+  "auto",
+  "ngrok",
+  "cloudflare",
+  "stable",
+];
 
 export interface RemoteAccessCompanion {
   readonly node: HTMLElement;
@@ -55,6 +69,10 @@ function isRemoteAccessSnapshot(value: unknown): value is RemoteAccessSnapshot {
   const candidate = value as Record<string, unknown>;
   return (
     typeof candidate.enabled === "boolean" &&
+    (candidate.activeProvider === undefined ||
+      candidate.activeProvider === "cloudflare" ||
+      candidate.activeProvider === "ngrok" ||
+      candidate.activeProvider === "stable") &&
     (candidate.provider === "auto" ||
       candidate.provider === "cloudflare" ||
       candidate.provider === "ngrok" ||
@@ -72,6 +90,49 @@ function formatPasscode(value: string): string {
   return /^\d{6}$/.test(value)
     ? `${value.slice(0, 3)} ${value.slice(3)}`
     : value;
+}
+
+function providerLabel(provider: RemoteAccessProvider): string {
+  if (provider === "ngrok") return "ngrok";
+  if (provider === "cloudflare") return "Cloudflare";
+  if (provider === "stable") return "Stable relay";
+  return "Automatic";
+}
+
+function capabilityFor(
+  snapshot: RemoteAccessSnapshot,
+  provider: RemoteAccessProvider,
+): RemoteAccessCapability | null {
+  if (provider === "auto") return null;
+  for (const value of snapshot.capabilities) {
+    if (typeof value !== "object" || value === null || Array.isArray(value))
+      continue;
+    const candidate = value as Record<string, unknown>;
+    if (
+      candidate.provider === provider &&
+      typeof candidate.detail === "string" &&
+      (candidate.status === "needs-setup" ||
+        candidate.status === "ready" ||
+        candidate.status === "unavailable")
+    ) {
+      return candidate as unknown as RemoteAccessCapability;
+    }
+  }
+  return null;
+}
+
+function providerReady(
+  snapshot: RemoteAccessSnapshot,
+  provider: RemoteAccessProvider,
+): boolean {
+  if (!snapshot.capabilities.length) return true;
+  if (provider === "auto")
+    return snapshot.capabilities.some((value) => {
+      if (typeof value !== "object" || value === null || Array.isArray(value))
+        return false;
+      return (value as Record<string, unknown>).status === "ready";
+    });
+  return capabilityFor(snapshot, provider)?.status === "ready";
 }
 
 export function createRemoteAccessCompanion(options: {
@@ -93,7 +154,7 @@ export function createRemoteAccessCompanion(options: {
     .vw-remote-access[data-embedded="true"] .vw-remote-panel { position:fixed; right:16px; bottom:16px; pointer-events:auto; }
     .vw-remote-trigger { position: relative; display:grid; width:48px; height:48px; padding:0; place-items:center; border:1px solid rgba(20,20,28,.15); border-radius:14px; color:#24242a; background:color-mix(in srgb,#fff 90%,transparent); box-shadow:0 5px 18px rgba(16,18,30,.13); cursor:pointer; }
     .vw-remote-trigger:hover { background:#fff; box-shadow:0 7px 22px rgba(16,18,30,.17); }
-    .vw-remote-trigger:focus-visible,.vw-remote-close:focus-visible,.vw-remote-button:focus-visible,.vw-remote-link:focus-visible { outline:3px solid rgba(36,36,42,.28); outline-offset:2px; }
+    .vw-remote-trigger:focus-visible,.vw-remote-close:focus-visible,.vw-remote-button:focus-visible,.vw-remote-link:focus-visible,.vw-remote-provider select:focus-visible { outline:3px solid rgba(36,36,42,.28); outline-offset:2px; }
     .vw-remote-trigger svg { width:24px; height:24px; fill:none; stroke:currentColor; stroke-width:1.65; stroke-linecap:round; stroke-linejoin:round; }
     .vw-remote-state { position:absolute; right:5px; bottom:5px; width:9px; height:9px; border:2px solid #fff; border-radius:50%; background:#2e9b58; }
     .vw-remote-trigger[data-status="starting"] .vw-remote-state,.vw-remote-trigger[data-status="reconnecting"] .vw-remote-state { background:#b87918; }
@@ -106,6 +167,9 @@ export function createRemoteAccessCompanion(options: {
     .vw-remote-close { display:grid; flex:0 0 auto; width:30px; height:30px; padding:0; place-items:center; border:0; border-radius:9px; color:#676771; background:transparent; cursor:pointer; }
     .vw-remote-close:hover { background:#f1f1f4; }
     .vw-remote-close svg { width:18px; height:18px; fill:none; stroke:currentColor; stroke-width:1.7; stroke-linecap:round; }
+    .vw-remote-provider { display:grid; grid-template-columns:auto minmax(0,1fr); gap:8px 12px; margin-top:16px; align-items:center; color:#5f5f68; font-size:12px; }
+    .vw-remote-provider select { min-width:0; height:34px; padding:0 30px 0 10px; border:1px solid #d7d7dc; border-radius:9px; color:#29292f; background:#f7f7f8; font:600 12px/1 ui-sans-serif,-apple-system,sans-serif; }
+    .vw-remote-provider small { grid-column:1/-1; color:#6a6a74; font-size:11px; }
     .vw-remote-progress { display:flex; gap:10px; min-height:86px; align-items:center; color:#5f5f68; }
     .vw-remote-spinner { width:18px; height:18px; flex:0 0 auto; border:2px solid #d6d6dc; border-top-color:#34343a; border-radius:50%; animation:vw-remote-spin .85s linear infinite; }
     .vw-remote-handoff { display:grid; grid-template-columns:112px minmax(0,1fr); gap:14px; margin-top:16px; align-items:start; }
@@ -130,6 +194,7 @@ export function createRemoteAccessCompanion(options: {
       .vw-remote-scan-label { color:#e0e0e4; }
       .vw-remote-devices { color:#aaaab3; }.vw-remote-disconnect { color:#c9c9cf; }
       .vw-remote-close { color:#b8b8c0; }.vw-remote-close:hover { background:#303036; }
+      .vw-remote-provider { color:#aaaab3; }.vw-remote-provider select { border-color:#494950; color:#eeeef0; background:#2c2c31; }.vw-remote-provider small { color:#aaaab3; }
       .vw-remote-code { color:#f1f1f3; }.vw-remote-link { color:#d0d0d5; }
       .vw-remote-button { border-color:#494950; color:#eeeef0; background:#2c2c31; }.vw-remote-button:hover { background:#36363c; }
     }
@@ -220,8 +285,7 @@ export function createRemoteAccessCompanion(options: {
     if (!panel.hidden) return;
     panel.hidden = false;
     trigger.setAttribute("aria-expanded", "true");
-    if (!snapshot.enabled || snapshot.status === "off") configure(true);
-    else if (snapshot.status === "connected") options.requestPairing();
+    if (snapshot.status === "connected") options.requestPairing();
     close.focus();
   }
 
@@ -246,6 +310,52 @@ export function createRemoteAccessCompanion(options: {
           : "Remote access is off",
     );
     body.replaceChildren();
+    const providerControl = document.createElement("label");
+    providerControl.className = "vw-remote-provider";
+    const providerTitle = document.createElement("span");
+    providerTitle.textContent = "Provider";
+    const providerSelect = document.createElement("select");
+    providerSelect.setAttribute("aria-label", "Remote access provider");
+    providerSelect.disabled =
+      snapshot.status === "starting" || snapshot.status === "reconnecting";
+    for (const provider of REMOTE_ACCESS_PROVIDERS) {
+      const option = document.createElement("option");
+      option.value = provider;
+      const capability = capabilityFor(snapshot, provider);
+      option.textContent = `${providerLabel(provider)}${
+        provider !== "auto" && capability?.status !== "ready"
+          ? " · setup needed"
+          : ""
+      }`;
+      option.disabled =
+        provider !== "auto" && capability?.status !== "ready";
+      providerSelect.append(option);
+    }
+    providerSelect.value = snapshot.provider;
+    const providerDetail = document.createElement("small");
+    providerDetail.textContent = snapshot.activeProvider && snapshot.status === "connected"
+      ? `Connected with ${providerLabel(snapshot.activeProvider)}.`
+      : snapshot.provider === "auto"
+        ? "Automatic prefers a stable relay, then Cloudflare, then ngrok."
+        : capabilityFor(snapshot, snapshot.provider)?.detail ??
+          `Use ${providerLabel(snapshot.provider)} for this link.`;
+    providerSelect.addEventListener(
+      "change",
+      () => {
+        const provider = providerSelect.value as RemoteAccessProvider;
+        const enabled = snapshot.enabled;
+        snapshot = {
+          ...snapshot,
+          provider,
+          ...(enabled ? { status: "starting" as const } : {}),
+        };
+        options.configure({ enabled, provider });
+        render();
+      },
+      { signal: abort.signal },
+    );
+    providerControl.append(providerTitle, providerSelect, providerDetail);
+    body.append(providerControl);
     if (snapshot.status === "starting" || snapshot.status === "reconnecting") {
       const progress = document.createElement("div");
       progress.className = "vw-remote-progress";
@@ -379,6 +489,7 @@ export function createRemoteAccessCompanion(options: {
     const start = document.createElement("button");
     start.type = "button";
     start.className = "vw-remote-button";
+    start.disabled = !providerReady(snapshot, snapshot.provider);
     start.textContent =
       snapshot.status === "error" ? "Try again" : "Start remote access";
     start.addEventListener("click", () => configure(true), {
