@@ -8,6 +8,7 @@ import { GrokBuildSkillManager } from "./grok-build-skill-manager.js";
 import { formatGrokBuildSkillListing } from "./grok-build-skills.js";
 import { composeGrokBuildMcpCatalog, resolveGrokBuildAgentMcp } from "./grok-build-agent-mcp.js";
 import { createGrokBuildMcpServices } from "./grok-build-mcp.js";
+import { createGrokBuildAlmostNodeStdioConfig } from "./grok-build-mcp-stdio.js";
 import {
   configureGrokBuildAgentTools,
   formatGrokBuildPreloadedSkills,
@@ -176,12 +177,17 @@ export class GrokBuildBrowserSubagentRunner {
       parentConfigs: [], parentPool: [], projectTrusted: true,
     });
     const mcpCatalog = composeGrokBuildMcpCatalog(mcpResolution.owned, mcpResolution.inherited);
-    const browserMcp = createGrokBuildMcpServices(mcpCatalog.flatMap((server) => server.type === "stdio" ? [] : [{
-      name: server.name,
-      url: server.url,
-      headers: Object.fromEntries(server.headers.map((header) => [header.name, header.value])),
-      enableEventStream: server.type === "sse",
-    }]), { traceSink: createGrokBuildMcpOtlpTraceSink(trace.tracer) });
+    const browserMcp = createGrokBuildMcpServices(mcpCatalog.map((server) => server.type === "stdio"
+      ? createGrokBuildAlmostNodeStdioConfig(container.vfs, server, {
+          cwd,
+          sessionId: subagentId,
+        })
+      : {
+          name: server.name,
+          url: server.url,
+          headers: Object.fromEntries(server.headers.map((header) => [header.name, header.value])),
+          enableEventStream: server.type === "sse",
+        }), { traceSink: createGrokBuildMcpOtlpTraceSink(trace.tracer) });
     let runtime!: GrokBuildBrowserRuntime;
     let skillManager!: GrokBuildSkillManager;
     const subagentServices: GrokBuildBrowserServices = {
@@ -344,6 +350,7 @@ export class GrokBuildBrowserSubagentRunner {
       markStarted();
       const owner = parentRuntime ?? this.options.rootRuntime();
       if (owner && owner !== runtime) runtime.reparentBackgroundTasksTo(owner);
+      void browserMcp.registry.closeAll(new AbortController().signal).catch(() => undefined);
       void this.telemetry.exportAgentTraceSpans(trace.finish(), this.options.traceMetadata?.()).catch(() => undefined);
     }
   }

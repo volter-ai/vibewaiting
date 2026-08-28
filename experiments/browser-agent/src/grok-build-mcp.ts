@@ -19,13 +19,15 @@ export interface GrokBuildMcpServerConfig extends GrokBuildMcpHttpConfig {
   disabledTools?: readonly string[];
   /** Stable native telemetry label; defaults to `unknown` when not resolved. */
   serverScope?: string;
+  /** Internal transport projection used by connection telemetry. */
+  transportType?: "http" | "stdio";
 }
 
 export interface GrokBuildMcpTraceSink {
   recordConnection(event: {
     status: "connected" | "failed";
     serverName: string;
-    transportType: "http";
+    transportType: "http" | "stdio";
     serverScope: string;
     durationMs: number;
     toolCount?: number;
@@ -130,6 +132,16 @@ export class GrokBuildMcpRegistry {
     state.status = "idle";
     state.pending = undefined;
     await this.connect(state, signal);
+  }
+
+  /** Session teardown: close every live HTTP session and stdio child. */
+  async closeAll(signal: AbortSignal): Promise<void> {
+    const results = await Promise.allSettled(
+      [...this.servers.values()].map((state) => state.client.close(signal)),
+    );
+    signal.throwIfAborted();
+    const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (failure) throw failure.reason;
   }
 
   serverSummaries(): Array<{ name: string; description?: string; toolCount: number; toolNames: string[]; status: ServerState["status"]; error?: string }> {
@@ -253,7 +265,7 @@ export class GrokBuildMcpRegistry {
         safelyRecordConnection(this.traceSink, {
           status: "connected",
           serverName: state.config.name,
-          transportType: "http",
+          transportType: state.config.transportType ?? "http",
           serverScope: state.config.serverScope ?? "unknown",
           durationMs: elapsedMilliseconds(startedAt, this.now()),
           toolCount: state.tools.length,
@@ -265,7 +277,7 @@ export class GrokBuildMcpRegistry {
         safelyRecordConnection(this.traceSink, {
           status: "failed",
           serverName: state.config.name,
-          transportType: "http",
+          transportType: state.config.transportType ?? "http",
           serverScope: state.config.serverScope ?? "unknown",
           durationMs: elapsedMilliseconds(startedAt, this.now()),
           errorType: mcpConnectionErrorType(error),
