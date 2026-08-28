@@ -539,6 +539,45 @@ describe("browser-native Grok Build session", () => {
     vi.unstubAllGlobals();
   });
 
+  it("ports manual /compact context insertion and reports the resulting live session state", async () => {
+    const requests: Array<{ headers: Headers; body: Record<string, unknown> }> = [];
+    const summary = `<summary>\n${"1. Primary Request and Intent: preserve the auth relay security decisions and continue the browser port.\n".repeat(12)}</summary>`;
+    const responses = [
+      stream({ output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "Ready" }] }] }, "Ready"),
+      stream({ output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: summary }] }] }, summary),
+    ];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      requests.push({ headers: new Headers(init?.headers), body: JSON.parse(String(init?.body)) as Record<string, unknown> });
+      return responses.shift() ?? (() => { throw new Error("unexpected request"); })();
+    }));
+    const session = new GrokBuildSession({
+      endpoint: "/api/grok/responses",
+      environment: { os: "Browser", shell: "/bin/sh", workspacePath: "/", today: "2026-08-27" },
+      runtime: { async execute() { return { output: "unused" }; } },
+      sessionId: "session-manual-compact",
+      model: "grok-4.6",
+      contextWindow: 123_456,
+      enableSessionTitle: false,
+      enableTurnSummary: false,
+    });
+    await session.run("Inspect auth", new AbortController().signal);
+    await session.compact(new AbortController().signal, "Preserve the relay security decisions");
+
+    expect(requests).toHaveLength(2);
+    expect(requests[1]?.headers.get("x-browser-agent-request-kind")).toBe("compaction");
+    const prompt = String((requests[1]?.body.input as Array<Record<string, unknown>>).at(-1)?.content);
+    expect(prompt).toContain("**User-provided context for this compaction:**\nPreserve the relay security decisions");
+    expect(prompt.indexOf("User-provided context")).toBeLessThan(prompt.indexOf("CRITICAL:"));
+    expect(session.sessionInfo()).toMatchObject({
+      sessionId: "session-manual-compact",
+      model: "grok-4.6",
+      turn: 1,
+      contextTotal: 123_456,
+      compactions: 1,
+    });
+    vi.unstubAllGlobals();
+  });
+
   it("serializes same-file read/edit calls while independent paths stay parallel", async () => {
     const events: string[] = [];
     let releaseIndependent!: () => void;

@@ -64,8 +64,8 @@ export const GROK_BUILD_SYSTEM_PARITY = {
   },
   interactive_command_surface: {
     level: "partial",
-    evidence: ["experiments/browser-agent/src/grok-build-mcp-dialog.ts", "test/grok-build-mcp-dialog.test.ts", "e2e/browser-agent.e2e.mjs"],
-    gap: "Native's explicit MCP auth trigger and live status/retry surface are now browser-native. The complete pager slash registry, command palette/autocomplete, and remaining browser-representable command actions are still being translated and proven command by command.",
+    evidence: ["experiments/browser-agent/src/grok-build-mcp-dialog.ts", "experiments/browser-agent/src/grok-build-slash-commands.ts", "experiments/browser-agent/src/grok-build-skill-invocation.ts", "test/grok-build-mcp-dialog.test.ts", "test/grok-build-slash-commands.test.ts", "test/grok-build-skill-invocation.test.ts", "test/grok-build-agent.test.ts", "e2e/browser-agent.e2e.mjs"],
+    gap: "The source-pinned shell catalog, gates, aliases, collision rules, /loop prompt expansion, slash-skill envelopes/substitutions, explicit /compact context, /context, /session-info, and launch/stop/resume workflow actions are browser-ported. Remaining gaps are the pager command palette/autocomplete and pager-local actions, effective permission/yolo enforcement, workflow runs/pause/save, goal/memory/hooks/plugins/feedback actions, and MCP add/toggle/remove/connectors controls.",
   },
   telemetry_and_feedback: {
     level: "source-ported",

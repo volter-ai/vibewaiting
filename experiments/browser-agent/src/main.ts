@@ -84,6 +84,8 @@ import {
 } from "./grok-build-prompt-queue.js";
 import { GrokBuildAutoWakeCoordinator, type GrokBuildAutoWakePayload } from "./grok-build-auto-wake.js";
 import { missingBrowserAgentCapabilities } from "./browser-capabilities.js";
+import { resolveGrokBuildSlash, type GrokBuildBuiltinSlashAction } from "./grok-build-slash-commands.js";
+import { buildGrokBuildSkillInformation } from "./grok-build-skill-invocation.js";
 
 const VIRTUAL_PORT = 4176;
 const THREE_VERSION = "0.180.0";
@@ -159,6 +161,7 @@ let hmrEvents = 0;
 let iframeLoadCount = 0;
 let runtimeReady = false;
 let authReady = false;
+let browserYoloMode = true;
 const conformanceOrigin = new URLSearchParams(location.search).get("conformance");
 const startupCoordinator = new GrokBuildStartupCoordinator({
   tools: GROK_BUILD_TOOLS,
@@ -665,6 +668,87 @@ function runBrowserSubagent(
 ): Promise<string | GrokBuildSubagentExecutionResult> {
   return subagentRunner.run(input, signal, subagentId, parentRuntime);
 }
+
+async function executeBrowserBuiltinSlash(action: GrokBuildBuiltinSlashAction, signal: AbortSignal): Promise<void> {
+  switch (action.type) {
+    case "compact": {
+      if (!agentSession) throw new Error("No active session");
+      await agentSession.compact(signal, action.userContext);
+      eventItem("", "Conversation compacted", action.userContext ?? "Context window compressed");
+      return;
+    }
+    case "set-yolo":
+      browserYoloMode = action.enabled;
+      eventItem("", "Always approve", browserYoloMode ? "Enabled" : "Disabled");
+      return;
+    case "context-info": {
+      if (!agentSession) throw new Error("No active session");
+      const info = agentSession.sessionInfo();
+      const percentage = info.contextTotal ? Math.round(info.contextUsed * 100 / info.contextTotal) : 0;
+      eventItem("", "Context", `${info.contextUsed.toLocaleString()} / ${info.contextTotal.toLocaleString()} tokens (${percentage}%) · ${info.compactions} compactions`);
+      return;
+    }
+    case "session-info": {
+      if (!agentSession) throw new Error("No active session");
+      const info = agentSession.sessionInfo();
+      const percentage = info.contextTotal ? Math.round(info.contextUsed * 100 / info.contextTotal) : 0;
+      eventItem("", "Session info", `**Session ID:** ${info.sessionId}\n\n**Working directory:** /\n\n**Model:** ${info.model}\n\n**Turn:** ${info.turn}\n\n**Context:** ${info.contextUsed} / ${info.contextTotal} tokens (${percentage}%)`);
+      return;
+    }
+    case "deep-research": {
+      if (!action.query) throw new Error("Usage: /deep-research <query>");
+      const output = await workflowManager!.run({ name: "deep-research", args: { query: action.query } }, signal);
+      eventItem("", "Deep research started", output);
+      return;
+    }
+    case "workflow-launch": {
+      if (!action.name) throw new Error("Usage: /workflow <name> [args]");
+      const output = await workflowManager!.run({ name: action.name, args: action.input }, signal);
+      eventItem("", "Workflow started", output);
+      return;
+    }
+    case "workflow-manage": {
+      if (action.operation === "stop" && action.runId) {
+        eventItem("", "Workflow", workflowManager!.stop(action.runId) ? `Stopped ${action.runId}` : `No active workflow run ${action.runId}`);
+        return;
+      }
+      if (action.operation === "resume" && action.runId) {
+        const output = await workflowManager!.run({ source: { type: "resume", resume_from_run_id: action.runId } }, signal);
+        eventItem("", "Workflow resumed", output);
+        return;
+      }
+      throw new Error(action.operation === "runs" ? "Workflow run listing is not yet available in the browser client." : "Usage: /workflow <name> [args] | runs | pause|resume|stop|save [run-id]");
+    }
+    default:
+      throw new Error(`/${action.type} is advertised only when its browser capability is enabled.`);
+  }
+}
+
+async function prepareBrowserPrompt(text: string, signal: AbortSignal): Promise<{ prompt: string; skillInformation?: string } | undefined> {
+  const workflows = workflowManager?.registry.list().map((definition) => ({
+    name: definition.meta.name,
+    description: definition.meta.description,
+    source: definition.source,
+    ...(definition.path ? { path: definition.path } : {}),
+  })) ?? [];
+  const skills = discoverGrokBuildSkills(container.vfs);
+  const resolution = resolveGrokBuildSlash(text, {
+    scheduler: true,
+    workflows: workflows.length > 0,
+    workflowManagement: true,
+  }, skills, workflows, "detached");
+  if (resolution.type === "passthrough") return { prompt: text };
+  if (resolution.type === "loop-prompt") return { prompt: resolution.text };
+  if (resolution.type === "skill") {
+    const sessionId = agentSession?.sessionInfo().sessionId;
+    if (!sessionId) throw new Error("No active session");
+    const skillInformation = buildGrokBuildSkillInformation(container.vfs, resolution.references, sessionId);
+    return { prompt: text, ...(skillInformation ? { skillInformation } : {}) };
+  }
+  await executeBrowserBuiltinSlash(resolution.action, signal);
+  return;
+}
+
 async function runAgent(mode: "send-now" | "queue" = "send-now"): Promise<void> {
   const submitted = taskInput.value.trim();
   if (activeRun) {
@@ -847,13 +931,18 @@ async function runAgent(mode: "send-now" | "queue" = "send-now"): Promise<void> 
       return completed;
     };
     let nextPrompt = submitted;
+    let preparedPrompt = await prepareBrowserPrompt(nextPrompt, activeRun.signal);
+    if (!preparedPrompt) {
+      agentState.textContent = "Complete";
+      return;
+    }
     let result: Awaited<ReturnType<GrokBuildSession["run"]>>;
     if (planResumePending) {
       result = await runRootTurn(agentSession.resume(activeRun.signal, { requestId: `plan-resume-${Date.now()}` }));
       planResumePending = false;
-      if (nextPrompt) result = await runRootTurn(agentSession.run(nextPrompt, activeRun.signal));
+      if (nextPrompt) result = await runRootTurn(agentSession.run(preparedPrompt.prompt, activeRun.signal, { ...(preparedPrompt.skillInformation ? { skillInformation: preparedPrompt.skillInformation } : {}) }));
     } else {
-      result = await runRootTurn(agentSession.run(nextPrompt, activeRun.signal));
+      result = await runRootTurn(agentSession.run(preparedPrompt.prompt, activeRun.signal, { ...(preparedPrompt.skillInformation ? { skillInformation: preparedPrompt.skillInformation } : {}) }));
     }
     if (profile?.subagentLanes?.length) await rootBrowserRuntime?.waitForRunningSubagents();
     while (true) {
@@ -865,7 +954,9 @@ async function runAgent(mode: "send-now" | "queue" = "send-now"): Promise<void> 
       if (profile || !livePrompts.hasQueued()) break;
       nextPrompt = livePrompts.takeQueuedPrefix() ?? "";
       if (!nextPrompt) break;
-      result = await runRootTurn(agentSession.run(nextPrompt, activeRun.signal));
+      preparedPrompt = await prepareBrowserPrompt(nextPrompt, activeRun.signal);
+      if (!preparedPrompt) continue;
+      result = await runRootTurn(agentSession.run(preparedPrompt.prompt, activeRun.signal, { ...(preparedPrompt.skillInformation ? { skillInformation: preparedPrompt.skillInformation } : {}) }));
     }
     if (result.status === "limit") agentState.textContent = "Stopped";
     if (profile) {

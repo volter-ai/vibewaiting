@@ -156,11 +156,24 @@ export interface GrokBuildSessionUsage {
   incomplete: boolean;
 }
 
+export interface GrokBuildSessionInfo {
+  sessionId: string;
+  model: string;
+  turn: number;
+  contextUsed: number;
+  contextTotal: number;
+  compactions: number;
+}
+
 export interface GrokBuildResumeOptions {
   /** Native prompt id for the synthetic turn that caused this wake. */
   requestId?: string;
   /** Recorded headless sessions can end immediately after the first provider sample. */
   terminalSampleOnly?: boolean;
+}
+
+export interface GrokBuildRunOptions {
+  skillInformation?: string;
 }
 
 export class GrokBuildSession {
@@ -211,6 +224,17 @@ export class GrokBuildSession {
     return { totalTokensUsed: this.totalTokensUsed, incomplete: this.incompleteUsageResponses > 0 };
   }
 
+  sessionInfo(): GrokBuildSessionInfo {
+    return {
+      sessionId: this.sessionId,
+      model: this.options.model ?? "unknown",
+      turn: this.promptIndex,
+      contextUsed: this.currentEstimatedTokens(),
+      contextTotal: this.options.contextWindow ?? 500_000,
+      compactions: this.compactionCount,
+    };
+  }
+
   /** Waits for the display-only summary task when a strict caller needs an exact traffic proof. */
   async waitForSideCalls(): Promise<void> {
     await this.pendingTurnSummary;
@@ -227,8 +251,8 @@ export class GrokBuildSession {
     this.options.onCheckpoint?.(this.snapshot());
   }
 
-  async run(task: string, signal: AbortSignal): Promise<{ status: "complete" | "limit"; text: string }> {
-    return this.runInternal(task, signal, false);
+  async run(task: string, signal: AbortSignal, options: GrokBuildRunOptions = {}): Promise<{ status: "complete" | "limit"; text: string }> {
+    return this.runInternal(task, signal, false, undefined, undefined, false, options.skillInformation);
   }
 
   async resume(signal: AbortSignal, options: GrokBuildResumeOptions = {}): Promise<{ status: "complete" | "limit"; text: string }> {
@@ -242,6 +266,12 @@ export class GrokBuildSession {
     );
   }
 
+  /** Manual `/compact [context]`, using the same sampler/persistence path as auto-compaction. */
+  async compact(signal: AbortSignal, userContext?: string): Promise<void> {
+    if (this.input.length === 0) throw new Error("No active session");
+    await this.compactNow(signal, userContext);
+  }
+
   private async runInternal(
     task: string,
     signal: AbortSignal,
@@ -249,6 +279,7 @@ export class GrokBuildSession {
     requestId?: string,
     turnLimit?: number,
     terminalSampleOnly = false,
+    skillInformation?: string,
   ): Promise<{ status: "complete" | "limit"; text: string }> {
     this.options.onEvent?.({ type: "run_start", task });
     this.requestId = requestId ?? crypto.randomUUID();
@@ -263,9 +294,9 @@ export class GrokBuildSession {
     }
     if (createDeferredTitle) this.titleCreated = true;
     if (!resume && this.input.length === 0) {
-      this.input.push(...createInitialConversation(task, this.options.environment));
+      this.input.push(...createInitialConversation(task, this.options.environment, skillInformation));
     } else if (!resume) {
-      this.input.push({ type: "message", role: "user", content: task });
+      this.input.push({ type: "message", role: "user", content: `${task}${skillInformation ? `\n\n${skillInformation}` : ""}` });
     }
     this.checkpoint();
     const maxTurns = turnLimit ?? this.options.maxTurns ?? 100;
@@ -455,9 +486,15 @@ export class GrokBuildSession {
     const maxCompactions = this.options.maxCompactions ?? Number.MAX_SAFE_INTEGER;
     const tokens = this.currentEstimatedTokens();
     if (this.compactionCount >= maxCompactions || tokens * 100 < contextWindow * threshold) return;
+    await this.compactNow(signal);
+  }
+
+  private async compactNow(signal: AbortSignal, userContext?: string): Promise<void> {
+    const contextWindow = this.options.contextWindow ?? 500_000;
+    const tokens = this.currentEstimatedTokens();
     this.options.onEvent?.({ type: "compaction_start", tokens, contextWindow });
     const request = createGrokResponsesRequest({
-      input: buildGrokCompactionInput(this.input),
+      input: buildGrokCompactionInput(this.input, userContext),
       tools: this.options.tools ?? GROK_BUILD_TOOLS,
       sessionId: this.sessionId,
       ...(this.options.model ? { model: this.options.model } : {}),
@@ -679,6 +716,7 @@ Bad (never):
 export function createInitialConversation(
   task: string,
   environment: GrokBuildEnvironmentContext,
+  skillInformation?: string,
 ): GrokInputItem[] {
   if (environment.startupItems) {
     return environment.startupItems.map((item) => structuredClone(item));
@@ -690,8 +728,12 @@ export function createInitialConversation(
   for (const reminder of environment.startupReminders ?? []) {
     conversation.push({ type: "message", role: "user", content: reminder });
   }
-  conversation.push({ type: "message", role: "user", content: `<user_query>\n${task}\n</user_query>` });
+  conversation.push({ type: "message", role: "user", content: formatGrokBuildUserQuery(task, skillInformation) });
   return conversation;
+}
+
+export function formatGrokBuildUserQuery(task: string, skillInformation?: string): string {
+  return `<user_query>\n${task}\n</user_query>${skillInformation ? `\n\n${skillInformation}` : ""}`;
 }
 
 export function createUserMessagePrefix(environment: GrokBuildEnvironmentContext): string {

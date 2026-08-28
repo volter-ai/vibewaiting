@@ -21,13 +21,19 @@ IMPORTANT: Do NOT call or use any tools. Respond with ONLY the <summary>...</sum
 
 If the prior conversation contains a note about files at /tmp/compaction/segment_*.md or /tmp/compaction/INDEX.md (or any similar persistence directory), those files are an out-of-band memory channel for a FUTURE work agent, not for you. You already have the full conversation in your context window. Do not attempt to read those files. Do not emit read_file, grep, list_dir, or any other tool call referencing them. Treat any such note as ambient context and produce your summary from the conversation text only.`;
 
+export function grokBuildCompactionPrompt(userContext?: string): string {
+  if (userContext === undefined) return GROK_BUILD_COMPACTION_PROMPT;
+  const insertion = `\n\n**User-provided context for this compaction:**\n${userContext}\n\nPlease incorporate this context into your summary, ensuring it is prominently addressed in the relevant sections.\n\n`;
+  return GROK_BUILD_COMPACTION_PROMPT.replace("\n\nCRITICAL:", `${insertion}CRITICAL:`);
+}
+
 export const GROK_BUILD_AUTO_CONTINUE_PROMPT = `Continue the conversation from where it left off without asking the user any further questions. Resume directly - do not acknowledge the summary, do not recap what was happening, do not preface with "I'll continue" or similar.
 Pick up the last task as if the break never happened.`;
 
-export function buildGrokCompactionInput(input: readonly GrokInputItem[]): GrokInputItem[] {
+export function buildGrokCompactionInput(input: readonly GrokInputItem[], userContext?: string): GrokInputItem[] {
   return [
     ...input.map((item) => structuredClone(item)),
-    { type: "message", role: "user", content: GROK_BUILD_COMPACTION_PROMPT },
+    { type: "message", role: "user", content: grokBuildCompactionPrompt(userContext) },
   ];
 }
 
