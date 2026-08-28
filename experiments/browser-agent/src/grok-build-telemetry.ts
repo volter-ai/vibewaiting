@@ -198,6 +198,7 @@ export class GrokBuildSignalTracker {
   private totalTokensBeforeCompaction = 0;
   private errors = 0;
   private cancellations = 0;
+  private longPauses = 0;
   private consecutiveCancellations = 0;
   private lastTurnAt: number | undefined;
   private turnStartedAt: number | undefined;
@@ -221,14 +222,17 @@ export class GrokBuildSignalTracker {
   record(event: GrokBuildEvent): void {
     if (event.type === "run_start") {
       const now = this.now();
-      if (this.lastTurnAt !== undefined && now - this.lastTurnAt >= 60_000) this.turnBaseline.longPauses += 1;
+      if (this.lastTurnAt !== undefined && now - this.lastTurnAt >= 60_000) {
+        this.longPauses += 1;
+        this.turnBaseline.longPauses += 1;
+      }
       this.lastTurnAt = now;
       this.turnStartedAt = now;
       this.totalTurns += 1;
       this.userMessages += 1;
       this.resetPerTurn();
     }
-    else if (event.type === "assistant") this.assistantMessages += 1;
+    else if (event.type === "assistant" && !event.synthetic) this.assistantMessages += 1;
     else if (event.type === "response_end" && event.kind === "foreground") this.recordResponse(event.response, event.metrics);
     else if (event.type === "tool_end") {
       this.toolCalls += 1;
@@ -259,6 +263,7 @@ export class GrokBuildSignalTracker {
       errorCount: this.errors,
       cancellationCount: this.cancellations,
       consecutiveCancellations: this.consecutiveCancellations,
+      longPausesCount: this.longPauses,
       toolCallCount: this.toolCalls,
       toolFailureCount: this.toolFailures,
       compactionCount: this.compactions,
@@ -266,6 +271,13 @@ export class GrokBuildSignalTracker {
       ...(this.tools.size > 0 ? { toolsUsed: [...this.tools] } : {}),
       ...this.sessionLatencyFields(),
     };
+  }
+
+  ensureLongPauses(count: number): void {
+    if (!Number.isSafeInteger(count) || count <= this.longPauses) return;
+    const delta = count - this.longPauses;
+    this.longPauses = count;
+    this.turnBaseline.longPauses += delta;
   }
 
   takeTurnDelta(outcome: "completed" | "cancelled" | "error", requestId?: string, now = this.now()): GrokBuildTurnDelta {
@@ -469,6 +481,10 @@ export class GrokBuildTelemetryLifecycle {
       this.background(this.client.sendTurnDelta(this.sessionId, this.tracker.takeTurnDelta(outcome, requestId)));
       this.exportTraceSpans(this.traceProducer?.drain() ?? []);
     }
+  }
+
+  ensureLongPauses(count: number): void {
+    this.tracker.ensureLongPauses(count);
   }
 
   end(outcome: "cancelled" | "error", requestId?: string): void {

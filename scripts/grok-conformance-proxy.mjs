@@ -333,6 +333,8 @@ function buildDriverProfile(path) {
     && exchange !== compaction
   ).length;
   const signalExchanges = exchanges.filter((exchange) => exchange.key.includes("/signals"));
+  const nativeLongPausesCount = signalExchanges.reduce((maximum, exchange) =>
+    Math.max(maximum, Number.isSafeInteger(exchange.request?.body?.longPausesCount) ? exchange.request.body.longPausesCount : 0), 0);
   const periodicSignalAssistantCounts = signalExchanges.slice(1, -1).flatMap((exchange) =>
     Number.isSafeInteger(exchange.request?.body?.assistantMessageCount)
       ? [exchange.request.body.assistantMessageCount]
@@ -340,6 +342,7 @@ function buildDriverProfile(path) {
   );
   const nativeWorkspacePath = extractWorkspacePath(initial.input);
   const initialFiles = extractInitialWorkspaceFiles(foreground, nativeWorkspacePath);
+  const asynchronousReminders = extractAsynchronousReminders(foreground);
   return {
     formatVersion: CONFORMANCE_FORMAT_VERSION,
     task: extractUserQuery(title?.request?.body?.input) ?? "",
@@ -350,15 +353,40 @@ function buildDriverProfile(path) {
     modelRequests: exchanges.filter((exchange) => exchange.key === "POST /v1/responses").length,
     bundleArchiveRequests: exchanges.filter((exchange) => exchange.key === "GET /v1/bundle/archive").length,
     ...(periodicSignalAssistantCounts.length > 0 ? { periodicSignalAssistantCounts } : {}),
+    ...(nativeLongPausesCount > 0 ? { nativeLongPausesCount } : {}),
     turnSummaryRequests,
     reasoningEffort: initial.reasoning?.effort,
     nativeWorkspacePath,
     ...(initialFiles.length > 0 ? { initialFiles } : {}),
+    ...(asynchronousReminders.length > 0 ? { asynchronousReminders } : {}),
     fixture: manifest?.fixture,
     autoCompactThresholdPercent: manifest?.autoCompactThresholdPercent,
     ...(compactionTranscriptHint ? { compactionTranscriptHint } : {}),
     ...(compactionSystemReminder ? { compactionSystemReminder } : {}),
   };
+}
+
+function extractAsynchronousReminders(foreground) {
+  const seen = new Map();
+  const reminders = [];
+  for (let requestIndex = 0; requestIndex < foreground.length; requestIndex += 1) {
+    const counts = new Map();
+    for (const item of foreground[requestIndex]?.request?.body?.input ?? []) {
+      if (item?.role !== "user" || typeof item.content !== "string" || !isAsynchronousReminder(item.content)) continue;
+      counts.set(item.content, (counts.get(item.content) ?? 0) + 1);
+    }
+    for (const [content, count] of counts) {
+      const prior = seen.get(content) ?? 0;
+      for (let occurrence = prior; occurrence < count; occurrence += 1) reminders.push({ beforeForegroundRequest: requestIndex, content });
+      if (count > prior) seen.set(content, count);
+    }
+  }
+  return reminders;
+}
+
+function isAsynchronousReminder(content) {
+  return content.startsWith("<system-reminder>\n")
+    && /(?:Background task "|Monitor "|monitor events? from|background workflow run stopped)/iu.test(content);
 }
 
 function extractInitialWorkspaceFiles(foreground, nativeWorkspacePath) {
@@ -399,6 +427,10 @@ function extractInitialWorkspaceFiles(foreground, nativeWorkspacePath) {
 }
 
 function isReadOnlyWorkspaceInspection(call) {
+  // Todo state is session-local and does not mutate the workspace. Allowing it
+  // here lets diagnostic corpora establish a checklist before their initial
+  // read-only file discovery without disabling real browser execution.
+  if (call.name === "todo_write") return true;
   if (["list_dir", "read_file", "grep"].includes(call.name)) return true;
   if (call.name !== "run_terminal_command") return false;
   try {
@@ -414,6 +446,9 @@ function isReadOnlyWorkspaceInspection(call) {
 function workspaceRelativePath(target, workspacePath) {
   const normalizedTarget = target.replaceAll("\\\\", "/");
   const normalizedRoot = workspacePath.replaceAll("\\\\", "/").replace(/\/$/u, "");
+  if (!normalizedTarget.startsWith("/") && !normalizedTarget.split("/").includes("..")) {
+    return `/${normalizedTarget.replace(/^\.\//u, "")}`;
+  }
   if (normalizedTarget === normalizedRoot || !normalizedTarget.startsWith(`${normalizedRoot}/`)) return;
   return `/${normalizedTarget.slice(normalizedRoot.length + 1)}`;
 }

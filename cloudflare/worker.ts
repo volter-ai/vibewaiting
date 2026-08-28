@@ -15,6 +15,7 @@ import {
   positiveTurn,
   sameWebFetchHost,
   validSessionId,
+  validGrokRequestId,
   validUuid,
   type GrokRelayRequestKind,
   type GrokTelemetryRoute,
@@ -475,7 +476,7 @@ function proxyMetadata(request: Request): {
   const sessionId = validUuid(request.headers.get("x-browser-agent-session")) ?? conversationId;
   return {
     conversationId,
-    requestId: validUuid(request.headers.get("x-browser-agent-request")) ?? crypto.randomUUID(),
+    requestId: validGrokRequestId(request.headers.get("x-browser-agent-request")) ?? crypto.randomUUID(),
     sessionId,
     turn: positiveTurn(request.headers.get("x-browser-agent-turn")),
   };

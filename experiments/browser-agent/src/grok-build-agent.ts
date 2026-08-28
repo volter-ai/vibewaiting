@@ -73,7 +73,7 @@ export interface GrokBuildToolRuntime {
 export type GrokBuildEvent =
   | { type: "run_start"; task: string }
   | { type: "turn_start"; turn: number }
-  | { type: "assistant"; turn: number; text: string; reasoning: string }
+  | { type: "assistant"; turn: number; text: string; reasoning: string; synthetic?: true }
   | { type: "response_end"; kind: string; response: GrokCompletedResponse; metrics: GrokInferenceLatencyStats }
   | { type: "tool_start"; turn: number; call: GrokBuildToolCall }
   | { type: "tool_end"; turn: number; call: GrokBuildToolCall; result: GrokBuildToolResult }
@@ -109,7 +109,7 @@ export interface GrokBuildSessionOptions {
   getCompactionSystemReminder?: () => string | undefined;
   onCompaction?: () => void;
   getPostToolSystemReminder?: (call: GrokBuildToolCall, result: GrokBuildToolResult) => string | undefined;
-  drainSystemReminders?: () => readonly string[];
+  drainSystemReminders?: (phase: "before_sample" | "after_terminal_sample") => readonly string[];
   /** Await completion bookkeeping that native orders before the post-turn side call. */
   beforeTurnSummary?: () => void | Promise<void>;
   persistCompactionSegment?: (segment: {
@@ -201,26 +201,34 @@ export class GrokBuildSession {
   }
 
   async run(task: string, signal: AbortSignal): Promise<{ status: "complete" | "limit"; text: string }> {
+    return this.runInternal(task, signal, false);
+  }
+
+  async resume(signal: AbortSignal): Promise<{ status: "complete" | "limit"; text: string }> {
+    return this.runInternal("", signal, true, `task-completed-${crypto.randomUUID()}`, 1);
+  }
+
+  private async runInternal(task: string, signal: AbortSignal, resume: boolean, requestId?: string, turnLimit?: number): Promise<{ status: "complete" | "limit"; text: string }> {
     this.options.onEvent?.({ type: "run_start", task });
-    this.requestId = crypto.randomUUID();
+    this.requestId = requestId ?? crypto.randomUUID();
     this.promptIndex += 1;
-    if (!this.titleCreated && this.options.enableSessionTitle !== false) {
+    if (!resume && !this.titleCreated && this.options.enableSessionTitle !== false) {
       await this.createSessionTitle(task, signal);
       this.titleCreated = true;
     }
-    if (this.input.length === 0) {
+    if (!resume && this.input.length === 0) {
       this.input.push(...createInitialConversation(task, this.options.environment));
-    } else {
+    } else if (!resume) {
       this.input.push({ type: "message", role: "user", content: task });
     }
     this.checkpoint();
-    const maxTurns = this.options.maxTurns ?? 100;
+    const maxTurns = turnLimit ?? this.options.maxTurns ?? 100;
 
     for (let turn = 1; turn <= maxTurns; turn += 1) {
       signal.throwIfAborted();
       this.options.onEvent?.({ type: "turn_start", turn });
       await this.maybeCompact(signal);
-      for (const reminder of this.options.drainSystemReminders?.() ?? []) {
+      for (const reminder of this.options.drainSystemReminders?.("before_sample") ?? []) {
         this.input.push({ type: "message", role: "user", content: reminder });
       }
       const response = await this.sample(signal);
@@ -233,11 +241,12 @@ export class GrokBuildSession {
         turn,
         text: response.text,
         reasoning: response.reasoning,
+        ...(resume ? { synthetic: true as const } : {}),
       });
 
       const calls = responseToolCalls(response.response.output ?? []);
       if (calls.length === 0) {
-        const midSampleReminders = this.options.drainSystemReminders?.() ?? [];
+        const midSampleReminders = this.options.drainSystemReminders?.("after_terminal_sample") ?? [];
         if (midSampleReminders.length > 0) {
           for (const reminder of midSampleReminders) {
             this.input.push({ type: "message", role: "user", content: reminder });
@@ -258,6 +267,10 @@ export class GrokBuildSession {
         return { status: "complete", text: response.text };
       }
       if (turn === maxTurns) {
+        if (resume) {
+          this.checkpoint();
+          return { status: "complete", text: response.text };
+        }
         this.options.onEvent?.({ type: "limit", turns: maxTurns });
         this.checkpoint();
         return { status: "limit", text: response.text };

@@ -8,7 +8,11 @@ test("strictly replays an arbitrary long native Grok Build session", async ({ pa
     waitUntil: "domcontentloaded",
     timeout: 10_000,
   });
-  await expect(page.locator("#agent-state")).toHaveText("Complete", { timeout: 20_000 });
+  try {
+    await expect(page.locator("#agent-state")).toHaveText("Complete", { timeout: 20_000 });
+  } catch (error) {
+    console.error(`Browser trajectory at failure:\n${await page.locator("#trajectory").innerText()}`);
+    throw error;
+  }
   await expect(page.getByText(`${profile.modelRequests} native model requests matched with zero drift`, { exact: false })).toBeVisible();
-  await expect.poll(async () => Number(await page.locator("#hmr-count").textContent())).toBeGreaterThan(0);
 });

@@ -150,6 +150,38 @@ describe("AlmostNode command execution isolation", () => {
     active.get("third")?.({ stdout: "", stderr: "", exitCode: 0 });
     await third;
   });
+
+  it("cancels shell sleep without retaining the AlmostNode execution slot", async () => {
+    const started: string[] = [];
+    const container = {
+      async run(command: string): Promise<BrowserCommandRunResult> {
+        started.push(command);
+        return { stdout: `${command}\n`, stderr: "", exitCode: 0 };
+      },
+    };
+    installBrowserCommandIsolation(container);
+    const controller = new AbortController();
+    const sleeping = runIsolatedBrowserCommand(container, "sleep 300", { signal: controller.signal });
+    const following = runIsolatedBrowserCommand(container, "echo ready", {});
+
+    controller.abort();
+    await expect(sleeping).resolves.toEqual({ stdout: "", stderr: "", exitCode: 130 });
+    await expect(following).resolves.toEqual({ stdout: "echo ready\n", stderr: "", exitCode: 0 });
+    expect(started).toEqual(["echo ready"]);
+  });
+
+  it("runs the remainder of a cancellable leading sleep through the same FIFO", async () => {
+    const started: string[] = [];
+    const container = {
+      async run(command: string): Promise<BrowserCommandRunResult> {
+        started.push(command);
+        return { stdout: "ready\n", stderr: "", exitCode: 0 };
+      },
+    };
+    const result = await runIsolatedBrowserCommand(container, "sleep 0 && echo ready", {});
+    expect(result).toEqual({ stdout: "ready\n", stderr: "", exitCode: 0 });
+    expect(started).toEqual(["echo ready"]);
+  });
 });
 
 async function microtasks(): Promise<void> {

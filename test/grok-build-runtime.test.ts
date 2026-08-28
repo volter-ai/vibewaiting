@@ -31,7 +31,7 @@ describe("Grok Build browser tool runtime", () => {
     expect(vfs.readFileSync("/src/main.js", "utf8")).toContain("changed");
     expect((await execute("list_dir", { target_directory: "/" })).output).toBe("- /\n  - src/\n    - main.js");
     expect((await execute("grep", { pattern: "changed", path: "/" })).output).toContain("Found 1 matching lines\n/src/main.js\n2:changed");
-    expect((await execute("todo_write", { todos: [{ id: "1", content: "Inspect", status: "in_progress" }] })).output).toBe("- [in_progress] 1: Inspect");
+    expect((await execute("todo_write", { todos: [{ id: "1", content: "Inspect", status: "in_progress" }] })).output).toBe("- [in_progress] 1: Inspect\n");
     await execute("write", { file_path: "/src/new.js", content: "export {}" });
     expect(vfs.readFileSync("/src/new.js", "utf8")).toBe("export {}");
     vi.stubGlobal("window", { setTimeout, clearTimeout });
@@ -476,6 +476,60 @@ These subagents were launched before this compaction and are still running. Use 
     }, signal)).resolves.toEqual({ output: "1→export const ready = true;\n" });
     expect(vfs.readFileSync("/src/game.js", "utf8")).toBe("export const ready = true;\n");
     expect(() => conformance.assertComplete()).not.toThrow();
+  });
+
+  it("gates and validates native asynchronous reminders at their recorded foreground boundary", async () => {
+    const nativeId = "11111111-1111-4111-8111-111111111111";
+    const browserId = "22222222-2222-4222-8222-222222222222";
+    const expectedReminder = `<system-reminder>\nMonitor "${nativeId}" ended: [monitor ended: exited (code 0)].\nDescription: verify\nCommand: echo ok\nDuration: 0.1s\nUse get_command_or_subagent_output("${nativeId}") for full output.\n\n</system-reminder>`;
+    let drained = false;
+    const browser = {
+      async execute() {
+        return { output: `Monitor started (task ${browserId}, timeout 15000ms).\nYou will be notified on each event. Keep working -- do not poll or sleep.\nEvents may arrive while you are waiting for the user -- an event is not their reply.` };
+      },
+      drainSystemReminders() {
+        if (drained) return [];
+        drained = true;
+        return [`<system-reminder>\nMonitor "${browserId}" ended: [monitor ended: exited (code 0)].\nDescription: verify\nCommand: echo ok\nDuration: 0.0s\nUse get_command_or_subagent_output("${browserId}") for full output.\n\n</system-reminder>`];
+      },
+    };
+    const conformance = new GrokConformanceToolRuntime(browser, [{
+      callId: "monitor",
+      output: `Monitor started (task ${nativeId}, timeout 15000ms).\nYou will be notified on each event. Keep working -- do not poll or sleep.\nEvents may arrive while you are waiting for the user -- an event is not their reply.`,
+    }], "/private/tmp/native", "/", [{ beforeForegroundRequest: 1, content: expectedReminder }]);
+
+    await conformance.execute({ callId: "monitor", name: "monitor", arguments: "{}" }, new AbortController().signal);
+    expect(conformance.drainSystemReminders("before_sample")).toEqual([]);
+    expect(conformance.hasPendingAutoWake()).toBe(true);
+    expect(conformance.drainSystemReminders("before_sample")).toEqual([expectedReminder]);
+    expect(() => conformance.assertComplete()).not.toThrow();
+  });
+
+  it("widens native-truncated grep while requiring every native match", async () => {
+    const execute = vi.fn(async (_call: { arguments: string }) => ({
+      output: '<workspace_result workspace_path="/">\nFound 3 matching lines\n/src/a.js\n3:three\n1:one\n2:two\n</workspace_result>',
+    }));
+    const expected = '<workspace_result workspace_path="/private/tmp/native">\nFound at least 2 matching lines\n/private/tmp/native/src/a.js\n1:one\n2:two\n</workspace_result>';
+    const conformance = new GrokConformanceToolRuntime({ execute }, [{ callId: "grep", output: expected }], "/private/tmp/native", "/");
+    await expect(conformance.execute({
+      callId: "grep",
+      name: "grep",
+      arguments: '{"pattern":".","path":"/private/tmp/native"}',
+    }, new AbortController().signal)).resolves.toEqual({ output: expected });
+    expect(JSON.parse(execute.mock.calls[0]?.[0].arguments ?? "{}")).toMatchObject({ path: "/", head_limit: 2_000 });
+  });
+
+  it("formats scheduler tools through the native model-facing projection", async () => {
+    const { tools } = runtime();
+    const signal = new AbortController().signal;
+    const created = await tools.execute({
+      callId: "create",
+      name: "scheduler_create",
+      arguments: '{"interval":"1m","prompt":"check"}',
+    }, signal);
+    const id = /ID: ([0-9a-f]+)/u.exec(created.output)?.[1] ?? "";
+    expect(created.output).toBe(`Scheduled task created (ID: ${id}, every 1 minute).`);
+    expect((await tools.execute({ callId: "list", name: "scheduler_list", arguments: "{}" }, signal)).output).toContain(`"id": "${id}"`);
   });
 
   it("keeps ls entry names and file sizes strict while ignoring host-owned long-listing metadata", async () => {

@@ -11,9 +11,17 @@ import {
   normalizeGrokTelemetryRoute,
   sameWebFetchHost,
   validSessionId,
+  validGrokRequestId,
 } from "../cloudflare/security.js";
 
 describe("Cloudflare browser-agent security boundary", () => {
+  it("accepts only native UUID and task-completion request identifiers", () => {
+    const id = "33333333-3333-4333-8333-333333333333";
+    expect(validGrokRequestId(id)).toBe(id);
+    expect(validGrokRequestId(`task-completed-${id}`)).toBe(`task-completed-${id}`);
+    expect(validGrokRequestId(`attacker-${id}`)).toBeUndefined();
+    expect(validGrokRequestId("task-completed-not-a-uuid")).toBeUndefined();
+  });
   it("accepts the native streaming Responses envelope without rewriting it", () => {
     const request = {
       include: ["reasoning.encrypted_content"],

@@ -64,7 +64,47 @@ export function runIsolatedBrowserCommand(
   options: BrowserCommandRunOptions,
 ): Promise<BrowserCommandRunResult> {
   const original = originals.get(container as object) ?? container.run.bind(container);
+  const delayed = leadingSleep(command);
+  if (delayed) return runCancellableSleep(container, delayed, options, original);
   return enqueue(container, command, options, original);
+}
+
+async function runCancellableSleep(
+  container: BrowserCommandContainer,
+  delayed: { milliseconds: number; remainder?: string },
+  options: BrowserCommandRunOptions,
+  run: BrowserCommandContainer["run"],
+): Promise<BrowserCommandRunResult> {
+  const completed = await cancellableDelay(delayed.milliseconds, options.signal);
+  if (!completed) return cancelledResult();
+  if (!delayed.remainder) return { stdout: "", stderr: "", exitCode: 0 };
+  return enqueue(container, delayed.remainder, options, run);
+}
+
+function leadingSleep(command: string): { milliseconds: number; remainder?: string } | undefined {
+  const match = /^\s*sleep\s+(\d+(?:\.\d+)?)([smhd]?)(?:\s*&&\s*([\s\S]+))?\s*$/u.exec(command);
+  if (!match) return undefined;
+  const multiplier = match[2] === "m" ? 60_000
+    : match[2] === "h" ? 3_600_000
+      : match[2] === "d" ? 86_400_000
+        : 1_000;
+  const milliseconds = Number(match[1]) * multiplier;
+  if (!Number.isFinite(milliseconds)) return undefined;
+  return { milliseconds, ...(match[3] ? { remainder: match[3] } : {}) };
+}
+
+function cancellableDelay(milliseconds: number, signal?: AbortSignal): Promise<boolean> {
+  if (signal?.aborted) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const timer = globalThis.setTimeout(() => finish(true), milliseconds);
+    const aborted = (): void => finish(false);
+    const finish = (completed: boolean): void => {
+      globalThis.clearTimeout(timer);
+      signal?.removeEventListener("abort", aborted);
+      resolve(completed);
+    };
+    signal?.addEventListener("abort", aborted, { once: true });
+  });
 }
 
 function enqueue(

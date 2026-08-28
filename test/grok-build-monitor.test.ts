@@ -26,8 +26,8 @@ describe("Grok Build browser monitor", () => {
     await new Promise<void>((resolve) => queueMicrotask(resolve));
     await new Promise<void>((resolve) => queueMicrotask(resolve));
     expect(tools.drainSystemReminders()).toEqual([
-      expect.stringMatching(/^<monitor-event task_id="[0-9a-f-]{36}">\n\[watch 'prod' logs\] DONE\n<\/monitor-event>$/u),
-      expect.stringMatching(/^Monitor "[0-9a-f-]{36}" ended: \[monitor ended: exited \(code 0\)\]\.\nDescription: watch "prod"\nlogs\nCommand: watch\nDuration: 0\.0s\nUse get_command_or_subagent_output\("[0-9a-f-]{36}"\) for full output\.\n$/u),
+      expect.stringMatching(/^<system-reminder>\n<monitor-event task_id="[0-9a-f-]{36}">\n\[watch 'prod' logs\] DONE\n<\/monitor-event>\n<\/system-reminder>$/u),
+      expect.stringMatching(/^<system-reminder>\nMonitor "[0-9a-f-]{36}" ended: \[monitor ended: exited \(code 0\)\]\.\nDescription: watch "prod"\nlogs\nCommand: watch\nDuration: 0\.0s\nUse get_command_or_subagent_output\("[0-9a-f-]{36}"\) for full output\.\n\n<\/system-reminder>$/u),
     ]);
     expect(tools.drainSystemReminders()).toEqual([]);
   });

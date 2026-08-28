@@ -135,7 +135,7 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
   drainSystemReminders(): string[] {
     const pending = this.asynchronousReminders.splice(0);
     const monitorEvents = pending.filter((entry) => entry.startsWith('<monitor-event description="'));
-    if (monitorEvents.length === 0) return pending;
+    if (monitorEvents.length === 0) return pending.map(systemReminder);
     const formatted = formatGrokMonitorEvents(monitorEvents);
     let inserted = false;
     const drained: string[] = [];
@@ -147,7 +147,7 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
         drained.push(entry);
       }
     }
-    return drained;
+    return drained.map(systemReminder);
   }
 
   hasPendingPlanApproval(): boolean {
@@ -239,9 +239,9 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
       case "todo_write": return this.todoWrite(input);
       case "get_command_or_subagent_output": return this.getTaskOutput(input);
       case "spawn_subagent": return this.spawnSubagent(input, signal);
-      case "scheduler_create": return requiredScheduler(this.scheduler).create(input);
-      case "scheduler_delete": return requiredScheduler(this.scheduler).delete(input);
-      case "scheduler_list": return requiredScheduler(this.scheduler).list();
+      case "scheduler_create": return formatSchedulerCreateOutput(requiredScheduler(this.scheduler).create(input));
+      case "scheduler_delete": return formatSchedulerDeleteOutput(await requiredScheduler(this.scheduler).delete(input));
+      case "scheduler_list": return formatSchedulerListOutput(requiredScheduler(this.scheduler).list());
       case "monitor": return this.monitor(input, signal, callId);
       case "search_tool": return this.services.searchTools
         ? this.services.searchTools(string(input.query, "query"), integer(input.limit, 5), signal)
@@ -385,7 +385,16 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
   }
 
   private async getTaskOutput(input: JsonObject): Promise<string> {
-    return this.background.output(input);
+    const ids = taskIds(input);
+    const waited = ids.filter((id) => this.background.get(id)?.status === "running");
+    const output = await this.background.output(input);
+    for (const id of waited) {
+      this.reportedTaskCompletions.add(id);
+      for (let index = this.asynchronousReminders.length - 1; index >= 0; index -= 1) {
+        if (this.asynchronousReminders[index]?.includes(`"${id}"`)) this.asynchronousReminders.splice(index, 1);
+      }
+    }
+    return output;
   }
 
   private todoWrite(input: JsonObject): string {
@@ -399,7 +408,8 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
       if (!content) throw new Error(`Todo ${id} requires content`);
       this.todos.set(id, { id, content, status });
     }
-    return [...this.todos.values()].map((todo) => `- [${todo.status}] ${todo.id}: ${todo.content}`).join("\n");
+    const summary = [...this.todos.values()].map((todo) => `- [${todo.status}] ${todo.id}: ${todo.content}`).join("\n");
+    return summary ? `${summary}\n` : "";
   }
 
   private async enterPlanMode(signal: AbortSignal): Promise<string> {
@@ -673,6 +683,30 @@ function requiredService<T extends (...args: never[]) => Promise<string>>(servic
 function requiredScheduler(scheduler: GrokBuildBrowserScheduler | undefined): GrokBuildBrowserScheduler {
   if (!scheduler) throw new Error("scheduler tools are not available to this subagent capability mode.");
   return scheduler;
+}
+
+function formatSchedulerCreateOutput(output: string): string {
+  const parsed = JSON.parse(output) as { id: string; humanSchedule: string; updated: boolean };
+  return `Scheduled task ${parsed.updated ? "updated" : "created"} (ID: ${parsed.id}, ${parsed.humanSchedule}).`;
+}
+
+function formatSchedulerDeleteOutput(output: string): string {
+  return (JSON.parse(output) as { message: string }).message;
+}
+
+function formatSchedulerListOutput(output: string): string {
+  const { tasks } = JSON.parse(output) as { tasks: unknown[] };
+  return tasks.length === 0 ? "No scheduled tasks." : JSON.stringify(tasks, null, 2);
+}
+
+function taskIds(input: JsonObject): string[] {
+  const value = input.task_ids ?? input.task_id;
+  if (typeof value === "string") return [value];
+  return Array.isArray(value) ? value.filter((id): id is string => typeof id === "string") : [];
+}
+
+function systemReminder(content: string): string {
+  return content.startsWith("<system-reminder>\n") ? content : `<system-reminder>\n${content}\n</system-reminder>`;
 }
 
 function string(value: unknown, name: string, allowEmpty = false): string {

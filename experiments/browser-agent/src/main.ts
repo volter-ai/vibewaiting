@@ -521,7 +521,7 @@ async function runAgent(mode: "send-now" | "queue" = "send-now"): Promise<void> 
       rootBrowserRuntime = browserRuntime;
       const startupSkillReminder = startupExtensionReminder(skillManager);
       conformanceRuntime = profile?.initialFiles?.length || profile?.fixture === "three-pong-starter-v1"
-        ? new GrokConformanceToolRuntime(browserRuntime, profile.toolResults, profile.nativeWorkspacePath, "/")
+        ? new GrokConformanceToolRuntime(browserRuntime, profile.toolResults, profile.nativeWorkspacePath, "/", profile.asynchronousReminders)
         : undefined;
       recordedRuntime = profile && !conformanceRuntime
         ? new GrokRecordedToolRuntime(profile.toolResults)
@@ -559,11 +559,13 @@ async function runAgent(mode: "send-now" | "queue" = "send-now"): Promise<void> 
         ...(!profile ? { getCompactionSystemReminder: () => currentCompactionReminder(browserRuntime) } : {}),
         ...(!profile ? { onCompaction: () => skillManager.onCompaction() } : {}),
         ...(!profile ? { getPostToolSystemReminder: (call, result) => skillManager.afterToolCall(call, result) } : {}),
-        ...(!profile ? { drainSystemReminders: () => [
-          ...browserRuntime.drainSystemReminders(),
-          ...workflowCompletionReminders.splice(0),
-          ...livePrompts.drainInterjections().map((entry) => entry.text),
-        ] } : {}),
+        drainSystemReminders: (phase) => profile
+          ? conformanceRuntime?.drainSystemReminders(phase) ?? []
+          : [
+              ...browserRuntime.drainSystemReminders(),
+              ...workflowCompletionReminders.splice(0),
+              ...livePrompts.drainInterjections().map((entry) => entry.text),
+            ],
         persistCompactionSegment(segment) {
           const directory = segment.location;
           container.vfs.mkdirSync(directory, { recursive: true });
@@ -608,6 +610,11 @@ async function runAgent(mode: "send-now" | "queue" = "send-now"): Promise<void> 
     let result: Awaited<ReturnType<GrokBuildSession["run"]>>;
     while (true) {
       result = await agentSession.run(nextPrompt, activeRun.signal);
+      while (profile && conformanceRuntime?.hasPendingAutoWake()) {
+        await telemetryLifecycle?.flush();
+        telemetryLifecycle?.ensureLongPauses(profile.nativeLongPausesCount ?? 0);
+        result = await agentSession.resume(activeRun.signal);
+      }
       if (profile || !livePrompts.hasQueued()) break;
       nextPrompt = livePrompts.takeQueuedPrefix() ?? "";
       if (!nextPrompt) break;
@@ -620,6 +627,7 @@ async function runAgent(mode: "send-now" | "queue" = "send-now"): Promise<void> 
       (conformanceRuntime ?? recordedRuntime)?.assertComplete();
       const assertion = await fetch(`${conformanceOrigin}/__conformance__/assert-control-plane-complete`);
       if (!assertion.ok) throw new Error(await assertion.text());
+      agentState.textContent = "Complete";
       const sideCalls = profile.modelRequests - profile.foregroundRequests;
       eventItem("", "Conformance", `${profile.modelRequests} native model requests matched with zero drift (${profile.foregroundRequests} foreground + ${sideCalls} side calls); ${profile.toolResults.length} browser tool outputs matched native output exactly.`);
     }

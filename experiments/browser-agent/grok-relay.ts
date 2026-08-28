@@ -98,6 +98,12 @@ function validUuid(value: string | undefined): string | undefined {
     : undefined;
 }
 
+function validMainRequestId(value: string | undefined): string | undefined {
+  if (validUuid(value)) return value;
+  const prefix = "task-completed-";
+  return value?.startsWith(prefix) && validUuid(value.slice(prefix.length)) ? value : undefined;
+}
+
 function validSideCallId(
   value: string | undefined,
   prefix: "turn-summary" | "xai-turn-summary" | "xai-compact",
@@ -115,7 +121,7 @@ export function relayMetadataFromHeaders(headers: IncomingMessage["headers"]): G
   const conversationId = validUuid(headers["x-browser-agent-conversation"] as string | undefined) ?? randomUUID();
   return {
     conversationId,
-    requestId: validUuid(headers["x-browser-agent-request"] as string | undefined) ?? randomUUID(),
+    requestId: validMainRequestId(headers["x-browser-agent-request"] as string | undefined) ?? randomUUID(),
     sessionId: validUuid(headers["x-browser-agent-session"] as string | undefined) ?? conversationId,
     turnIndex: positiveTurn(headers["x-browser-agent-turn"] as string | undefined),
   };

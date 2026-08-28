@@ -282,7 +282,7 @@ describe("Grok Build browser background task control", () => {
     await new Promise<void>((resolve) => queueMicrotask(resolve));
     await new Promise<void>((resolve) => queueMicrotask(resolve));
     expect(runtime.drainSystemReminders()).toEqual([
-      `Background task "${id}" completed (exit code: 0).\nCommand: build | Duration: 0.0s\nUse get_command_or_subagent_output("${id}") to see the full output.`,
+      `<system-reminder>\nBackground task "${id}" completed (exit code: 0).\nCommand: build | Duration: 0.0s\nUse get_command_or_subagent_output("${id}") to see the full output.\n</system-reminder>`,
     ]);
     expect(runtime.drainSystemReminders()).toEqual([]);
   });

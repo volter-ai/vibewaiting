@@ -242,6 +242,12 @@ export function validUuid(value: string | null): string | undefined {
     : undefined;
 }
 
+export function validGrokRequestId(value: string | null): string | undefined {
+  if (validUuid(value)) return value ?? undefined;
+  const prefix = "task-completed-";
+  return value?.startsWith(prefix) && validUuid(value.slice(prefix.length)) ? value : undefined;
+}
+
 /** Fixed xAI telemetry surface; no arbitrary upstream path can cross the relay. */
 export function normalizeGrokTelemetryRoute(pathname: string, method: string): GrokTelemetryRoute | undefined {
   if (method === "GET" && pathname === "/api/grok/feedback/config") {
