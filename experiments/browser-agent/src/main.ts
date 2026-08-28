@@ -56,6 +56,11 @@ import { askGrokUserQuestions } from "./grok-build-question-dialog.js";
 import { approveGrokPlanEntry, approveGrokPlanExit } from "./grok-build-plan-dialog.js";
 import { createGrokBuildMcpServices } from "./grok-build-mcp.js";
 import {
+  createGrokBuildManagedMcpConfigs,
+  grokBuildManagedGatewayEnabled,
+  parseGrokBuildGatewayToolCatalog,
+} from "./grok-build-managed-mcp.js";
+import {
   createGrokBuildBrowserWorkflowManager,
   GrokBuildBrowserWorkflowHost,
   mergeGrokBuildExtensionListings,
@@ -114,11 +119,12 @@ const server = new ViteDevServer(container.vfs, { port: VIRTUAL_PORT, root: "/" 
 const bridge = container.serverBridge;
 const webFetchClient = new GrokBuildWebFetchClient(container.vfs);
 const rootOtlpTracer = new GrokBuildBrowserOtlpTracer();
-const mcpRuntime = createGrokBuildMcpServices([], {
+const mcpOptions = {
   enabledNativeToolNames: new Set<string>(GROK_BUILD_TOOLS.flatMap((tool): string[] =>
     tool.type === "function" && "name" in tool && typeof tool.name === "string" ? [tool.name] : [tool.type])),
   traceSink: createGrokBuildMcpOtlpTraceSink(rootOtlpTracer),
-});
+};
+let mcpRuntime = createGrokBuildMcpServices([], mcpOptions);
 let workflowManager: GrokBuildBrowserWorkflowManager | undefined;
 const externalSyntheticWakes = new Map<string, GrokBuildAutoWakePayload>();
 const workflowWakeRevisions = new Map<string, number>();
@@ -241,7 +247,14 @@ async function prepareInteractiveStartup(profile: GrokConformanceDriverProfile |
   liveStartupProfile = await startupCoordinator.snapshot();
   if (!profile || profile.bundleArchiveRequests) await startBundleSync();
   liveStartupProfile = await startupCoordinator.refreshForNewSession();
-  await fetchInteractiveStartupResource("mcp/tools/list");
+  const managedMcpPayload = await fetchInteractiveStartupResource("mcp/tools/list");
+  const managedMcpCatalog = parseGrokBuildGatewayToolCatalog(managedMcpPayload);
+  const managedMcpConfigs = grokBuildManagedGatewayEnabled(liveStartupProfile.settings)
+    ? createGrokBuildManagedMcpConfigs(managedMcpCatalog, { clientMode: "interactive" })
+    : [];
+  const previousMcpRuntime = mcpRuntime;
+  mcpRuntime = createGrokBuildMcpServices(managedMcpConfigs, mcpOptions);
+  void previousMcpRuntime.registry.closeAll(new AbortController().signal).catch(() => undefined);
   liveStartupProfile = await startupCoordinator.refreshForNewSession();
   await fetchInteractiveStartupResource("billing");
   interactiveBootstrapPrepared = true;
@@ -421,8 +434,8 @@ function eventHandler(event: GrokBuildEvent): void {
 const browserServices: GrokBuildBrowserServices = {
   spawnSubagent: runBrowserSubagent,
   onSubagentScheduled: (subagentId) => subagentRunner.reserveStart(subagentId),
-  searchTools: mcpRuntime.services.searchTools,
-  useTool: mcpRuntime.services.useTool,
+  searchTools: (query, limit, signal) => mcpRuntime.services.searchTools(query, limit, signal),
+  useTool: (name, input, signal) => mcpRuntime.services.useTool(name, input, signal),
   askUser: (questions, signal, context) => askGrokUserQuestions(questions, signal, context),
   webFetch: (url, signal) => webFetchClient.fetch(url, signal),
   generateImage: (input, signal) => mediaClient.generateImage(input, signal),

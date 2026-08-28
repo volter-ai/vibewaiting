@@ -6,6 +6,8 @@ export const MAX_AGENT_STEPS = 100;
 export const MAX_WEB_FETCH_URL_BYTES = 2_000;
 export const MAX_WEB_FETCH_BYTES = 10 * 1024 * 1024;
 export const MAX_WEB_FETCH_REDIRECTS = 10;
+export const MAX_MANAGED_MCP_CALL_ID_CHARS = 256;
+export const MAX_MANAGED_MCP_CATALOG_CALL_IDS = 256;
 export const MAX_MEDIA_PROMPT_CHARS = 20_000;
 export const MAX_MEDIA_REFERENCE_CHARS = 11 * 1024 * 1024;
 
@@ -57,6 +59,11 @@ export interface GrokRelayRemoteSettings {
   webFetch: GrokWebFetchRemotePolicy;
 }
 
+export interface GrokManagedMcpCallRequest {
+  call_id: string;
+  arguments: Record<string, unknown>;
+}
+
 export type GrokVideoMediaRequest =
   | { kind: "image-to-video"; prompt: string; duration: 6 | 10; resolution: "480p" | "720p"; image: string }
   | {
@@ -71,6 +78,35 @@ export type GrokVideoMediaRequest =
 
 function isObject(value: unknown): value is JsonObject {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+/** Extract only bounded opaque call IDs from the authenticated xAI catalog. */
+export function managedMcpCatalogCallIds(value: unknown): string[] {
+  if (!isObject(value) || !Array.isArray(value.tools)) return [];
+  const ids: string[] = [];
+  for (const tool of value.tools) {
+    if (!isObject(tool) || typeof tool.call_id !== "string"
+      || tool.call_id.length === 0 || tool.call_id.length > MAX_MANAGED_MCP_CALL_ID_CHARS
+      || /[\u0000-\u001f\u007f]/u.test(tool.call_id)) continue;
+    if (!ids.includes(tool.call_id)) ids.push(tool.call_id);
+    if (ids.length >= MAX_MANAGED_MCP_CATALOG_CALL_IDS) break;
+  }
+  return ids;
+}
+
+/** Browser input is constrained to a call ID issued by xAI for this session. */
+export function normalizeGrokManagedMcpCallRequest(
+  value: unknown,
+  allowedCallIds: readonly string[],
+): GrokManagedMcpCallRequest {
+  if (!isObject(value) || Object.keys(value).some((key) => key !== "call_id" && key !== "arguments")) {
+    throw new Error("Managed MCP call must contain only call_id and arguments.");
+  }
+  if (typeof value.call_id !== "string" || !allowedCallIds.includes(value.call_id)) {
+    throw new Error("Managed MCP call_id was not issued in this session's catalog.");
+  }
+  if (!isObject(value.arguments)) throw new Error("Managed MCP arguments must be a JSON object.");
+  return { call_id: value.call_id, arguments: structuredClone(value.arguments) };
 }
 
 /** Native ignores empty string overrides and otherwise uses the remote slug verbatim. */

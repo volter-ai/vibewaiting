@@ -15,9 +15,11 @@ export const RATE_GATE_LIMITS = {
   userDailyStartupRequests: 20,
   globalDailyTelemetryRequests: 1_000,
   userDailyTelemetryRequests: 200,
+  globalDailyManagedMcpCalls: 100,
+  userDailyManagedMcpCalls: 40,
 } as const;
 
-type DailyBudgetKind = "media" | "webFetch" | "startup" | "telemetry";
+type DailyBudgetKind = "media" | "webFetch" | "startup" | "telemetry" | "managedMcp";
 
 interface RateReservation {
   userKey: string;
@@ -92,6 +94,14 @@ const DAILY_POLICIES: Record<string, DailyPolicy> = {
     globalMessage: "The service-wide daily telemetry relay limit has been reached.",
     userMessage: "This Grok account has reached its daily telemetry relay limit.",
   },
+  "/acquire-managed-mcp": {
+    kind: "managedMcp",
+    globalLimit: RATE_GATE_LIMITS.globalDailyManagedMcpCalls,
+    userLimit: RATE_GATE_LIMITS.userDailyManagedMcpCalls,
+    invalidMessage: "Invalid managed MCP limiter key.",
+    globalMessage: "The service-wide daily managed MCP limit has been reached.",
+    userMessage: "This Grok account has reached its daily managed MCP limit.",
+  },
 };
 
 function json(value: unknown, status = 200, retryAfter?: number): Response {
@@ -118,6 +128,7 @@ function emptyDaily(): Record<DailyBudgetKind, DailyCounter> {
     webFetch: { global: 0, users: {} },
     startup: { global: 0, users: {} },
     telemetry: { global: 0, users: {} },
+    managedMcp: { global: 0, users: {} },
   };
 }
 
@@ -128,6 +139,7 @@ function normalizeDaily(current: LegacyGateState): Record<DailyBudgetKind, Daily
     webFetch: daily?.webFetch ?? { global: current.globalWebFetches ?? 0, users: current.userWebFetches ?? {} },
     startup: daily?.startup ?? { global: current.globalStartupRequests ?? 0, users: current.userStartupRequests ?? {} },
     telemetry: daily?.telemetry ?? { global: current.globalTelemetryRequests ?? 0, users: current.userTelemetryRequests ?? {} },
+    managedMcp: daily?.managedMcp ?? { global: 0, users: {} },
   };
 }
 

@@ -3,6 +3,8 @@ import {
   MAX_REQUEST_BYTES,
   MAX_WEB_FETCH_BYTES,
   MAX_WEB_FETCH_REDIRECTS,
+  managedMcpCatalogCallIds,
+  normalizeGrokManagedMcpCallRequest,
   cookieValue,
   isTrustedMutation,
   normalizeWebFetchRedirectUrl,
@@ -63,6 +65,7 @@ const MAX_VIDEO_REQUESTS_PER_SESSION = 10;
 const MAX_IMAGE_RESPONSE_BYTES = 12 * 1024 * 1024;
 const MAX_VIDEO_RESPONSE_BYTES = 100 * 1024 * 1024;
 const MAX_BOOTSTRAP_RESPONSE_BYTES = 1024 * 1024;
+const MAX_MANAGED_MCP_RESPONSE_BYTES = 8 * 1024 * 1024;
 const MAX_BUNDLE_RESPONSE_BYTES = 8 * 1024 * 1024;
 const MAX_TELEMETRY_BYTES = 512 * 1024;
 const MAX_OAUTH_RESPONSE_BYTES = 64 * 1024;
@@ -119,6 +122,7 @@ interface SessionState {
   device?: DeviceState;
   credential?: CredentialState;
   remoteSettings?: GrokRelayRemoteSettings;
+  managedMcpCallIds?: string[];
   videoRequests?: Record<string, { expiresAt: number; claimedAt?: number }>;
 }
 
@@ -139,6 +143,7 @@ interface InternalCredential {
   subscriptionTier?: string;
   teamId?: string;
   remoteSettings?: GrokRelayRemoteSettings;
+  managedMcpCallIds?: string[];
 }
 
 type GrokBootstrapKind = "user" | "models" | "settings" | "managed-mcp" | "billing";
@@ -1152,6 +1157,15 @@ async function routeBootstrap(request: Request, env: Env, kind: GrokBootstrapKin
         console.error("grok_media_settings_cache_failed", cause instanceof Error ? cause.message : "unknown");
       }
     }
+    if (kind === "managed-mcp" && upstream.ok) {
+      try {
+        const catalog = JSON.parse(new TextDecoder().decode(body)) as unknown;
+        await internalJson(session, "/mcp/catalog", { callIds: managedMcpCatalogCallIds(catalog) });
+      } catch (cause) {
+        console.error("grok_managed_mcp_catalog_cache_failed", cause instanceof Error ? cause.message : "unknown");
+        await internalJson(session, "/mcp/catalog", { callIds: [] });
+      }
+    }
     const headers = new Headers({
       "Cache-Control": "no-store",
       "Content-Type": upstream.headers.get("Content-Type") ?? "application/json; charset=utf-8",
@@ -1163,6 +1177,67 @@ async function routeBootstrap(request: Request, env: Env, kind: GrokBootstrapKin
   } catch (cause) {
     console.error("grok_bootstrap_failed", kind, cause instanceof Error ? cause.message : "unknown");
     return error(`The Grok ${kind} request did not complete.`, 502);
+  }
+}
+
+async function routeManagedMcpCall(request: Request, env: Env): Promise<Response> {
+  const sessionId = cookieValue(request.headers.get("Cookie"), SESSION_COOKIE);
+  if (!validSessionId(sessionId)) return error("Connect a Grok subscription before calling managed MCP tools.", 401);
+  const session = sessionStub(env, sessionId);
+  let credentialResponse = await internalJson(session, "/credential");
+  if (!credentialResponse.ok) return new Response(credentialResponse.body, credentialResponse);
+  let credential = await credentialResponse.json<InternalCredential>();
+  if (!credential.eligible) return error("This Grok account does not have an active eligible subscription.", 403);
+
+  let body: ReturnType<typeof normalizeGrokManagedMcpCallRequest>;
+  try {
+    body = normalizeGrokManagedMcpCallRequest(
+      JSON.parse(await readLimitedBody(request)) as unknown,
+      credential.managedMcpCallIds ?? [],
+    );
+  } catch (cause) {
+    return error(cause instanceof Error ? cause.message : "Invalid managed MCP call.", 400);
+  }
+  const userKey = await sha256(credential.userId);
+  if (!(await requireEdgeLimit(env.CHAT_USER_RATE_LIMITER, `managed-mcp:${userKey}`))) {
+    return error("This Grok account has reached the per-minute managed MCP limit.", 429, 60);
+  }
+  const dailyLimit = await acquireDailyGate(env, "/acquire-managed-mcp", userKey);
+  if (dailyLimit) return dailyLimit;
+
+  const upstreamUrl = `${CHAT_PROXY_ORIGIN}/v1/mcp/tools/call`;
+  const upstreamRequest = () => fetch(upstreamUrl, {
+    method: "POST",
+    headers: new Headers({
+      Authorization: `Bearer ${credential.accessToken}`,
+      "X-XAI-Token-Auth": "xai-grok-cli",
+      "x-grok-client-version": env.XAI_CLIENT_VERSION,
+      "Content-Type": "application/json",
+    }),
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(75_000),
+  });
+  try {
+    let upstream = await upstreamRequest();
+    if (upstream.status === 401) {
+      await upstream.body?.cancel().catch(() => undefined);
+      credentialResponse = await internalJson(session, "/refresh", {});
+      if (!credentialResponse.ok) return error("The Grok session expired. Sign in again.", 401);
+      credential = await credentialResponse.json<InternalCredential>();
+      upstream = await upstreamRequest();
+    }
+    const responseBody = await readLimitedResponse(upstream, MAX_MANAGED_MCP_RESPONSE_BYTES);
+    return new Response(responseBody.buffer as ArrayBuffer, {
+      status: upstream.status,
+      headers: {
+        "Cache-Control": "no-store",
+        "Content-Type": upstream.headers.get("Content-Type") ?? "application/json; charset=utf-8",
+        "X-Content-Type-Options": "nosniff",
+      },
+    });
+  } catch (cause) {
+    console.error("grok_managed_mcp_call_failed", cause instanceof Error ? cause.message : "unknown");
+    return error("The managed MCP tool did not complete.", 502);
   }
 }
 
@@ -1365,6 +1440,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
   if (url.pathname === "/api/grok/models" && request.method === "GET") return routeBootstrap(request, env, "models");
   if (url.pathname === "/api/grok/settings" && request.method === "GET") return routeBootstrap(request, env, "settings");
   if (url.pathname === "/api/grok/mcp/tools/list" && request.method === "GET") return routeBootstrap(request, env, "managed-mcp");
+  if (url.pathname === "/api/grok/mcp/tools/call" && request.method === "POST") return routeManagedMcpCall(request, env);
   if (url.pathname === "/api/grok/billing" && request.method === "GET") return routeBootstrap(request, env, "billing");
   if (url.pathname === "/api/grok/bundle/archive" && request.method === "GET") return routeBundle(request, env, "archive");
   if (url.pathname === "/api/grok/subagents/bundle" && request.method === "GET") return routeBundle(request, env, "legacy");
@@ -1570,7 +1646,11 @@ export class GrokSession implements DurableObject {
     }
   }
 
-  private safeCredential(credential: CredentialState, remoteSettings?: GrokRelayRemoteSettings): InternalCredential {
+  private safeCredential(
+    credential: CredentialState,
+    remoteSettings?: GrokRelayRemoteSettings,
+    managedMcpCallIds?: string[],
+  ): InternalCredential {
     return {
       accessToken: credential.accessToken,
       userId: credential.userId,
@@ -1579,6 +1659,7 @@ export class GrokSession implements DurableObject {
       ...(credential.subscriptionTier ? { subscriptionTier: credential.subscriptionTier } : {}),
       ...(credential.teamId ? { teamId: credential.teamId } : {}),
       ...(remoteSettings ? { remoteSettings } : {}),
+      ...(managedMcpCallIds ? { managedMcpCallIds: [...managedMcpCallIds] } : {}),
     };
   }
 
@@ -1589,6 +1670,16 @@ export class GrokSession implements DurableObject {
       const session = await this.load();
       if (!session.credential) return error("The Grok session is not authenticated.", 401);
       session.remoteSettings = parseGrokRelayRemoteSettings(payload);
+      await this.save(session);
+      return json({ stored: true });
+    }
+    if (url.pathname === "/mcp/catalog" && request.method === "POST") {
+      const payload: Record<string, unknown> = await request.json<Record<string, unknown>>().catch(() => ({}));
+      const session = await this.load();
+      if (!session.credential) return error("The Grok session is not authenticated.", 401);
+      session.managedMcpCallIds = Array.isArray(payload.callIds)
+        ? payload.callIds.filter((value): value is string => typeof value === "string").slice(0, 256)
+        : [];
       await this.save(session);
       return json({ stored: true });
     }
@@ -1784,7 +1875,7 @@ export class GrokSession implements DurableObject {
         credential = await this.refresh(session);
         if (!credential) return error("The Grok session could not be refreshed.", 401);
       }
-      return json(this.safeCredential(credential, session.remoteSettings));
+      return json(this.safeCredential(credential, session.remoteSettings, session.managedMcpCallIds));
     }
 
     if (url.pathname === "/logout" && request.method === "POST") {

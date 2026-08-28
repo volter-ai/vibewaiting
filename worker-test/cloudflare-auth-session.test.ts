@@ -162,6 +162,10 @@ describe("Grok encrypted device-auth sessions", () => {
         web_fetch_allowed_domains: ["docs.rs"],
       }),
     }))).status).toBe(200);
+    expect((await session.fetch(new Request("https://durable.internal/mcp/catalog", {
+      method: "POST",
+      body: JSON.stringify({ callIds: ["gmail.search"] }),
+    }))).status).toBe(200);
     const credentialEnvelope = String(storage.values.get("session"));
     expect(credentialEnvelope).not.toContain("initial-access");
     expect(credentialEnvelope).not.toContain("initial-refresh");
@@ -203,6 +207,7 @@ describe("Grok encrypted device-auth sessions", () => {
         mediaModels: { imageGen: "grok-imagine-image", imageEdit: "grok-imagine-image-edit" },
         webFetch: { allowedDomains: ["docs.rs"] },
       },
+      managedMcpCallIds: ["gmail.search"],
     });
     expect(await secondResponse.json()).toMatchObject({
       accessToken: "fresh-access",
@@ -211,6 +216,7 @@ describe("Grok encrypted device-auth sessions", () => {
         mediaModels: { imageGen: "grok-imagine-image", imageEdit: "grok-imagine-image-edit" },
         webFetch: { allowedDomains: ["docs.rs"] },
       },
+      managedMcpCallIds: ["gmail.search"],
     });
     expect(refreshCalls).toBe(1);
 
@@ -294,6 +300,58 @@ describe("Grok encrypted device-auth sessions", () => {
 });
 
 describe("distributed relay budgets", () => {
+  it("caches xAI catalog IDs server-side and rejects invented managed MCP calls", async () => {
+    let catalogCallIds: unknown;
+    const session = {
+      fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
+        const pathname = new URL(String(input)).pathname;
+        if (pathname === "/credential") return Response.json({
+          accessToken: "token", userId: "user-1", eligible: true,
+          subscriptionTier: "SuperGrok", managedMcpCallIds: catalogCallIds ?? [],
+        });
+        if (pathname === "/mcp/catalog") {
+          catalogCallIds = (JSON.parse(String(init?.body)) as { callIds: unknown }).callIds;
+          return Response.json({ stored: true });
+        }
+        throw new Error(`unexpected session request ${pathname}`);
+      },
+    };
+    const gate = { fetch: async () => Response.json({ allowed: true }) };
+    const relayEnv = serviceEnv({
+      SESSIONS: { get: () => session, idFromName: (name: string) => name },
+      RATE_GATE: { get: () => gate, idFromName: (name: string) => name },
+    });
+    const upstream = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith("/mcp/tools/list")) return Response.json({
+        tools: [{ call_id: "gmail.search" }, { call_id: "gmail.search" }, { call_id: 42 }],
+      });
+      expect(JSON.parse(String(init?.body))).toEqual({ call_id: "gmail.search", arguments: { query: "xai" } });
+      return Response.json({ result: { content: [{ type: "text", text: "found" }] }, connectors_needing_reauth: [] });
+    });
+    vi.stubGlobal("fetch", upstream);
+    const cookie = `__Host-vw_session=${"a".repeat(43)}`;
+    expect((await worker.fetch(new Request("https://agent.example/api/grok/mcp/tools/list", {
+      headers: { Cookie: cookie },
+    }), relayEnv)).status).toBe(200);
+    expect(catalogCallIds).toEqual(["gmail.search"]);
+    const send = (call_id: string) => worker.fetch(new Request("https://agent.example/api/grok/mcp/tools/call", {
+      method: "POST",
+      headers: {
+        Cookie: cookie,
+        Origin: "https://agent.example",
+        "Sec-Fetch-Site": "same-origin",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ call_id, arguments: { query: "xai" } }),
+    }), relayEnv);
+    expect((await send("invented.hidden")).status).toBe(400);
+    expect(upstream).toHaveBeenCalledTimes(1);
+    const allowed = await send("gmail.search");
+    expect(allowed.status).toBe(200);
+    expect(await allowed.json()).toMatchObject({ result: { content: [{ text: "found" }] } });
+    expect(upstream).toHaveBeenCalledTimes(2);
+  });
+
   it("caches trusted remote media model settings inside the encrypted session boundary", async () => {
     let stored: unknown;
     const session = {

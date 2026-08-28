@@ -7,6 +7,8 @@ import type { Plugin } from "vite";
 import {
   MAX_WEB_FETCH_BYTES,
   MAX_WEB_FETCH_REDIRECTS,
+  managedMcpCatalogCallIds,
+  normalizeGrokManagedMcpCallRequest,
   normalizeWebFetchRedirectUrl,
   normalizeWebFetchUrl,
   normalizeImageMediaRequest,
@@ -32,6 +34,7 @@ const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const MAX_BOOTSTRAP_RESPONSE_BYTES = 1024 * 1024;
 const MAX_BUNDLE_RESPONSE_BYTES = 8 * 1024 * 1024;
 const MAX_TELEMETRY_BYTES = 1024 * 1024;
+const MAX_MANAGED_MCP_RESPONSE_BYTES = 8 * 1024 * 1024;
 
 interface StoredCredential {
   key?: unknown;
@@ -349,7 +352,7 @@ async function proxyBootstrap(
   kind: GrokBootstrapKind,
   clientVersion: string | undefined,
   clientMode: GrokClientMode,
-): Promise<GrokRelayRemoteSettings | undefined> {
+): Promise<{ remoteSettings?: GrokRelayRemoteSettings; managedMcpCallIds?: string[] }> {
   const base = (upstreamBaseUrl ?? "https://cli-chat-proxy.grok.com/v1").replace(/\/$/u, "");
   const path = kind === "managed-mcp" ? "mcp/tools/list"
     : kind === "billing" ? "billing?format=credits" : kind;
@@ -368,11 +371,51 @@ async function proxyBootstrap(
   response.end(body);
   if (kind === "settings" && upstream.ok) {
     try {
-      return parseGrokRelayRemoteSettings(JSON.parse(body.toString("utf8")) as unknown);
+      return { remoteSettings: parseGrokRelayRemoteSettings(JSON.parse(body.toString("utf8")) as unknown) };
     } catch {
-      return;
+      return {};
     }
   }
+  if (kind === "managed-mcp" && upstream.ok) {
+    try {
+      return { managedMcpCallIds: managedMcpCatalogCallIds(JSON.parse(body.toString("utf8")) as unknown) };
+    } catch {
+      return { managedMcpCallIds: [] };
+    }
+  }
+  return {};
+}
+
+async function proxyManagedMcpCall(
+  request: IncomingMessage,
+  response: ServerResponse,
+  credential: GrokCredential,
+  fetchImpl: typeof globalThis.fetch,
+  upstreamBaseUrl: string | undefined,
+  clientVersion: string | undefined,
+  allowedCallIds: readonly string[],
+): Promise<void> {
+  const raw = await readBody(request);
+  if (raw.byteLength > MAX_BODY_BYTES) throw new Error("The managed MCP request is too large.");
+  const body = normalizeGrokManagedMcpCallRequest(JSON.parse(raw.toString("utf8")) as unknown, allowedCallIds);
+  const base = (upstreamBaseUrl ?? "https://cli-chat-proxy.grok.com/v1").replace(/\/$/u, "");
+  const upstream = await fetchImpl(`${base}/mcp/tools/call`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${credential.token}`,
+      "X-XAI-Token-Auth": "xai-grok-cli",
+      "x-grok-client-version": clientVersion ?? "1.0.5",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(75_000),
+  });
+  const responseBody = await boundedUpstreamBody(upstream, MAX_MANAGED_MCP_RESPONSE_BYTES);
+  response.statusCode = upstream.status;
+  response.setHeader("Cache-Control", "no-store");
+  response.setHeader("Content-Type", upstream.headers.get("Content-Type") ?? "application/json; charset=utf-8");
+  response.setHeader("X-Content-Type-Options", "nosniff");
+  response.end(responseBody);
 }
 
 async function proxyBundle(
@@ -639,6 +682,7 @@ async function proxyWebFetch(
 export function createGrokRelay(options: GrokRelayOptions = {}): Plugin {
   const fetchImpl = options.fetch ?? globalThis.fetch;
   let remoteSettings: GrokRelayRemoteSettings = { mediaModels: {}, webFetch: {} };
+  let managedMcpCallIds: string[] = [];
   return {
     name: "browser-agent-grok-relay",
     configureServer(server) {
@@ -664,7 +708,7 @@ export function createGrokRelay(options: GrokRelayOptions = {}): Plugin {
           if (request.method !== "GET") return json(response, 405, { error: { message: "Method not allowed." } });
           try {
             const credential = await readGrokCredential(authFileFromEnvironment(options.authFile));
-            const resolvedRemoteSettings = await proxyBootstrap(
+            const bootstrap = await proxyBootstrap(
               response,
               credential,
               fetchImpl,
@@ -676,9 +720,25 @@ export function createGrokRelay(options: GrokRelayOptions = {}): Plugin {
               options.clientVersion ?? process.env.GROK_CLIENT_VERSION,
               grokClientModeFromRequest(request),
             );
-            if (resolvedRemoteSettings) remoteSettings = resolvedRemoteSettings;
+            if (bootstrap.remoteSettings) remoteSettings = bootstrap.remoteSettings;
+            if (bootstrap.managedMcpCallIds) managedMcpCallIds = bootstrap.managedMcpCallIds;
           } catch (error) {
             json(response, 502, { error: { message: error instanceof Error ? error.message : String(error) } });
+          }
+          return;
+        }
+        if (path === "/api/grok/mcp/tools/call") {
+          if (request.method !== "POST") return json(response, 405, { error: { message: "Method not allowed." } });
+          try {
+            const credential = await readGrokCredential(authFileFromEnvironment(options.authFile));
+            await proxyManagedMcpCall(
+              request, response, credential, fetchImpl,
+              options.upstreamBaseUrl ?? process.env.GROK_CONFORMANCE_BASE_URL,
+              options.clientVersion ?? process.env.GROK_CLIENT_VERSION,
+              managedMcpCallIds,
+            );
+          } catch (error) {
+            json(response, 400, { error: { message: error instanceof Error ? error.message : String(error) } });
           }
           return;
         }

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   cookieValue,
   isTrustedMutation,
+  managedMcpCatalogCallIds,
+  normalizeGrokManagedMcpCallRequest,
   normalizeWebFetchRedirectUrl,
   normalizeWebFetchUrl,
   normalizeImageMediaRequest,
@@ -97,6 +99,21 @@ describe("Cloudflare browser-agent security boundary", () => {
     expect(isTrustedMutation(trusted)).toBe(true);
     expect(isTrustedMutation(crossOrigin)).toBe(false);
     expect(isTrustedMutation(sandbox)).toBe(false);
+  });
+
+  it("allows only bounded managed MCP call IDs issued by the cached xAI catalog", () => {
+    expect(managedMcpCatalogCallIds({ tools: [
+      { call_id: "gmail.search" }, { call_id: "gmail.search" }, { call_id: 42 },
+    ] })).toEqual(["gmail.search"]);
+    expect(normalizeGrokManagedMcpCallRequest({
+      call_id: "gmail.search", arguments: { query: "xai" },
+    }, ["gmail.search"])).toEqual({ call_id: "gmail.search", arguments: { query: "xai" } });
+    expect(() => normalizeGrokManagedMcpCallRequest({
+      call_id: "hidden.call", arguments: {},
+    }, ["gmail.search"])).toThrow(/not issued/u);
+    expect(() => normalizeGrokManagedMcpCallRequest({
+      call_id: "gmail.search", arguments: {}, upstream: "https://evil.example",
+    }, ["gmail.search"])).toThrow(/only call_id and arguments/u);
   });
 
   it("parses only the exact session cookie and validates 256-bit ids", () => {
