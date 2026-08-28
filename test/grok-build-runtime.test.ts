@@ -146,9 +146,9 @@ describe("Grok Build browser tool runtime", () => {
       .resolves.toMatchObject({ output: expect.stringContaining("Status: running") });
     finish("Inspection complete");
     await child;
-    await new Promise<void>((resolve) => queueMicrotask(resolve));
-    expect(wakes).toEqual([]);
-    expect(tools.takeSystemReminder(`subagent-completed-${id}`)).toBeUndefined();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(wakes).toEqual([expect.objectContaining({ promptId: `subagent-completed-${id}`, source: "subagent_completed" })]);
+    expect(tools.takeSystemReminder(`subagent-completed-${id}`)).toContain(`Background subagent "${id}"`);
     await expect(tools.execute({ callId: "poll", name: "get_command_or_subagent_output", arguments: JSON.stringify({ task_ids: [id] }) }, signal))
       .resolves.toMatchObject({ output: expect.stringContaining("Status: completed") });
   });
@@ -175,6 +175,53 @@ describe("Grok Build browser tool runtime", () => {
     expect(tools.takeSystemReminder(`subagent-completed-${id}`)).toMatch(
       new RegExp(`^<system-reminder>\\nBackground subagent "${id}" \\(explore: "Inspect files"\\) completed successfully\\.\\nDuration: .* \\| Tool calls: 3 \\| Turns: 2`, "u"),
     );
+  });
+
+  it("routes nested subagents and scheduled work through the native root-owned control plane", async () => {
+    const vfs = new VirtualFS();
+    const container = { vfs, async run() { return { stdout: "", stderr: "", exitCode: 0 }; } };
+    let finish!: (value: string) => void;
+    const nested = new Promise<string>((resolve) => { finish = resolve; });
+    const wakes: string[] = [];
+    const root = new GrokBuildBrowserRuntime(container, "/", {
+      spawnSubagent: async () => nested,
+      onSystemReminderQueued: (event) => wakes.push(event.promptId),
+      onScheduledTaskEvent: () => undefined,
+    });
+    const child = new GrokBuildBrowserRuntime(container, "/", {
+      spawnSubagent: async () => { throw new Error("child coordinator must not be used"); },
+      onScheduledTaskEvent: () => { throw new Error("child scheduler must not be used"); },
+    }, undefined, root);
+    const signal = new AbortController().signal;
+
+    const started = await child.execute({
+      callId: "nested",
+      name: "spawn_subagent",
+      arguments: '{"prompt":"Inspect","description":"Nested inspection","background":true}',
+    }, signal);
+    const nestedId = /subagent_id: ([0-9a-f-]+)/u.exec(started.output)?.[1] ?? "";
+    expect(nestedId).toBeTruthy();
+    await expect(root.execute({
+      callId: "root-poll", name: "get_command_or_subagent_output", arguments: JSON.stringify({ task_ids: [nestedId] }),
+    }, signal)).resolves.toMatchObject({ output: expect.stringContaining("Status: running") });
+    await expect(child.execute({
+      callId: "child-poll", name: "get_command_or_subagent_output", arguments: JSON.stringify({ task_ids: [nestedId] }),
+    }, signal)).resolves.toMatchObject({ output: expect.stringContaining("Status: running") });
+
+    const scheduled = await child.execute({
+      callId: "schedule",
+      name: "scheduler_create",
+      arguments: '{"interval":"7d","prompt":"Review the project"}',
+    }, signal);
+    const scheduledId = /ID: ([^,]+)/u.exec(scheduled.output)?.[1] ?? "";
+    expect(scheduledId).toBeTruthy();
+    const rootSchedule = await root.execute({ callId: "list", name: "scheduler_list", arguments: "{}" }, signal);
+    expect(JSON.parse(rootSchedule.output)).toEqual([expect.objectContaining({ id: scheduledId, prompt: "Review the project" })]);
+
+    finish("Nested inspection complete");
+    await nested;
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(wakes).toEqual([`subagent-completed-${nestedId}`]);
   });
 
   it("rebuilds native active task, todo, and subagent state after compaction", async () => {

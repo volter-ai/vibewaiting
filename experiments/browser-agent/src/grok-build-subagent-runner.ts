@@ -129,11 +129,14 @@ export class GrokBuildBrowserSubagentRunner {
     let skillManager!: GrokBuildSkillManager;
     const subagentServices: GrokBuildBrowserServices = {
       ...this.options.services,
+      // Child-local completions are consumed by the child turn or transferred
+      // during teardown. They must not enqueue a root wake before ownership moves.
+      onSystemReminderQueued: () => undefined,
       ...(mcpCatalog.length ? { searchTools: browserMcp.services.searchTools, useTool: browserMcp.services.useTool } : {}),
       spawnSubagent: (childInput, childSignal, childId) => this.run(childInput, childSignal, childId, runtime),
       suggestSkillPath: (path) => skillManager.suggestSkillPath(path),
     };
-    runtime = new GrokBuildBrowserRuntime(container, cwd, subagentServices, allowed);
+    runtime = new GrokBuildBrowserRuntime(container, cwd, subagentServices, allowed, this.options.rootRuntime());
     skillManager = new GrokBuildSkillManager(container.vfs, cwd);
     const rootSkills = this.options.rootSkillManager();
     const discoveredSkills = definition.inheritSkills && rootSkills

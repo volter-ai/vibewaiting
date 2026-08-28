@@ -677,7 +677,7 @@ async function runAgent(mode: "send-now" | "queue" = "send-now"): Promise<void> 
     if (result.status === "limit") agentState.textContent = "Stopped";
     if (profile) {
       await telemetryLifecycle?.flush();
-      await telemetryLifecycle?.sync(true).catch(() => undefined);
+      await telemetryLifecycle?.syncPendingSignalCheckpoints().catch(() => undefined);
       await telemetryLifecycle?.shutdown({ finalSync: false });
       (conformanceRuntime ?? recordedRuntime)?.assertComplete();
       const assertion = await fetch(`${conformanceOrigin}/__conformance__/assert-control-plane-complete`);

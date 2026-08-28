@@ -232,7 +232,7 @@ export class GrokBuildSignalTracker {
       this.userMessages += 1;
       this.resetPerTurn();
     }
-    else if (event.type === "assistant" && !event.synthetic) this.assistantMessages += 1;
+    else if (event.type === "assistant") this.assistantMessages += 1;
     else if (event.type === "response_end" && event.kind === "foreground") this.recordResponse(event.response, event.metrics);
     else if (event.type === "tool_end") {
       this.toolCalls += 1;
@@ -422,7 +422,7 @@ export class GrokBuildTelemetryLifecycle {
   private started = false;
   private stopped = false;
   private pending = new Set<Promise<unknown>>();
-  private readonly signalAssistantCheckpoints: Set<number>;
+  private readonly signalAssistantCheckpoints = new Map<number, number>();
   private readonly traceProducer: GrokBuildAgentTraceProducer | undefined;
   private readonly traceMetadata: Pick<NonNullable<GrokBuildTelemetryLifecycleOptions["trace"]>, "clientName" | "clientVersion" | "serviceVersion" | "appEntrypoint">;
 
@@ -431,7 +431,9 @@ export class GrokBuildTelemetryLifecycle {
     this.syncIntervalMs = options.syncIntervalMs ?? 60_000;
     this.setIntervalImpl = options.setInterval ?? globalThis.setInterval.bind(globalThis);
     this.clearIntervalImpl = options.clearInterval ?? globalThis.clearInterval.bind(globalThis);
-    this.signalAssistantCheckpoints = new Set(options.signalAssistantCheckpoints ?? []);
+    for (const checkpoint of options.signalAssistantCheckpoints ?? []) {
+      this.signalAssistantCheckpoints.set(checkpoint, (this.signalAssistantCheckpoints.get(checkpoint) ?? 0) + 1);
+    }
     this.tracker = new GrokBuildSignalTracker(options.model, options.now);
     this.traceProducer = options.trace ? new GrokBuildAgentTraceProducer({
       sessionId,
@@ -470,9 +472,10 @@ export class GrokBuildTelemetryLifecycle {
     // before the next foreground response is folded into the counters.
     if (event.type === "response_end" && event.kind === "foreground") {
       const count = this.tracker.snapshot().assistantMessageCount;
-      if (this.signalAssistantCheckpoints.delete(count)) {
+      for (let remaining = this.signalAssistantCheckpoints.get(count) ?? 0; remaining > 0; remaining -= 1) {
         this.background(this.client.updateSignals(this.sessionId, this.tracker.snapshot()));
       }
+      this.signalAssistantCheckpoints.delete(count);
     }
     this.tracker.record(event);
     this.traceProducer?.record(event);
@@ -497,6 +500,18 @@ export class GrokBuildTelemetryLifecycle {
     const snapshot = this.tracker.snapshot();
     if (force && snapshot.totalTurns === 0 && snapshot.toolCallCount === 0) return;
     await this.client.updateSignals(this.sessionId, snapshot);
+  }
+
+  /** Emit native signal snapshots whose recorded boundary occurs after the final response fold. */
+  async syncPendingSignalCheckpoints(): Promise<number> {
+    const snapshot = this.tracker.snapshot();
+    const count = this.signalAssistantCheckpoints.get(snapshot.assistantMessageCount) ?? 0;
+    if (count === 0) return 0;
+    this.signalAssistantCheckpoints.delete(snapshot.assistantMessageCount);
+    for (let index = 0; index < count; index += 1) {
+      await this.client.updateSignals(this.sessionId, snapshot);
+    }
+    return count;
   }
 
   async flush(): Promise<void> {

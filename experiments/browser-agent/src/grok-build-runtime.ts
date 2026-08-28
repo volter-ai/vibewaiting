@@ -106,6 +106,8 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
     private readonly workspacePath = "/",
     private readonly services: GrokBuildBrowserServices = {},
     private readonly allowedTools?: ReadonlySet<string>,
+    /** Native nested agents share the root coordinator and scheduler. */
+    private readonly controlPlaneOwner?: GrokBuildBrowserRuntime,
   ) {
     installBrowserCommandIsolation(container);
     this.files = new GrokBuildFileSystemTools(container.vfs, workspacePath);
@@ -114,7 +116,7 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
     this.planMode = restoredPlanMode.active;
     this.awaitingPlanApproval = restoredPlanMode.awaitingPlanApproval;
     if (!allowedTools || allowedTools.has("scheduler_create")) {
-      this.scheduler = new GrokBuildBrowserScheduler(container.vfs, workspacePath, {
+      this.scheduler = controlPlaneOwner?.scheduler ?? new GrokBuildBrowserScheduler(container.vfs, workspacePath, {
         spawnSubagent: (input, signal, id) => this.createSubagentTask(input, signal, id),
         getSubagent: (id) => this.background.get(id),
         ...(services.runScheduledForeground ? { runForeground: services.runScheduledForeground } : {}),
@@ -395,6 +397,9 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
   }
 
   private async spawnSubagent(input: JsonObject, parentSignal: AbortSignal): Promise<string> {
+    if (this.controlPlaneOwner && this.controlPlaneOwner !== this) {
+      return this.controlPlaneOwner.spawnSubagent(input, parentSignal);
+    }
     const id = crypto.randomUUID();
     const task = this.createSubagentTask(input, parentSignal, id);
     if (boolean(input.background, true)) {
@@ -454,14 +459,24 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
   }
 
   private killTask(input: JsonObject): string {
-    return this.background.kill(string(input.task_id, "task_id", true));
+    const taskId = string(input.task_id, "task_id", true);
+    if (!this.background.get(taskId) && this.controlPlaneOwner && this.controlPlaneOwner !== this) {
+      return this.controlPlaneOwner.killTask(input);
+    }
+    return this.background.kill(taskId);
   }
 
   private async getTaskOutput(input: JsonObject): Promise<string> {
     const ids = taskIds(input);
-    const waited = ids.filter((id) => this.background.get(id)?.status === "running");
+    if (ids.length > 0 && ids.every((id) => !this.background.get(id)) && this.controlPlaneOwner && this.controlPlaneOwner !== this) {
+      return this.controlPlaneOwner.getTaskOutput(input);
+    }
     const output = await this.background.output(input);
-    for (const id of waited) {
+    const consumed = ids.filter((id) => {
+      const status = this.background.get(id)?.status;
+      return status !== undefined && status !== "running";
+    });
+    for (const id of consumed) {
       this.reportedTaskCompletions.add(id);
       for (let index = this.asynchronousReminders.length - 1; index >= 0; index -= 1) {
         if (this.asynchronousReminders[index]?.taskId === id) this.asynchronousReminders.splice(index, 1);

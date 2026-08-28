@@ -335,7 +335,7 @@ function buildDriverProfile(path) {
   const signalExchanges = exchanges.filter((exchange) => exchange.key.includes("/signals"));
   const nativeLongPausesCount = signalExchanges.reduce((maximum, exchange) =>
     Math.max(maximum, Number.isSafeInteger(exchange.request?.body?.longPausesCount) ? exchange.request.body.longPausesCount : 0), 0);
-  const periodicSignalAssistantCounts = signalExchanges.slice(1, -1).flatMap((exchange) =>
+  const periodicSignalAssistantCounts = signalExchanges.slice(1).flatMap((exchange) =>
     Number.isSafeInteger(exchange.request?.body?.assistantMessageCount)
       ? [exchange.request.body.assistantMessageCount]
       : []

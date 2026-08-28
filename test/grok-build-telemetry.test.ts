@@ -46,6 +46,18 @@ describe("Grok Build browser telemetry source port", () => {
     vi.restoreAllMocks();
   });
 
+  it("counts assistant samples from native synthetic auto-wake turns", () => {
+    const tracker = new GrokBuildSignalTracker();
+    tracker.record({ type: "run_start", task: "" });
+    tracker.record({ type: "assistant", turn: 1, text: "checking", reasoning: "", synthetic: true });
+    tracker.record({ type: "assistant", turn: 2, text: "done", reasoning: "", synthetic: true });
+    expect(tracker.snapshot()).toMatchObject({
+      totalTurns: 1,
+      userMessageCount: 1,
+      assistantMessageCount: 2,
+    });
+  });
+
   it("builds native per-turn deltas from foreground responses only", () => {
     let now = 1_000;
     const tracker = new GrokBuildSignalTracker("grok-4.6", () => now);
@@ -185,6 +197,34 @@ describe("Grok Build browser telemetry source port", () => {
     lifecycle.record(response);
     await lifecycle.flush();
     expect(signals[1]).toMatchObject({ assistantMessageCount: 3, toolCallCount: 1, latencySampleCount: 3, totalChunkCount: 6 });
+  });
+
+  it("preserves duplicate checkpoints and emits a final post-fold native signal boundary", async () => {
+    const signals: number[] = [];
+    const client = {
+      loadFeedbackConfig: async () => ({ config_id: "v1", config_version: 1, enabled: false }),
+      updateSignals: async (_id: string, body: Record<string, unknown>) => { signals.push(Number(body.assistantMessageCount)); },
+      sendTurnDelta: async () => undefined,
+    } as unknown as GrokBuildTelemetryClient;
+    const lifecycle = new GrokBuildTelemetryLifecycle("11111111-1111-4111-8111-111111111111", {
+      client,
+      signalAssistantCheckpoints: [0, 0, 1],
+      setInterval: (() => 1) as unknown as typeof setInterval,
+      clearInterval: vi.fn() as typeof clearInterval,
+    });
+    await lifecycle.ready();
+    lifecycle.record({ type: "run_start", task: "task" });
+    lifecycle.record({
+      type: "response_end",
+      kind: "foreground",
+      response: {},
+      metrics: { timeToFirstTokenMs: 1, timeToLastByteMs: 2, chunkCount: 1, itlIntervalsMs: [], attempts: 1 },
+    });
+    lifecycle.record({ type: "assistant", turn: 1, text: "done", reasoning: "" });
+    await lifecycle.flush();
+    expect(await lifecycle.syncPendingSignalCheckpoints()).toBe(1);
+    await lifecycle.shutdown({ finalSync: false });
+    expect(signals).toEqual([0, 0, 0, 1]);
   });
 
   it("uses only the fixed feedback, signals, delta, and trace relay paths", async () => {
