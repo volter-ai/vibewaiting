@@ -106,3 +106,89 @@ test("renders native structured question and plan approval interactions", async 
   await page.getByRole("button", { name: "Request changes" }).click();
   await expect.poll(() => page.evaluate(() => window.__grokPlanExit)).toEqual({ outcome: "cancelled", feedback: "Add rollback steps" });
 });
+
+test("commits browser projects across reload and recovers the prior verified snapshot", async ({ page }) => {
+  await page.route("**/api/grok/bundle/archive", (route) => route.fulfill({
+    status: 401,
+    contentType: "application/json",
+    body: '{"error":{"message":"storage test"}}',
+  }));
+  await page.goto("http://127.0.0.1:4175/", { waitUntil: "domcontentloaded", timeout: 10_000 });
+  await expect(page.locator("#runtime-status")).toContainText("Browser sandbox ready", { timeout: 10_000 });
+
+  const recovered = await page.evaluate(async () => {
+    const storage = await import("/src/browser-project-store.ts");
+    const snapshot = (name) => ({
+      files: [
+        { path: "/", type: "directory" },
+        { path: `/${name}.txt`, type: "file", content: btoa(name) },
+      ],
+    });
+    await storage.clearBrowserProject();
+    await storage.saveBrowserProject({ toSnapshot: () => snapshot("first") });
+    await storage.saveBrowserProject({ toSnapshot: () => snapshot("second") });
+
+    await new Promise((resolve, reject) => {
+      const open = indexedDB.open("vibewaiting-browser-agent", 1);
+      open.onerror = () => reject(open.error);
+      open.onsuccess = () => {
+        const db = open.result;
+        const tx = db.transaction("projects", "readwrite");
+        tx.objectStore("projects").put({ corrupted: true }, "default");
+        tx.oncomplete = () => { db.close(); resolve(); };
+        tx.onerror = () => reject(tx.error);
+      };
+    });
+    const messages = [];
+    const value = await storage.loadBrowserProject((message) => messages.push(message));
+    await storage.saveBrowserProject({ toSnapshot: () => snapshot("third") });
+    return { paths: value.files.map((entry) => entry.path), messages };
+  });
+  expect(recovered.paths).toContain("/first.txt");
+  expect(recovered.messages).toHaveLength(1);
+
+  await page.reload({ waitUntil: "domcontentloaded", timeout: 10_000 });
+  await expect(page.locator("#runtime-status")).toContainText("Browser sandbox ready", { timeout: 10_000 });
+  const persisted = await page.evaluate(async () => {
+    const storage = await import("/src/browser-project-store.ts");
+    const value = await storage.loadBrowserProject();
+    const external = {
+      files: [
+        { path: "/", type: "directory" },
+        { path: "/external.txt", type: "file", content: btoa("external") },
+      ],
+    };
+    const bytes = new TextEncoder().encode(JSON.stringify(external));
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+    let binary = "";
+    for (const byte of digest) binary += String.fromCharCode(byte);
+    const checksum = btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
+    await new Promise((resolve, reject) => {
+      const open = indexedDB.open("vibewaiting-browser-agent", 1);
+      open.onerror = () => reject(open.error);
+      open.onsuccess = () => {
+        const db = open.result;
+        const tx = db.transaction("projects", "readwrite");
+        tx.objectStore("projects").put({ storageVersion: 1, savedAt: Date.now(), checksum, payload: external }, "default");
+        tx.oncomplete = () => { db.close(); resolve(); };
+        tx.onerror = () => reject(tx.error);
+      };
+    });
+    let conflict = "";
+    try {
+      await storage.saveBrowserProject({ toSnapshot: () => value });
+    } catch (error) {
+      conflict = error instanceof Error ? error.message : String(error);
+    }
+    const conflictCopy = await storage.loadBrowserProjectConflict();
+    await storage.clearBrowserProject();
+    return {
+      paths: value.files.map((entry) => entry.path),
+      conflict,
+      conflictPaths: conflictCopy.files.map((entry) => entry.path),
+    };
+  });
+  expect(persisted.paths).toContain("/third.txt");
+  expect(persisted.conflict).toContain("changed in another tab");
+  expect(persisted.conflictPaths).toContain("/third.txt");
+});

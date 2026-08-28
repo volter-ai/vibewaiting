@@ -122,6 +122,7 @@ export interface GrokBuildSessionOptions {
 }
 
 export const GROK_BUILD_TOOLS = structuredClone(toolProfile.tools) as GrokTool[];
+export const GROK_BUILD_SOURCE_REVISION = toolProfile.sourceRevision;
 
 export interface GrokBuildSessionSnapshot {
   version: 1;
@@ -157,7 +158,7 @@ export class GrokBuildSession {
 
   constructor(private readonly options: GrokBuildSessionOptions) {
     const restored = options.restore;
-    if (restored && (restored.version !== 1 || restored.sourceRevision !== toolProfile.sourceRevision)) {
+    if (restored && (restored.version !== 1 || restored.sourceRevision !== GROK_BUILD_SOURCE_REVISION)) {
       throw new Error("The saved Grok Build session belongs to a different native source revision.");
     }
     this.sessionId = restored?.sessionId ?? options.sessionId ?? crypto.randomUUID();
@@ -173,7 +174,7 @@ export class GrokBuildSession {
   snapshot(): GrokBuildSessionSnapshot {
     return {
       version: 1,
-      sourceRevision: toolProfile.sourceRevision,
+      sourceRevision: GROK_BUILD_SOURCE_REVISION,
       sessionId: this.sessionId,
       requestId: this.requestId,
       promptIndex: this.promptIndex,

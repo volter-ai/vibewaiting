@@ -24,9 +24,11 @@ import {
   clearVirtualFileSystem,
   loadBrowserProject,
   loadBrowserAgentSession,
+  requestPersistentBrowserStorage,
   restoreBrowserProject,
   saveBrowserAgentSession,
   saveBrowserProject,
+  type BrowserProjectAutosave,
 } from "./browser-project-store.js";
 import {
   GROK_COMPACTION_INDEX_HEADER,
@@ -119,7 +121,8 @@ const startupCoordinator = new GrokBuildStartupCoordinator({
   } : {}),
 });
 let conformanceProfile: GrokConformanceDriverProfile | undefined;
-let scheduleProjectSave: (() => void) | undefined;
+let projectAutosave: BrowserProjectAutosave | undefined;
+let agentSessionPersistenceGeneration = 0;
 let restoredAgentSession: import("./grok-build-agent.js").GrokBuildSessionSnapshot | undefined;
 let agentSession: GrokBuildSession | undefined;
 let telemetryLifecycle: GrokBuildTelemetryLifecycle | undefined;
@@ -187,7 +190,7 @@ function startBundleSync(): Promise<void> {
           const reminder = createGrokBuildSkillReminder(rootSkillManager.startupSkills());
           if (reminder) agentSession?.enqueueSystemReminder(reminder);
         }
-        scheduleProjectSave?.();
+        projectAutosave?.schedule();
         eventItem("", "Grok bundle updated", `${result.source} · ${result.manifest?.version ?? "unknown version"}`);
       }
     })
@@ -489,6 +492,7 @@ async function runAgent(mode: "send-now" | "queue" = "send-now"): Promise<void> 
     }
     if (profile?.bundleArchiveRequests) await startBundleSync();
     if (!agentSession) {
+      const persistenceGeneration = agentSessionPersistenceGeneration;
       const sessionId = restoredAgentSession?.sessionId ?? crypto.randomUUID();
       telemetryLifecycle = new GrokBuildTelemetryLifecycle(sessionId, {
         model: liveStartupProfile?.model ?? "grok-4.6",
@@ -564,7 +568,7 @@ async function runAgent(mode: "send-now" | "queue" = "send-now"): Promise<void> 
             extractGrokCompactionKeywords(segment.summary),
           );
           container.vfs.writeFileSync(indexPath, index + row);
-          scheduleProjectSave?.();
+          projectAutosave?.schedule();
         },
         ...(profile?.reasoningEffort ? { reasoningEffort: profile.reasoningEffort } : {}),
         enableTurnSummary: profile ? (profile.turnSummaryRequests ?? 0) > 0 : true,
@@ -574,6 +578,7 @@ async function runAgent(mode: "send-now" | "queue" = "send-now"): Promise<void> 
         ...(!profile && restoredAgentSession ? { restore: restoredAgentSession } : {}),
         ...(!profile ? {
           onCheckpoint: (snapshot: import("./grok-build-agent.js").GrokBuildSessionSnapshot) => {
+            if (persistenceGeneration !== agentSessionPersistenceGeneration) return;
             restoredAgentSession = snapshot;
             void saveBrowserAgentSession(snapshot).catch((error) => {
               eventItem("error", "Session save failed", error instanceof Error ? error.message : String(error));
@@ -628,6 +633,7 @@ async function loadConformanceProfile(origin: string): Promise<GrokConformanceDr
 
 async function resetProject(): Promise<void> {
   activeRun?.abort();
+  agentSessionPersistenceGeneration += 1;
   await telemetryLifecycle?.shutdown();
   telemetryLifecycle = undefined;
   agentSession = undefined;
@@ -644,6 +650,7 @@ async function resetProject(): Promise<void> {
     await clearBrowserAgentSession();
     await clearBrowserProject();
     await saveBrowserProject(container.vfs);
+    await projectAutosave?.flush();
   }
   trajectory.replaceChildren();
   turnCount.textContent = "0";
@@ -656,7 +663,14 @@ stopButton.addEventListener("click", () => activeRun?.abort());
 resetButton.addEventListener("click", () => void resetProject());
 addEventListener("pagehide", () => {
   authController.destroy();
+  void projectAutosave?.flush();
+  if (!conformanceOrigin && agentSession) {
+    void saveBrowserAgentSession(agentSession.snapshot()).catch((error) => console.warn("Final session save failed", error));
+  }
   void telemetryLifecycle?.shutdown();
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") void projectAutosave?.flush();
 });
 connectGrokButton.addEventListener("click", () => void authController.startDeviceAuth());
 disconnectGrokButton.addEventListener("click", () => void authController.disconnect());
@@ -676,14 +690,33 @@ async function start(): Promise<void> {
     if (conformanceProfile) {
       seedProject(conformanceProfile);
     } else {
-      const saved = await loadBrowserProject();
-      if (saved) restoreBrowserProject(container.vfs, saved);
-      else seedProject();
-      restoredAgentSession = await loadBrowserAgentSession();
-      scheduleProjectSave = autosaveBrowserProject(container.vfs, (error) => {
+      const reportRecovery = (message: string): void => eventItem("", "Storage recovery", message);
+      try {
+        const saved = await loadBrowserProject(reportRecovery);
+        if (saved) restoreBrowserProject(container.vfs, saved);
+        else seedProject();
+      } catch (error) {
+        eventItem("error", "Project restore failed", error instanceof Error ? error.message : String(error));
+        await clearBrowserProject().catch(() => undefined);
+        seedProject();
+      }
+      try {
+        restoredAgentSession = await loadBrowserAgentSession(reportRecovery);
+      } catch (error) {
+        eventItem("error", "Session restore failed", error instanceof Error ? error.message : String(error));
+        await clearBrowserAgentSession().catch(() => undefined);
+        restoredAgentSession = undefined;
+      }
+      projectAutosave = autosaveBrowserProject(container.vfs, (error) => {
         eventItem("error", "Project save failed", error instanceof Error ? error.message : String(error));
       });
-      scheduleProjectSave();
+      projectAutosave.schedule();
+      void requestPersistentBrowserStorage().then((status) => {
+        if (!status.persisted) console.warn("Browser project storage may be evicted under storage pressure.");
+        if (status.usage !== undefined && status.quota !== undefined && status.quota > 0 && status.usage / status.quota >= 0.8) {
+          eventItem("error", "Storage pressure", "Browser storage is over 80% of its available quota; project saves may fail.");
+        }
+      }).catch((error) => console.warn("Could not inspect browser storage persistence", error));
     }
     const workflowHost = new GrokBuildBrowserWorkflowHost({
       vfs: container.vfs,
