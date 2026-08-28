@@ -18,6 +18,12 @@ import { formatGrokMonitorEvents, GrokBuildMonitorEventStream } from "./grok-bui
 import { tryBrowserNodeCheck } from "./browser-node-check.js";
 import { parseGrokLenientU64, selfMatchingPkillError } from "./grok-build-command-input.js";
 import { installBrowserCommandIsolation } from "./grok-build-command-isolation.js";
+import {
+  GrokBuildPermissionManager,
+  type GrokBuildPermissionPrompter,
+  type GrokBuildPermissionRequest,
+  type GrokBuildPermissionStore,
+} from "./grok-build-permissions.js";
 
 interface RunResult {
   stdout: string;
@@ -57,6 +63,7 @@ export interface GrokBuildBrowserServices {
   onMonitorEvent?(reminder: string): void;
   onSystemReminderQueued?(event: GrokBuildSystemReminderEvent): void;
   suggestSkillPath?(requestedPath: string): string | undefined;
+  requestToolPermission?: GrokBuildPermissionPrompter;
 }
 
 export interface GrokBuildSubagentExecutionResult {
@@ -102,6 +109,7 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
   private readonly asynchronousReminders: GrokBuildSystemReminderEvent[] = [];
   private pendingNotificationPromptId: string | undefined;
   private readonly reportedTaskCompletions = new Set<string>();
+  private readonly permissions: GrokBuildPermissionManager | undefined;
 
   constructor(
     private readonly container: BrowserContainer,
@@ -112,6 +120,8 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
     private readonly controlPlaneOwner?: GrokBuildBrowserRuntime,
   ) {
     installBrowserCommandIsolation(container);
+    this.permissions = controlPlaneOwner?.permissions
+      ?? (services.requestToolPermission ? new GrokBuildPermissionManager(services.requestToolPermission, permissionStore(container.vfs)) : undefined);
     this.files = new GrokBuildFileSystemTools(container.vfs, workspacePath);
     this.background = new GrokBuildBackgroundTasks(container, workspacePath);
     const restoredPlanMode = this.restorePlanMode();
@@ -126,6 +136,10 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
       });
     }
   }
+
+  isAlwaysApprove(): boolean { return this.permissions?.isAlwaysApprove() ?? true; }
+
+  setAlwaysApprove(enabled: boolean): boolean { return this.permissions?.setAlwaysApprove(enabled) ?? enabled; }
 
   compactionSystemReminder(now = Date.now()): string | undefined {
     const sections: string[] = [];
@@ -287,10 +301,34 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
     if (planRejection) return { output: planRejection };
 
     try {
+      const access = this.permissionAccess(call, input);
+      if (access && this.permissions) {
+        const decision = await this.permissions.authorize(access, signal);
+        if (!decision.allowed) return failure(`${decision.reason ?? "User rejected the execution"} for tool \`${call.name}\``);
+      }
       const output = await this.dispatch(call.name, input, signal, call.callId);
       return typeof output === "string" ? { output } : output;
     } catch (error) {
       return failure(message(error));
+    }
+  }
+
+  private permissionAccess(call: GrokBuildToolCall, input: JsonObject): GrokBuildPermissionRequest | undefined {
+    const base = { toolCallId: call.callId, toolName: call.name, input };
+    switch (call.name) {
+      case "read_file": return { ...base, kind: "read", ...(typeof input.target_file === "string" ? { detail: this.resolve(input.target_file) } : {}) };
+      case "list_dir": return { ...base, kind: "read", ...(typeof input.target_directory === "string" ? { detail: this.resolve(input.target_directory) } : {}) };
+      case "grep": return { ...base, kind: "grep", ...(typeof input.path === "string" ? { detail: this.resolve(input.path) } : {}) };
+      case "search_replace":
+      case "write": {
+        const path = typeof input.file_path === "string" ? this.resolve(input.file_path) : undefined;
+        if (this.planMode && path === this.planFilePath()) return;
+        return { ...base, kind: "edit", ...(path ? { detail: path } : {}) };
+      }
+      case "run_terminal_command": return { ...base, kind: "bash", ...(typeof input.command === "string" ? { detail: input.command } : {}) };
+      case "use_tool": return { ...base, kind: "mcp", ...(typeof input.tool_name === "string" ? { detail: input.tool_name } : {}) };
+      case "web_fetch": return { ...base, kind: "web_fetch", ...(typeof input.url === "string" ? { detail: input.url } : {}) };
+      default: return;
     }
   }
 
@@ -712,6 +750,27 @@ function normalizePlanApproval(value: unknown): { outcome: "approved" | "cancell
   return {
     outcome,
     ...(typeof approval.feedback === "string" ? { feedback: approval.feedback } : {}),
+  };
+}
+
+function permissionStore(vfs: VirtualFS): GrokBuildPermissionStore {
+  const path = "/.grok/permission_grok-pager.json";
+  return {
+    load() {
+      if (!vfs.existsSync(path) || !vfs.statSync(path).isFile()) return;
+      try {
+        const value = JSON.parse(vfs.readFileSync(path, "utf8")) as { version?: unknown; allowed?: unknown; denied?: unknown };
+        if (value.version !== 1) return;
+        return {
+          allowed: Array.isArray(value.allowed) ? value.allowed.filter((item): item is string => typeof item === "string") : [],
+          denied: Array.isArray(value.denied) ? value.denied.filter((item): item is string => typeof item === "string") : [],
+        };
+      } catch { return; }
+    },
+    save(state) {
+      vfs.mkdirSync("/.grok", { recursive: true });
+      vfs.writeFileSync(path, JSON.stringify({ version: 1, ...state }));
+    },
   };
 }
 

@@ -46,6 +46,28 @@ describe("Grok Build browser tool runtime", () => {
       .resolves.toMatchObject({ isError: true, output: expect.stringContaining("service adapter") });
   });
 
+  it("enforces browser permission decisions and the live always-approve switch", async () => {
+    const vfs = new VirtualFS();
+    vfs.mkdirSync("/src", { recursive: true });
+    vfs.writeFileSync("/src/a.ts", "old");
+    const prompts: string[] = [];
+    const tools = new GrokBuildBrowserRuntime({ vfs, async run() { return { stdout: "ok", stderr: "", exitCode: 0 }; } }, "/", {
+      requestToolPermission: async (entry) => { prompts.push(`${entry.kind}:${entry.detail}`); return "reject-once"; },
+    });
+    const signal = new AbortController().signal;
+    await expect(tools.execute({ callId: "read", name: "read_file", arguments: '{"target_file":"/src/a.ts"}' }, signal))
+      .resolves.toMatchObject({ output: expect.stringContaining("old") });
+    await expect(tools.execute({ callId: "edit", name: "search_replace", arguments: '{"file_path":"/src/a.ts","old_string":"old","new_string":"new"}' }, signal))
+      .resolves.toEqual({ isError: true, output: "User rejected the execution for tool `search_replace`" });
+    expect(prompts).toEqual(["edit:/src/a.ts"]);
+    expect(vfs.readFileSync("/src/a.ts", "utf8")).toBe("old");
+    expect(tools.setAlwaysApprove(true)).toBe(true);
+    await expect(tools.execute({ callId: "edit-2", name: "search_replace", arguments: '{"file_path":"/src/a.ts","old_string":"old","new_string":"new"}' }, signal))
+      .resolves.toMatchObject({ output: expect.any(String) });
+    expect(vfs.readFileSync("/src/a.ts", "utf8")).toBe("new");
+    expect(tools.setAlwaysApprove(false)).toBe(false);
+  });
+
   it("appends the native registered-skill recovery hint to a missing read", async () => {
     const vfs = new VirtualFS();
     const tools = new GrokBuildBrowserRuntime({

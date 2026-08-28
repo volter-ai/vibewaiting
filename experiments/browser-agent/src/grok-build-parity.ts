@@ -65,7 +65,12 @@ export const GROK_BUILD_SYSTEM_PARITY = {
   interactive_command_surface: {
     level: "partial",
     evidence: ["experiments/browser-agent/src/grok-build-mcp-dialog.ts", "experiments/browser-agent/src/grok-build-slash-commands.ts", "experiments/browser-agent/src/grok-build-skill-invocation.ts", "test/grok-build-mcp-dialog.test.ts", "test/grok-build-slash-commands.test.ts", "test/grok-build-skill-invocation.test.ts", "test/grok-build-agent.test.ts", "e2e/browser-agent.e2e.mjs"],
-    gap: "The source-pinned shell catalog, gates, aliases, collision rules, /loop prompt expansion, slash-skill envelopes/substitutions, explicit /compact context, /context, /session-info, and launch/stop/resume workflow actions are browser-ported. Remaining gaps are the pager command palette/autocomplete and pager-local actions, effective permission/yolo enforcement, workflow runs/pause/save, goal/memory/hooks/plugins/feedback actions, and MCP add/toggle/remove/connectors controls.",
+    gap: "The source-pinned shell catalog, gates, aliases, collision rules, /loop prompt expansion, slash-skill envelopes/substitutions, explicit /compact context, /context, /session-info, effective /always-approve switching, and launch/stop/resume workflow actions are browser-ported. Remaining gaps are the pager command palette/autocomplete and pager-local actions, workflow runs/pause/save, goal/memory/hooks/plugins/feedback actions, and MCP add/toggle/remove/connectors controls.",
+  },
+  permissions: {
+    level: "partial",
+    evidence: ["experiments/browser-agent/src/grok-build-permissions.ts", "experiments/browser-agent/src/grok-build-permission-dialog.ts", "experiments/browser-agent/src/grok-build-runtime.ts", "test/grok-build-permissions.test.ts", "test/grok-build-runtime.test.ts", "e2e/browser-agent.e2e.mjs"],
+    gap: "Ask versus always-approve, safe read/grep access, serialized reverse prompts, edit-session grants, exact command/MCP grants, normalized domain grants, persistent grants/denials, subdomain-wide web denials, and root/child shared enforcement are browser-native. Remaining source work is native bash segment/safe-command analysis, protected-path and policy rules, MCP server-scope grants, per-agent permission modes, and permission telemetry/corpora.",
   },
   telemetry_and_feedback: {
     level: "source-ported",

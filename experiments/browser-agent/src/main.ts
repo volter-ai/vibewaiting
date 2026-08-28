@@ -86,6 +86,7 @@ import { GrokBuildAutoWakeCoordinator, type GrokBuildAutoWakePayload } from "./g
 import { missingBrowserAgentCapabilities } from "./browser-capabilities.js";
 import { resolveGrokBuildSlash, type GrokBuildBuiltinSlashAction } from "./grok-build-slash-commands.js";
 import { buildGrokBuildSkillInformation } from "./grok-build-skill-invocation.js";
+import { requestGrokBuildToolPermission } from "./grok-build-permission-dialog.js";
 
 const VIRTUAL_PORT = 4176;
 const THREE_VERSION = "0.180.0";
@@ -161,7 +162,7 @@ let hmrEvents = 0;
 let iframeLoadCount = 0;
 let runtimeReady = false;
 let authReady = false;
-let browserYoloMode = true;
+let browserYoloMode = false;
 const conformanceOrigin = new URLSearchParams(location.search).get("conformance");
 const startupCoordinator = new GrokBuildStartupCoordinator({
   tools: GROK_BUILD_TOOLS,
@@ -541,6 +542,7 @@ const browserServices: GrokBuildBrowserServices = {
   },
   approvePlanModeEntry: (signal) => approveGrokPlanEntry(signal),
   approvePlanModeExit: (plan, signal) => approveGrokPlanExit(plan, signal),
+  requestToolPermission: (request, signal) => requestGrokBuildToolPermission(request, signal),
   onMonitorEvent: (reminder) => eventItem("command", "Monitor event", reminder),
   onSystemReminderQueued: (event) => {
     if (!conformanceOrigin) autoWakeCoordinator?.enqueue(event.promptId);
@@ -678,7 +680,7 @@ async function executeBrowserBuiltinSlash(action: GrokBuildBuiltinSlashAction, s
       return;
     }
     case "set-yolo":
-      browserYoloMode = action.enabled;
+      browserYoloMode = rootBrowserRuntime?.setAlwaysApprove(action.enabled) ?? action.enabled;
       eventItem("", "Always approve", browserYoloMode ? "Enabled" : "Disabled");
       return;
     case "context-info": {
@@ -813,6 +815,8 @@ async function runAgent(mode: "send-now" | "queue" = "send-now"): Promise<void> 
         ...browserServices,
         suggestSkillPath: (path) => skillManager.suggestSkillPath(path),
       });
+      if (profile) browserRuntime.setAlwaysApprove(true);
+      browserYoloMode = browserRuntime.isAlwaysApprove();
       rootBrowserRuntime = browserRuntime;
       const startupSkillReminder = startupExtensionReminder(skillManager);
       conformanceRuntime = profile?.initialFiles?.length
