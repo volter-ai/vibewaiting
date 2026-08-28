@@ -7,7 +7,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repositoryRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
-const sourceRoot = resolve(process.argv[2] ?? "/tmp/xai-grok-build-source");
+const sourceRoot = resolve(process.env.GROK_BUILD_SOURCE_ROOT ?? process.argv[2] ?? "/tmp/xai-grok-build-source");
 const fixturePath = resolve(repositoryRoot, "test/fixtures/grok-conformance/native-control-behaviors-v1.json");
 const fixture = JSON.parse(readFileSync(fixturePath, "utf8"));
 const sourceRevision = execFileSync("git", ["rev-parse", "HEAD"], {

@@ -9,6 +9,13 @@ but response bytes and model prompts are intentionally preserved for byte-exact
 local replay. Never commit or share a recorded corpus. Only synthetic fixtures
 belong in version control.
 
+`native-source-map-v1.json` is not traffic. It is the public, revision-locked
+source provenance map for every exposed browser-port subsystem and tool. Run
+`GROK_BUILD_SOURCE_ROOT=/path/to/xai-grok-build-source npm run
+verify:grok-native-control` to reject source drift, missing native roots, or
+missing browser/test evidence. This source-dependent command is deliberately
+separate from ordinary CI; the structural half still runs in the unit suite.
+
 Replay fails closed on the first request difference. A successful browser run
 must also call `POST /__conformance__/assert-complete`; that endpoint fails if
 even one native exchange was not reproduced.

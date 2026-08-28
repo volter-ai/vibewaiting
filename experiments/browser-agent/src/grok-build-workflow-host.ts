@@ -4,7 +4,7 @@
 
 import type { GrokBuildWorkflowFileSystem } from "./grok-build-workflow-registry.js";
 import type { GrokBuildWorkflowHost, GrokBuildWorkflowHostEvent, GrokBuildWorkflowHostRequest } from "./grok-build-workflow-engine.js";
-import { validateGrokBuildContract, type GrokBuildContractVerdict } from "./grok-build-rhai-wasm.js";
+import type { GrokBuildContractVerdict } from "./grok-build-rhai-wasm.js";
 import { GrokBuildSubagentAdmission } from "./grok-build-subagent-admission.js";
 
 const MAX_AGENT_PROMPT_BYTES = 1024 * 1024;
@@ -206,9 +206,11 @@ export class GrokBuildBrowserWorkflowHost implements GrokBuildWorkflowHost {
       throw new Error(`invalid workflow agent effort: ${input.effort}`);
     }
     const schema = input.output_schema;
-    const validateContract = this.options.validateContract ?? validateGrokBuildContract;
+    const validateContract = schema === undefined || schema === null
+      ? this.options.validateContract
+      : this.options.validateContract ?? (await import("./grok-build-rhai-wasm.js")).validateGrokBuildContract;
     if (schema !== undefined && schema !== null) {
-      const compiled = validateContract(schema);
+      const compiled = validateContract!(schema);
       if (compiled.status === "invalid") throw new Error(compiled.error);
     }
     const id = crypto.randomUUID();
@@ -251,7 +253,7 @@ export class GrokBuildBrowserWorkflowHost implements GrokBuildWorkflowHost {
         output = final.success ? final.output : (final.error ?? final.output);
         break;
       }
-      const verdict = validateContract(schema, final.output);
+      const verdict = validateContract!(schema, final.output);
       if (verdict.status === "valid") {
         output = verdict.value;
         break;

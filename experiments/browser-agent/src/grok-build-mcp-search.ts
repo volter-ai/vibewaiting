@@ -1,5 +1,3 @@
-import { searchGrokBuildToolsExact } from "./grok-build-rhai-wasm.js";
-
 /** Searchable fields copied into Grok Build's per-request BM25 corpus. */
 export interface McpSearchDocument {
   qualifiedName: string;
@@ -17,6 +15,7 @@ export async function searchMcpDocuments<T extends McpSearchDocument>(
   query: string,
   limit: number,
 ): Promise<Array<McpRankedDocument<T>>> {
+  const { searchGrokBuildToolsExact } = await import("./grok-build-rhai-wasm.js");
   const ranked = await searchGrokBuildToolsExact(tools, query, limit);
   return ranked.flatMap(({ index, score }) => {
     const tool = tools[index];

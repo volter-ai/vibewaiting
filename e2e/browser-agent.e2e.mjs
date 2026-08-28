@@ -60,6 +60,12 @@ async function stubAuthenticatedStartup(page, archiveMessage) {
 }
 
 test("replays native Grok Build through an isolated browser sandbox with working HMR and gameplay", async ({ page }) => {
+  const eagerWorkflowRuntimeRequests = [];
+  page.on("request", (request) => {
+    if (/grok-build-rhai-wasm|grok_workflow_rhai_wasm/iu.test(request.url())) {
+      eagerWorkflowRuntimeRequests.push(request.url());
+    }
+  });
   await page.goto("http://127.0.0.1:4175/?conformance=http%3A%2F%2F127.0.0.1%3A4319", {
     waitUntil: "domcontentloaded",
     timeout: 10_000,
@@ -104,6 +110,7 @@ test("replays native Grok Build through an isolated browser sandbox with working
   await game.locator("body").click({ timeout: 1_000 });
   await game.locator("body").press("Space", { timeout: 1_000 });
   await expect(game.locator("body")).not.toHaveText(initialGameText || "", { timeout: 1_000 });
+  expect(eagerWorkflowRuntimeRequests).toEqual([]);
 });
 
 test("renders native structured question and plan approval interactions", async ({ page }) => {
