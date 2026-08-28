@@ -110,7 +110,6 @@ function remapPathText(value: string, nativeRoot: string, browserRoot: string): 
 }
 
 function validateEffect(name: string, actual: string, expected: string, nativeRoot: string, browserRoot: string): void {
-  if (!["read_file", "list_dir", "grep"].includes(name)) return;
   const normalizedExpected = remapPathText(expected, nativeRoot, browserRoot);
   if (actual !== normalizedExpected) {
     throw new Error(`${name} output drifted from native Grok Build.\nExpected:\n${normalizedExpected}\nActual:\n${actual}`);

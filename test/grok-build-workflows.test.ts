@@ -5,6 +5,7 @@ import deepResearchWorkflow from "../experiments/browser-agent/src/builtin-workf
 import { loadGrokBuildRhaiWasmSync } from "../experiments/browser-agent/src/grok-build-rhai-wasm.js";
 import {
   GrokBuildBrowserWorkflowManager,
+  GrokBuildBrowserWorkflowHost,
   GrokBuildJournalRhaiEngine,
   GrokBuildWorkflowRegistry,
   extractGrokBuildWorkflowMeta,
@@ -14,6 +15,7 @@ import {
   type GrokBuildRhaiContinuationModule,
   type GrokBuildWorkflowEngine,
   type GrokBuildWorkflowHost,
+  type GrokBuildWorkflowSubagentResult,
 } from "../experiments/browser-agent/src/grok-build-workflows.js";
 
 function workflow(name: string, description = `${name} description`, when?: string): string {
@@ -109,6 +111,42 @@ describe("Grok Build browser workflows", () => {
       .resolves.toEqual({ status: "budget_exceeded", message: "workflow agent budget exceeded: requested 2, maximum 1" });
   });
 
+  it("releases logical budget and leaves cancelled live calls unjournaled for resume", async () => {
+    const module: GrokBuildRhaiContinuationModule = {
+      evaluate({ journal }) {
+        if (journal.length === 0) return { type: "host_requests", requests: [
+          { seq: 0, kind: "spawn_agent", requestHash: "cancel-resume", payload: { prompt: "work" } },
+        ] };
+        return { type: "completed", result: journal[0]!.value };
+      },
+    };
+    const firstController = new AbortController();
+    let calls = 0;
+    const host: GrokBuildWorkflowHost = {
+      async call() {
+        calls += 1;
+        if (calls === 1) {
+          firstController.abort();
+          return "discarded";
+        }
+        return "fresh";
+      },
+    };
+    const engine = new GrokBuildJournalRhaiEngine(module, host);
+    await expect(engine.run(workflow("cancel-resume"), {}, {
+      agentBudget: 1,
+      signal: firstController.signal,
+      executionId: "wf_cancel_resume",
+    })).resolves.toEqual({ status: "cancelled" });
+    await expect(engine.run(workflow("cancel-resume"), {}, {
+      agentBudget: 1,
+      signal: new AbortController().signal,
+      executionId: "wf_cancel_resume",
+      resume: true,
+    })).resolves.toEqual({ status: "completed", result: "fresh" });
+    expect(calls).toBe(2);
+  });
+
   it("executes the real bundled deep-research workflow in browser Rhai WASM", async () => {
     const wasmFile = readFileSync(new URL("../experiments/browser-agent/src/generated-rhai-wasm/grok_workflow_rhai_wasm_bg.wasm", import.meta.url));
     const wasmBytes = wasmFile.buffer.slice(wasmFile.byteOffset, wasmFile.byteOffset + wasmFile.byteLength) as ArrayBuffer;
@@ -139,6 +177,86 @@ describe("Grok Build browser workflows", () => {
     await expect(agentEngine.run(agentScript, {}, { agentBudget: 1, signal: new AbortController().signal }))
       .resolves.toEqual({ status: "completed", result: "WASM replay complete" });
     expect(agentHost.call).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses real WASM JSON Schema correction and accounts every physical child attempt", async () => {
+    const wasmFile = readFileSync(new URL("../experiments/browser-agent/src/generated-rhai-wasm/grok_workflow_rhai_wasm_bg.wasm", import.meta.url));
+    const wasmBytes = wasmFile.buffer.slice(wasmFile.byteOffset, wasmFile.byteOffset + wasmFile.byteLength) as ArrayBuffer;
+    const module = loadGrokBuildRhaiWasmSync(wasmBytes);
+    const calls: Array<{ input: Record<string, unknown>; id: string }> = [];
+    const physicalResults: GrokBuildWorkflowSubagentResult[] = [
+      { childSessionId: "child-session-1", success: true, output: "I finished, but forgot JSON.", totalTokensUsed: 11, durationMs: 20 },
+      { childSessionId: "child-session-2", success: true, output: "done\n```json\n{\"ok\":true}\n```", totalTokensUsed: 7, durationMs: 9 },
+    ];
+    const host = new GrokBuildBrowserWorkflowHost({
+      vfs: new VirtualFS(),
+      async spawnSubagent(input, _signal, id) {
+        calls.push({ input, id });
+        return physicalResults[calls.length - 1]!;
+      },
+    });
+    const engine = new GrokBuildJournalRhaiEngine(module, host);
+    const script = `let meta = #{ name: "contract", description: "contract" };
+      let result = agent("Inspect the project", #{ output_schema: #{
+        type: "object", required: ["ok"], properties: #{ ok: #{ type: "boolean" } }
+      }});
+      complete(result);`;
+
+    const outcome = await engine.run(script, {}, { agentBudget: 1, signal: new AbortController().signal });
+    expect(outcome).toEqual({ status: "completed", result: {
+      agent_id: calls[0]!.id,
+      success: true,
+      output: { ok: true },
+      cancelled: false,
+      tokens_used: 18,
+      duration_ms: 29,
+    } });
+    expect(calls).toHaveLength(2);
+    expect(calls[0]!.input.prompt).toContain("<output-contract>");
+    expect(calls[0]!.input).not.toHaveProperty("output_schema");
+    expect(calls[1]!.id).not.toBe(calls[0]!.id);
+    expect(calls[1]!.input).toMatchObject({ resume_from: "child-session-1", background: false });
+    expect(calls[1]!.input.prompt).toContain("Your final message did not satisfy the output contract:");
+  });
+
+  it("fails an invalid self-contained schema before consuming a child run", async () => {
+    const wasmFile = readFileSync(new URL("../experiments/browser-agent/src/generated-rhai-wasm/grok_workflow_rhai_wasm_bg.wasm", import.meta.url));
+    const wasmBytes = wasmFile.buffer.slice(wasmFile.byteOffset, wasmFile.byteOffset + wasmFile.byteLength) as ArrayBuffer;
+    loadGrokBuildRhaiWasmSync(wasmBytes);
+    const spawn = vi.fn(async () => "unused");
+    const host = new GrokBuildBrowserWorkflowHost({ vfs: new VirtualFS(), spawnSubagent: spawn });
+    await expect(host.call({
+      seq: 0,
+      kind: "spawn_agent",
+      requestHash: "schema",
+      payload: { prompt: "work", output_schema: { $ref: "https://example.com/external.json" } },
+    }, new AbortController().signal)).rejects.toThrow("external JSON Schema references are disabled");
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it("returns one failed logical result after exhausting the single schema correction", async () => {
+    const wasmFile = readFileSync(new URL("../experiments/browser-agent/src/generated-rhai-wasm/grok_workflow_rhai_wasm_bg.wasm", import.meta.url));
+    const wasmBytes = wasmFile.buffer.slice(wasmFile.byteOffset, wasmFile.byteOffset + wasmFile.byteLength) as ArrayBuffer;
+    const module = loadGrokBuildRhaiWasmSync(wasmBytes);
+    let calls = 0;
+    const host = new GrokBuildBrowserWorkflowHost({
+      vfs: new VirtualFS(),
+      async spawnSubagent(_input, _signal, id) {
+        calls += 1;
+        return { childSessionId: id, success: true, output: "still not JSON", totalTokensUsed: 4, durationMs: 3 };
+      },
+    });
+    const engine = new GrokBuildJournalRhaiEngine(module, host);
+    const script = `let meta = #{ name: "bad-contract", description: "bad contract" };
+      complete(agent("Inspect", #{ output_schema: #{ type: "boolean" } }));`;
+    const outcome = await engine.run(script, {}, { agentBudget: 1, signal: new AbortController().signal });
+    expect(outcome).toMatchObject({ status: "completed", result: {
+      success: false,
+      output: expect.stringContaining("structured output validation failed:"),
+      tokens_used: 8,
+      duration_ms: 6,
+    } });
+    expect(calls).toBe(2);
   });
 
   it("validates with the native canned host and launches background runs with editable projections", async () => {

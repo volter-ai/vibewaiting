@@ -14,6 +14,7 @@ import {
   type BrowserBackgroundTask,
 } from "./grok-build-background-tasks.js";
 import { GrokBuildMonitorEventStream } from "./grok-build-monitor.js";
+import { tryBrowserNodeCheck } from "./browser-node-check.js";
 
 interface RunResult {
   stdout: string;
@@ -184,10 +185,14 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
   private async runTerminal(input: JsonObject, signal: AbortSignal): Promise<string> {
     const command = string(input.command, "command");
     if (boolean(input.background, false)) return this.startBackground(command, signal);
+    const builtin = tryBrowserNodeCheck(this.container.vfs, this.workspacePath, command);
+    if (builtin) return formatCommandResult(builtin);
     if (input.timeout === undefined || input.timeout === null) {
       const task = this.createCommandTask(command, signal, "command");
       const completed = await settleBefore(task.promise, 120_000, signal);
-      if (completed !== undefined) return completed;
+      if (completed !== undefined) {
+        return formatCommandResult({ stdout: completed, stderr: "", exitCode: task.exitCode ?? (task.status === "failed" ? 1 : 0) });
+      }
       return `Command automatically moved to background with task ID: ${task.id}`;
     }
     const controller = new AbortController();
@@ -377,7 +382,7 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
 
 function formatCommandResult(result: RunResult): string {
   const output = [result.stdout, result.stderr].filter(Boolean).join(result.stdout && result.stderr ? "\n" : "");
-  return output || `Process exited with code ${result.exitCode}`;
+  return `exit: ${result.exitCode}${output ? `\n${output}` : ""}`;
 }
 
 function normalize(path: string): string {

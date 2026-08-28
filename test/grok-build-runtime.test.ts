@@ -27,6 +27,10 @@ describe("Grok Build browser tool runtime", () => {
     expect((await execute("todo_write", { todos: [{ id: "1", content: "Inspect", status: "in_progress" }] })).output).toBe("- [in_progress] 1: Inspect");
     await execute("write", { file_path: "/src/new.js", content: "export {}" });
     expect(vfs.readFileSync("/src/new.js", "utf8")).toBe("export {}");
+    vi.stubGlobal("window", { setTimeout, clearTimeout });
+    await expect(execute("run_terminal_command", { command: "echo ok", timeout: 1000 }))
+      .resolves.toEqual({ output: "exit: 0\nok" });
+    vi.unstubAllGlobals();
   });
 
   it("reports unavailable service-backed capabilities explicitly", async () => {
@@ -233,7 +237,7 @@ These subagents were launched before this compaction and are still running. Use 
     });
     expect(vfs.readFileSync("/src/main.ts", "utf8")).toBe("old");
     await expect(execute("write", { file_path: "/.grok/plan.md", content: "# Plan\n\n1. Change it.\n" })).resolves.toEqual({
-      output: "Wrote /.grok/plan.md",
+      output: "Wrote file successfully to /.grok/plan.md.",
     });
     await expect(execute("exit_plan_mode", {})).resolves.toEqual({
       output: "The user wants to revise the plan. The user said:\nAdd rollback steps",
@@ -244,7 +248,7 @@ These subagents were launched before this compaction and are still running. Use 
     await expect(execute("exit_plan_mode", {})).resolves.toMatchObject({
       output: expect.stringContaining("Your plan has been approved"),
     });
-    await expect(execute("write", { file_path: "/src/main.ts", content: "new" })).resolves.toEqual({ output: "Wrote /src/main.ts" });
+    await expect(execute("write", { file_path: "/src/main.ts", content: "new" })).resolves.toEqual({ output: "Wrote file successfully to /src/main.ts." });
   });
 
   it("matches native grep modes, context markers, filters, caps, and gitignore traversal", async () => {
@@ -273,6 +277,7 @@ These subagents were launched before this compaction and are still running. Use 
 
   it("executes recorded calls in-browser while releasing native outputs in native completion order", async () => {
     const { vfs, tools } = runtime();
+    vfs.writeFileSync("/src/game.js", "old\n");
     const conformance = new GrokConformanceToolRuntime(tools, [
       { callId: "write", output: "Wrote file successfully to /private/tmp/native/src/game.js." },
       { callId: "read", output: "1→export const ready = true;\n" },

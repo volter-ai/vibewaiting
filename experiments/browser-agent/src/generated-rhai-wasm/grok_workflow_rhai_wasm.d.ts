@@ -1,12 +1,19 @@
 /* tslint:disable */
 /* eslint-disable */
 export function evaluate_json(input_json: string): string;
+/**
+ * Browser/WASM form of Grok Build's structured-output contract validator.
+ * An absent `final_text` compiles only, so callers reject bad schemas before
+ * consuming a physical child-agent run just like the native host service.
+ */
+export function validate_contract_json(schema_json: string, final_text?: string | null): string;
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
   readonly memory: WebAssembly.Memory;
   readonly evaluate_json: (a: number, b: number) => [number, number];
+  readonly validate_contract_json: (a: number, b: number, c: number, d: number) => [number, number];
   readonly __wbindgen_exn_store: (a: number) => void;
   readonly __externref_table_alloc: () => number;
   readonly __wbindgen_export_2: WebAssembly.Table;

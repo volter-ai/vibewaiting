@@ -55,12 +55,12 @@ export const GROK_BUILD_SYSTEM_PARITY = {
   bundled_workflows: {
     level: "source-ported",
     evidence: ["test/grok-build-bundle.test.ts", "test/grok-build-workflows.test.ts", "experiments/browser-agent/rhai-wasm/src/lib.rs"],
-    gap: "Published/project/user discovery, metadata, precedence, listing, Rhai 1.25.1 WASM execution, async journal replay, validation, budgets, events, and same-process resume are ported; native long-run traffic corpora and structured-output retry accounting remain before exact.",
+    gap: "Published/project/user discovery, metadata, precedence, listing, Rhai 1.25.1 WASM execution, async journal replay, native jsonschema 0.30 contract validation/correction, logical budgets, child-attempt accounting, events, and same-process resume are ported; native long-run traffic corpora and durable cross-reload resume remain before exact.",
   },
   telemetry_and_feedback: {
-    level: "partial",
-    evidence: ["test/fixtures/grok-conformance/native-pong-complete-v1.jsonl"],
-    gap: "Native feedback config, signals, and trace traffic are recorded but intentionally not emitted by the browser port yet.",
+    level: "source-ported",
+    evidence: ["test/fixtures/grok-conformance/native-pong-complete-v1.jsonl", "test/grok-build-telemetry.test.ts", "experiments/browser-agent/src/grok-build-telemetry.ts"],
+    gap: "Feedback config, session signals, turn deltas, and OTLP protobuf transport are browser-ported; automatic lifecycle wiring, native span production/redaction, and full control-plane corpus proof remain before exact.",
   },
 } as const satisfies Record<string, GrokSystemParity>;
 
@@ -70,12 +70,17 @@ export const GROK_BUILD_SYSTEM_PARITY = {
  * Source translation is implementation evidence, not corpus proof.
  */
 export const GROK_BUILD_TOOL_PARITY = {
-  run_terminal_command: { owner: "browser", level: "source-ported", evidence: ["test/grok-build-runtime.test.ts"] },
+  run_terminal_command: {
+    owner: "browser",
+    level: "source-ported",
+    evidence: ["test/grok-build-runtime.test.ts", "test/browser-node-check.test.ts", "e2e/browser-agent.e2e.mjs"],
+    gap: "Native exit headers, omitted-timeout foreground completion, and the recorded Pong npm/node syntax check now match strictly; broader shell/process-group, timeout, redirection, and native command corpora remain before exact.",
+  },
   read_file: {
     owner: "browser",
     level: "source-ported",
     evidence: ["test/grok-build-runtime.test.ts", "test/grok-build-rich-files-and-tasks.test.ts", "experiments/browser-agent/src/grok-build-filesystem.ts"],
-    gap: "Text/notebook reads, PPTX extraction, PDF text/page rendering, image bounds/transcoding, and multimodal function outputs are browser-ported; native PDF/image corpora are still required to prove renderer/compression byte parity.",
+    gap: "Text/notebook windows (including lenient signed offsets and inline data-URI extraction), PPTX extraction, PDF page selection/text/rendering, endpoint-image structural gates, bounds/transcoding, and multimodal outputs are browser-ported. PDF.js/canvas cannot promise pdf-oxide/image-crate byte identity; malformed-PPTX/error-path and native PDF/image corpora, plus native deferred image-follow-up framing, remain before exact.",
   },
   search_replace: { owner: "browser", level: "source-ported", evidence: ["test/grok-build-runtime.test.ts"] },
   list_dir: { owner: "browser", level: "source-ported", evidence: ["test/grok-build-runtime.test.ts"] },
@@ -91,7 +96,7 @@ export const GROK_BUILD_TOOL_PARITY = {
     owner: "browser",
     level: "source-ported",
     evidence: ["test/grok-build-runtime.test.ts", "test/grok-build-rich-files-and-tasks.test.ts", "experiments/browser-agent/src/grok-build-background-tasks.ts"],
-    gap: "Full VFS logs, UTF-8-safe previews, soft wrapping, single/multi cards, ID normalization, poll/wait-all, and typed statuses are ported; native timing corpus and detailed live-subagent progress metadata remain before exact.",
+    gap: "Live output, full VFS logs, UTF-8-safe previews, soft wrapping, empty-output wording, capped-wait advisories, single/multi cards, ID normalization, poll/wait-all, and typed terminal outcomes are ported. Browser logs use task-UUID VFS paths rather than native tool-call session paths; explicit background timeout/timed_out propagation, native timing corpus, and detailed live-subagent progress metadata remain before exact.",
   },
   spawn_subagent: {
     owner: "browser",
@@ -126,20 +131,20 @@ export const GROK_BUILD_TOOL_PARITY = {
   search_tool: {
     owner: "browser",
     level: "source-ported",
-    evidence: ["test/grok-build-mcp.test.ts", "experiments/browser-agent/src/grok-build-mcp.ts"],
-    gap: "The native registry, visibility/name filtering, schema patching, grouped output, exact-name fast path, and BM25-style discovery are ported; the Rust BM25 tokenizer/ranker still needs native result corpora before promotion to exact.",
+    evidence: ["test/grok-build-mcp.test.ts", "experiments/browser-agent/src/grok-build-mcp.ts", "experiments/browser-agent/src/grok-build-mcp-search.ts"],
+    gap: "Registry/filtering/grouping, identifier expansion, NLTK English stop words, duplicate-query weighting, and bm25 2.3.2's f32 k1/b/IDF/TF scoring are source-ported. Full deunicode transliteration, byte-for-byte Snowball English stemming, native HashSet tie order, and a native ranking corpus remain before exact.",
   },
   use_tool: {
     owner: "browser",
     level: "source-ported",
-    evidence: ["test/grok-build-mcp.test.ts", "experiments/browser-agent/src/grok-build-mcp-protocol.ts", "experiments/browser-agent/src/grok-build-mcp.ts"],
-    gap: "Streamable HTTP initialize/list/call, session headers, JSON/SSE responses, reconnect rules, content rendering, corrective errors, and output bounds are ported; native traffic proof plus HTTP OAuth, long-lived notification streams, and elicitation remain before exact.",
+    evidence: ["test/grok-build-mcp.test.ts", "experiments/browser-agent/src/grok-build-mcp-protocol.ts", "experiments/browser-agent/src/grok-build-mcp-events.ts", "experiments/browser-agent/src/grok-build-mcp-oauth.ts", "experiments/browser-agent/src/grok-build-mcp.ts"],
+    gap: "Streamable HTTP lifecycle, incremental POST/GET SSE, resumable notification streams, live catalog refresh, form/URL elicitation bounds/cancellation, and RFC 9728/8414 OAuth with DCR/PKCE/refresh are source-ported. Full form-value/schema UI validation, DNS-resolved private-host rejection, cross-tab auth dedup, less-common OAuth client-auth/scope-upgrade branches, browser/relay traffic recordings, and native long-session corpus proof remain before exact.",
   },
   workflow: {
     owner: "browser",
     level: "source-ported",
     evidence: ["test/grok-build-workflows.test.ts", "experiments/browser-agent/src/grok-build-workflows.ts", "experiments/browser-agent/src/grok-build-workflow-engine.ts", "experiments/browser-agent/src/grok-build-workflow-host.ts", "experiments/browser-agent/rhai-wasm/src/lib.rs"],
-    gap: "The real published deep-research workflow executes in browser Rhai WASM with host-call journal replay; native long-run traffic proof, full JSON-Schema correction retries, and precise child token accounting remain before exact.",
+    gap: "The real published deep-research workflow executes in browser Rhai WASM with host-call journal replay; native jsonschema 0.30 compiles in that WASM, one continuation correction retry is source-ported, and the production child callback aggregates provider-reported tokens/duration across every attempt. Missing provider usage is flagged internally but the native AgentResult shape cannot expose incompleteness; native long-run traffic proof remains before exact.",
   },
   enter_plan_mode: {
     owner: "browser",
@@ -184,7 +189,12 @@ export const GROK_BUILD_TOOL_PARITY = {
     level: "source-ported",
     evidence: ["test/grok-build-media.test.ts", "test/cloudflare-security.test.ts"],
   },
-  write: { owner: "browser", level: "source-ported", evidence: ["test/grok-build-runtime.test.ts"] },
+  write: {
+    owner: "browser",
+    level: "source-ported",
+    evidence: ["test/grok-build-runtime.test.ts", "e2e/browser-agent.e2e.mjs"],
+    gap: "New/overwrite behavior and the recorded Pong write effect/output are strict-matched; native permission, notification, oversized-file, and failure corpora remain before exact.",
+  },
   web_search: { owner: "xai-provider", level: "provider-native", evidence: ["test/grok-build-agent.test.ts"] },
   x_search: { owner: "xai-provider", level: "provider-native", evidence: ["test/grok-build-agent.test.ts"] },
 } as const satisfies Record<string, GrokToolParity>;

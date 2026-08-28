@@ -116,6 +116,31 @@ export function evaluate_json(input_json) {
     }
 }
 
+/**
+ * Browser/WASM form of Grok Build's structured-output contract validator.
+ * An absent `final_text` compiles only, so callers reject bad schemas before
+ * consuming a physical child-agent run just like the native host service.
+ * @param {string} schema_json
+ * @param {string | null} [final_text]
+ * @returns {string}
+ */
+export function validate_contract_json(schema_json, final_text) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passStringToWasm0(schema_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        var ptr1 = isLikeNone(final_text) ? 0 : passStringToWasm0(final_text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len1 = WASM_VECTOR_LEN;
+        const ret = wasm.validate_contract_json(ptr0, len0, ptr1, len1);
+        deferred3_0 = ret[0];
+        deferred3_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+
 async function __wbg_load(module, imports) {
     if (typeof Response === 'function' && module instanceof Response) {
         if (typeof WebAssembly.instantiateStreaming === 'function') {

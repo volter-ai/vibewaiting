@@ -9,12 +9,14 @@ import {
   normalizeWebFetchUrl,
   normalizeImageMediaRequest,
   normalizeVideoMediaRequest,
+  normalizeGrokTelemetryRoute,
   normalizeGrokResponsesRequest,
   positiveTurn,
   sameWebFetchHost,
   validSessionId,
   validUuid,
   type GrokRelayRequestKind,
+  type GrokTelemetryRoute,
 } from "./security.js";
 import {
   createGrokResponsesHeaders,
@@ -59,6 +61,7 @@ const MAX_IMAGE_RESPONSE_BYTES = 12 * 1024 * 1024;
 const MAX_VIDEO_RESPONSE_BYTES = 100 * 1024 * 1024;
 const MAX_BOOTSTRAP_RESPONSE_BYTES = 1024 * 1024;
 const MAX_BUNDLE_RESPONSE_BYTES = 8 * 1024 * 1024;
+const MAX_TELEMETRY_BYTES = 512 * 1024;
 const TIER_RESTRICTED_UPSELL = "Image generation is a SuperGrok feature and isn't available on the free or X Basic tier. Let the user know they can unlock image and video generation by upgrading to SuperGrok: https://grok.com/supergrok?referrer=grok-build. Do not retry this tool.";
 
 interface Env {
@@ -91,6 +94,7 @@ interface CredentialState {
   userId: string;
   email?: string;
   subscriptionTier?: string;
+  teamId?: string;
 }
 
 interface SessionState {
@@ -129,6 +133,7 @@ interface InternalCredential {
   email?: string;
   eligible: boolean;
   subscriptionTier?: string;
+  teamId?: string;
 }
 
 type GrokBootstrapKind = "models" | "settings";
@@ -966,6 +971,88 @@ async function routeBundle(request: Request, env: Env, kind: GrokBundleKind): Pr
   }
 }
 
+async function routeTelemetry(request: Request, env: Env, route: GrokTelemetryRoute): Promise<Response> {
+  const cookieSessionId = cookieValue(request.headers.get("Cookie"), SESSION_COOKIE);
+  if (!validSessionId(cookieSessionId)) return error("Connect a Grok subscription before sending Grok telemetry.", 401);
+  const ipHash = await sha256(clientIp(request));
+  if (!(await requireEdgeLimit(env.CHAT_IP_RATE_LIMITER, `telemetry:${ipHash}`))) {
+    return error("This network has reached the per-minute telemetry limit.", 429, 60);
+  }
+  const session = sessionStub(env, cookieSessionId);
+  let credentialResponse = await internalJson(session, "/credential");
+  if (!credentialResponse.ok) return new Response(credentialResponse.body, credentialResponse);
+  let credential = await credentialResponse.json<InternalCredential>();
+  if (!credential.eligible) return error("This Grok account does not have an active eligible subscription.", 403);
+  const userKey = await sha256(credential.userId);
+  if (!(await requireEdgeLimit(env.CHAT_USER_RATE_LIMITER, `telemetry:${userKey}`))) {
+    return error("This Grok account has reached the per-minute telemetry limit.", 429, 60);
+  }
+
+  let body: Uint8Array | undefined;
+  if (request.method === "POST") {
+    const declared = Number.parseInt(request.headers.get("Content-Length") ?? "0", 10);
+    if (Number.isFinite(declared) && declared > MAX_TELEMETRY_BYTES) return error("Telemetry payload is too large.", 413);
+    body = new Uint8Array(await request.arrayBuffer());
+    if (body.byteLength > MAX_TELEMETRY_BYTES) return error("Telemetry payload is too large.", 413);
+    if (route.contentType === "application/json") {
+      try {
+        const value: unknown = JSON.parse(new TextDecoder().decode(body));
+        if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Telemetry payload must be a JSON object.");
+      } catch (cause) {
+        return error(cause instanceof Error ? cause.message : "Telemetry payload is invalid.", 400);
+      }
+    }
+  }
+
+  const upstreamUrl = `${CHAT_PROXY_ORIGIN}${route.upstreamPath}`;
+  const makeRequest = (current: InternalCredential): RequestInit => {
+    const headers = new Headers({
+      Authorization: `Bearer ${current.accessToken}`,
+      Accept: "*/*",
+      "X-XAI-Token-Auth": "xai-grok-cli",
+      "x-grok-client-version": env.XAI_CLIENT_VERSION,
+      "x-grok-client-mode": "headless",
+      "x-userid": current.userId,
+    });
+    if (request.method === "POST") headers.set("Content-Type", route.contentType);
+    if (route.upstreamPath === "/v1/traces") {
+      headers.set("x-userid", current.userId);
+      if (current.teamId) headers.set("x-teamid", current.teamId);
+    } else {
+      headers.set("traceparent", createTraceparent());
+    }
+    return {
+      method: request.method,
+      headers,
+      ...(body ? { body: body.slice().buffer } : {}),
+      signal: AbortSignal.timeout(15_000),
+    };
+  };
+
+  try {
+    let upstream = await fetch(upstreamUrl, makeRequest(credential));
+    if (upstream.status === 401) {
+      await upstream.body?.cancel().catch(() => undefined);
+      credentialResponse = await internalJson(session, "/refresh", {});
+      if (!credentialResponse.ok) return error("The Grok session expired. Sign in again.", 401);
+      credential = await credentialResponse.json<InternalCredential>();
+      upstream = await fetch(upstreamUrl, makeRequest(credential));
+    }
+    const responseBody = await readLimitedResponse(upstream, MAX_TELEMETRY_BYTES);
+    return new Response(responseBody.buffer as ArrayBuffer, {
+      status: upstream.status,
+      headers: {
+        "Cache-Control": "no-store",
+        "Content-Type": upstream.headers.get("Content-Type") ?? (route.contentType === "application/json" ? "application/json; charset=utf-8" : "application/x-protobuf"),
+        "X-Content-Type-Options": "nosniff",
+      },
+    });
+  } catch (cause) {
+    console.error("grok_telemetry_failed", route.upstreamPath, cause instanceof Error ? cause.message : "unknown");
+    return error("The Grok telemetry request did not complete.", 502);
+  }
+}
+
 function releaseAfterStream(stream: ReadableStream<Uint8Array>, release: () => Promise<void>): ReadableStream<Uint8Array> {
   const reader = stream.getReader();
   let released = false;
@@ -1000,8 +1087,10 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const mutation = request.method !== "GET" && request.method !== "HEAD";
   if (mutation && !isTrustedMutation(request)) return error("Cross-origin requests are not allowed.", 403);
-  if (mutation && request.headers.get("Content-Type")?.split(";", 1)[0] !== "application/json") {
-    return error("Requests must use application/json.", 415);
+  const telemetryRoute = normalizeGrokTelemetryRoute(url.pathname, request.method);
+  const expectedContentType = telemetryRoute?.contentType ?? "application/json";
+  if (mutation && request.headers.get("Content-Type")?.split(";", 1)[0] !== expectedContentType) {
+    return error(`Requests must use ${expectedContentType}.`, 415);
   }
 
   if (url.pathname === "/api/auth/device/start" && request.method === "POST") return routeDeviceStart(request, env);
@@ -1017,6 +1106,7 @@ async function handleApi(request: Request, env: Env): Promise<Response> {
   if (url.pathname === "/api/grok/media/image" && request.method === "POST") return routeImageMedia(request, env);
   if (url.pathname === "/api/grok/media/video/start" && request.method === "POST") return routeVideoStart(request, env);
   if (url.pathname === "/api/grok/media/video/poll" && request.method === "POST") return routeVideoPoll(request, env);
+  if (telemetryRoute) return routeTelemetry(request, env, telemetryRoute);
   return error("API route not found.", 404);
 }
 
@@ -1077,10 +1167,15 @@ export class GrokSession implements DurableObject {
       const userId = stringValue(user.userId) ?? fallback.userId;
       const email = stringValue(user.email) ?? fallback.email;
       const subscriptionTier = stringValue(user.subscriptionTier);
+      const teamId = stringValue(user.teamId) ?? stringValue(user.team_id)
+        ?? (user.team && typeof user.team === "object" && !Array.isArray(user.team)
+          ? stringValue((user.team as Record<string, unknown>).id)
+          : undefined);
       return {
         ...(userId ? { userId } : {}),
         ...(email ? { email } : {}),
         ...(subscriptionTier ? { subscriptionTier } : {}),
+        ...(teamId ? { teamId } : {}),
       };
     } catch {
       return fallback;
@@ -1129,6 +1224,7 @@ export class GrokSession implements DurableObject {
       ...(credential.email ? { email: credential.email } : {}),
       eligible: Boolean(credential.subscriptionTier && credential.subscriptionTier !== "Free"),
       ...(credential.subscriptionTier ? { subscriptionTier: credential.subscriptionTier } : {}),
+      ...(credential.teamId ? { teamId: credential.teamId } : {}),
     };
   }
 
@@ -1228,6 +1324,7 @@ export class GrokSession implements DurableObject {
         ...(expiresIn ? { expiresAt: Date.now() + expiresIn * 1_000 } : {}),
         ...(identity.email ? { email: identity.email } : {}),
         ...(identity.subscriptionTier ? { subscriptionTier: identity.subscriptionTier } : {}),
+        ...(identity.teamId ? { teamId: identity.teamId } : {}),
       };
       await this.save({ credential });
       return json({

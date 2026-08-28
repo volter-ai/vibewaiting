@@ -4,8 +4,13 @@
 
 import type { GrokBuildWorkflowFileSystem } from "./grok-build-workflow-registry.js";
 import type { GrokBuildWorkflowHost, GrokBuildWorkflowHostEvent, GrokBuildWorkflowHostRequest } from "./grok-build-workflow-engine.js";
+import { validateGrokBuildContract, type GrokBuildContractVerdict } from "./grok-build-rhai-wasm.js";
 
 const MAX_AGENT_PROMPT_BYTES = 1024 * 1024;
+const MAX_AGENT_RUNS = 2_048;
+const MAX_PHASE_BYTES = 256;
+const SCHEMA_CONTRACT_RETRIES = 1;
+const MAX_TEMPLATE_OUTPUT_BYTES = 1024 * 1024;
 const MAX_SCRATCH_NAME_BYTES = 255;
 const MAX_SCRATCH_FILE_BYTES = 10 * 1024 * 1024;
 const MAX_SCRATCH_FILES = 64;
@@ -14,12 +19,26 @@ const MAX_DIFF_BYTES = 256 * 1024;
 
 interface CommandResult { stdout: string; stderr: string; exitCode: number }
 
+export interface GrokBuildWorkflowSubagentResult {
+  childSessionId: string;
+  success: boolean;
+  output: string;
+  error?: string;
+  cancelled?: boolean;
+  backgrounded?: boolean;
+  totalTokensUsed: number;
+  durationMs: number;
+  usageIncomplete?: boolean;
+}
+
 export interface GrokBuildWorkflowBrowserHostOptions {
   vfs: GrokBuildWorkflowFileSystem;
   workspacePath?: string;
-  spawnSubagent(input: Record<string, unknown>, signal: AbortSignal, id: string): Promise<string>;
+  spawnSubagent(input: Record<string, unknown>, signal: AbortSignal, id: string): Promise<string | GrokBuildWorkflowSubagentResult>;
   runCommand?(command: string, options: { cwd: string; signal: AbortSignal }): Promise<CommandResult>;
   templates?: Readonly<Record<string, string>>;
+  allowForkContext?: boolean;
+  validateContract?: (schema: unknown, finalText?: string) => GrokBuildContractVerdict;
   onEvent?: (event: GrokBuildWorkflowHostEvent) => void;
 }
 
@@ -35,11 +54,41 @@ function text(value: unknown, field: string): string {
 
 function utf8Length(value: string): number { return new TextEncoder().encode(value).byteLength; }
 
-function parseStructuredOutput(output: string, schema: unknown): unknown {
-  if (!schema) return output;
-  const fenced = /```json\s*([\s\S]*?)```/iu.exec(output)?.[1];
-  try { return JSON.parse((fenced ?? output).trim()) as unknown; }
-  catch (error) { throw new Error(`workflow subagent did not return valid structured JSON: ${error instanceof Error ? error.message : String(error)}`); }
+function contractPrompt(prompt: string, schema: unknown): string {
+  return `${prompt}\n\n<output-contract>\nDo the work above with your tools first. Then end your final message with a single \`\`\`json fenced block containing exactly one JSON value that conforms to this JSON Schema (no prose inside the block):\n${JSON.stringify(schema)}\n</output-contract>`;
+}
+
+function correctionPrompt(error: string): string {
+  return `Your final message did not satisfy the output contract: ${error}\nReply with a single \`\`\`json fenced block containing one JSON value conforming to the schema from <output-contract>, and nothing else.`;
+}
+
+function finiteNonnegative(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) throw new Error(`workflow subagent ${field} must be a finite non-negative number`);
+  return Math.floor(value);
+}
+
+function normalizeSubagentResult(
+  result: string | GrokBuildWorkflowSubagentResult,
+  id: string,
+  fallbackDurationMs: number,
+): GrokBuildWorkflowSubagentResult {
+  if (typeof result === "string") {
+    // Compatibility with the existing browser session callback. Exact usage
+    // accounting is available when the callback returns the structured form.
+    return { childSessionId: id, success: true, output: result, totalTokensUsed: 0, durationMs: fallbackDurationMs };
+  }
+  if (!result || typeof result !== "object") throw new Error("workflow subagent returned an invalid result");
+  return {
+    childSessionId: text(result.childSessionId, "workflow subagent childSessionId"),
+    success: result.success === true,
+    output: text(result.output, "workflow subagent output"),
+    ...(typeof result.error === "string" ? { error: result.error } : {}),
+    ...(result.cancelled === true ? { cancelled: true } : {}),
+    ...(result.backgrounded === true ? { backgrounded: true } : {}),
+    ...(result.usageIncomplete === true ? { usageIncomplete: true } : {}),
+    totalTokensUsed: finiteNonnegative(result.totalTokensUsed, "totalTokensUsed"),
+    durationMs: finiteNonnegative(result.durationMs, "durationMs"),
+  };
 }
 
 function scratchName(value: unknown): string {
@@ -64,6 +113,7 @@ function truncateUtf8(value: string, maximum: number, marker: string): string {
 
 export class GrokBuildBrowserWorkflowHost implements GrokBuildWorkflowHost {
   private readonly workspacePath: string;
+  private readonly agentRuns = new Map<string, number>();
 
   constructor(private readonly options: GrokBuildWorkflowBrowserHostOptions) {
     this.workspacePath = options.workspacePath ?? "/";
@@ -89,28 +139,86 @@ export class GrokBuildBrowserWorkflowHost implements GrokBuildWorkflowHost {
     const prompt = text(input.prompt, "agent prompt");
     if (!prompt.trim()) throw new Error("agent prompt must not be empty");
     if (utf8Length(prompt) > MAX_AGENT_PROMPT_BYTES) throw new Error(`agent prompt exceeds ${MAX_AGENT_PROMPT_BYTES} bytes`);
-    if (input.fork_context === true) throw new Error("fork_context is restricted to built-in workflows");
+    if (input.fork_context === true && !this.options.allowForkContext) throw new Error("fork_context is restricted to built-in workflows");
+    for (const field of ["label", "phase"] as const) {
+      if (typeof input[field] === "string" && utf8Length(input[field] as string) > MAX_PHASE_BYTES) {
+        throw new Error(`agent label and phase must each be at most ${MAX_PHASE_BYTES} bytes`);
+      }
+    }
+    if (typeof input.capability_mode === "string" && !["read-only", "read-write", "execute", "all"].includes(input.capability_mode)) {
+      throw new Error(`invalid capability_mode '${input.capability_mode}' (expected read-only, read-write, execute, or all)`);
+    }
+    if (typeof input.effort === "string" && !["none", "minimal", "low", "medium", "high", "xhigh"].includes(input.effort)) {
+      throw new Error(`invalid workflow agent effort: ${input.effort}`);
+    }
+    const schema = input.output_schema;
+    const validateContract = this.options.validateContract ?? validateGrokBuildContract;
+    if (schema !== undefined && schema !== null) {
+      const compiled = validateContract(schema);
+      if (compiled.status === "invalid") throw new Error(compiled.error);
+    }
     const id = crypto.randomUUID();
-    const started = performance.now();
-    const output = await this.options.spawnSubagent({
-      prompt,
-      description: typeof input.label === "string" ? input.label : "Workflow agent",
-      subagent_type: typeof input.agent_type === "string" ? input.agent_type : "general-purpose",
-      background: false,
-      ...(typeof input.capability_mode === "string" ? { capability_mode: input.capability_mode } : {}),
-      ...(typeof input.model === "string" ? { model: input.model } : {}),
-      ...(typeof input.effort === "string" ? { reasoning_effort: input.effort } : {}),
-      ...(typeof input.resume_from === "string" ? { resume_from: input.resume_from } : {}),
-      ...(input.isolation_worktree === true ? { isolation: "worktree" } : {}),
-      ...(input.output_schema ? { output_schema: input.output_schema } : {}),
-    }, signal, id);
+    let attempts = 0;
+    let totalTokens = 0;
+    let totalDuration = 0;
+    let resumeFrom = typeof input.resume_from === "string" ? input.resume_from : undefined;
+    let nextPrompt = schema === undefined || schema === null ? prompt : contractPrompt(prompt, schema);
+    let forkContext = input.fork_context === true && resumeFrom === undefined;
+    let final: GrokBuildWorkflowSubagentResult | undefined;
+    let output: unknown;
+    while (true) {
+      attempts += 1;
+      const quotaKey = request.executionId ?? "__unscoped__";
+      const runs = this.agentRuns.get(quotaKey) ?? 0;
+      if (runs >= MAX_AGENT_RUNS) throw new Error(`workflow agent-run quota exceeded (maximum ${MAX_AGENT_RUNS})`);
+      this.agentRuns.set(quotaKey, runs + 1);
+      const childId = attempts === 1 ? id : crypto.randomUUID();
+      const started = performance.now();
+      const raw = await this.options.spawnSubagent({
+        prompt: nextPrompt,
+        description: typeof input.label === "string" ? input.label : "Workflow agent",
+        subagent_type: typeof input.agent_type === "string" ? input.agent_type : "general-purpose",
+        background: false,
+        ...(typeof input.capability_mode === "string" ? { capability_mode: input.capability_mode } : {}),
+        ...(typeof input.model === "string" ? { model: input.model } : {}),
+        ...(typeof input.effort === "string" ? { reasoning_effort: input.effort } : {}),
+        ...(resumeFrom ? { resume_from: resumeFrom } : {}),
+        ...(input.isolation_worktree === true ? { isolation: "worktree" } : {}),
+        ...(forkContext ? { fork_context: true } : {}),
+      }, signal, childId);
+      final = normalizeSubagentResult(raw, childId, Math.max(0, Math.round(performance.now() - started)));
+      totalTokens = Math.min(Number.MAX_SAFE_INTEGER, totalTokens + final.totalTokensUsed);
+      totalDuration = Math.min(Number.MAX_SAFE_INTEGER, totalDuration + final.durationMs);
+      if (signal.aborted) throw signal.reason ?? new DOMException("The operation was aborted.", "AbortError");
+      if (final.backgrounded) {
+        throw new Error(`subagent ${childId} was auto-backgrounded by the await budget; its result is not available to this run (engine bug — workflow spawns must await to completion)`);
+      }
+      if (schema === undefined || schema === null || !final.success) {
+        output = final.success ? final.output : (final.error ?? final.output);
+        break;
+      }
+      const verdict = validateContract(schema, final.output);
+      if (verdict.status === "valid") {
+        output = verdict.value;
+        break;
+      }
+      if (attempts <= SCHEMA_CONTRACT_RETRIES) {
+        resumeFrom = final.childSessionId;
+        forkContext = false;
+        nextPrompt = correctionPrompt(verdict.error);
+        continue;
+      }
+      final = { ...final, success: false };
+      output = `structured output validation failed: ${verdict.error}`;
+      break;
+    }
     return {
       agent_id: id,
-      success: true,
-      output: parseStructuredOutput(output, input.output_schema),
-      cancelled: false,
-      tokens_used: 0,
-      duration_ms: Math.max(0, Math.round(performance.now() - started)),
+      success: final!.success,
+      output,
+      cancelled: final!.cancelled === true,
+      tokens_used: totalTokens,
+      duration_ms: totalDuration,
     };
   }
 
@@ -119,9 +227,11 @@ export class GrokBuildBrowserWorkflowHost implements GrokBuildWorkflowHost {
     const name = text(input.name, "template name");
     let rendered = this.options.templates?.[name];
     if (rendered === undefined) throw new Error(`unknown workflow template: ${name}`);
+    if (utf8Length(rendered) > MAX_TEMPLATE_OUTPUT_BYTES) throw new Error(`template exceeds ${MAX_TEMPLATE_OUTPUT_BYTES} bytes`);
     if (input.vars && typeof input.vars === "object" && !Array.isArray(input.vars)) {
       for (const [key, value] of Object.entries(input.vars as Record<string, unknown>)) {
         rendered = rendered.replaceAll(`{${key}}`, typeof value === "string" ? value : JSON.stringify(value));
+        if (utf8Length(rendered) > MAX_TEMPLATE_OUTPUT_BYTES) throw new Error(`rendered template exceeds ${MAX_TEMPLATE_OUTPUT_BYTES} bytes`);
       }
     }
     return rendered;

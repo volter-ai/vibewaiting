@@ -12,11 +12,10 @@ import {
   type GrokBuildBrowserServices,
 } from "./grok-build-runtime.js";
 import {
-  SANDBOX_CHANNEL,
-  isSandboxEnvelope,
   resolveSandboxOrigin,
-  type SandboxEnvelope,
 } from "./sandbox-protocol.js";
+import { BrowserSandboxBridge } from "./browser-sandbox-bridge.js";
+import { BrowserGrokAuthController } from "./browser-grok-auth.js";
 import {
   autosaveBrowserProject,
   clearBrowserAgentSession,
@@ -62,6 +61,7 @@ import {
   mergeGrokBuildExtensionListings,
   type GrokBuildBrowserWorkflowManager,
   type GrokBuildWorkflowOutcome,
+  type GrokBuildWorkflowSubagentResult,
 } from "./grok-build-workflows.js";
 import deepResearchWorkflow from "./builtin-workflows/deep-research.rhai?raw";
 
@@ -108,8 +108,6 @@ let hmrEvents = 0;
 let iframeLoadCount = 0;
 let runtimeReady = false;
 let authReady = false;
-let cloudAuth = false;
-let authPoll: number | undefined;
 const conformanceOrigin = new URLSearchParams(location.search).get("conformance");
 let conformanceProfile: GrokConformanceDriverProfile | undefined;
 let scheduleProjectSave: (() => void) | undefined;
@@ -130,17 +128,24 @@ const subagentSessions = new Map<string, {
 const configuredSandboxOrigin = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env?.VITE_SANDBOX_ORIGIN;
 const sandboxOrigin = resolveSandboxOrigin(location, configuredSandboxOrigin);
 const sandboxNonce = crypto.randomUUID();
-let resolveSandboxBridge!: () => void;
-let rejectSandboxBridge!: (error: Error) => void;
-let resolveInitialPreview!: () => void;
-let rejectInitialPreview!: (error: Error) => void;
-const sandboxBridgeReady = new Promise<void>((resolve, reject) => {
-  resolveSandboxBridge = resolve;
-  rejectSandboxBridge = reject;
-});
-const initialPreviewReady = new Promise<void>((resolve, reject) => {
-  resolveInitialPreview = resolve;
-  rejectInitialPreview = reject;
+const sandboxBridge = new BrowserSandboxBridge({
+  preview,
+  origin: sandboxOrigin,
+  nonce: sandboxNonce,
+  port: VIRTUAL_PORT,
+  bridge,
+  onPreviewLoad() {
+    iframeLoadCount += 1;
+    iframeLoads.textContent = String(iframeLoadCount);
+  },
+  onRendered(revision) {
+    renderedRevision.textContent = `Rendered: ${revision}`;
+  },
+  onError(error) {
+    runtimeStatus.textContent = "Browser sandbox failed";
+    runtimeDot.classList.add("failed");
+    eventItem("error", "Runtime failed", error.message);
+  },
 });
 
 const STARTER_SOURCE = `
@@ -153,49 +158,8 @@ window.parent.postMessage({ type: "browser-agent-rendered", revision: "starter" 
 if (import.meta.hot) import.meta.hot.accept();
 `;
 
-interface AuthStatusPayload {
-  authenticated?: boolean;
-  email?: string | null;
-  subscriptionTier?: string | null;
-  eligible?: boolean;
-  error?: { message?: string } | string;
-}
-
-interface DeviceAuthPayload {
-  status?: "pending" | "authenticated";
-  userCode?: string;
-  verificationUri?: string;
-  verificationUriComplete?: string | null;
-  intervalSeconds?: number;
-  email?: string | null;
-  subscriptionTier?: string | null;
-  eligible?: boolean;
-  error?: { message?: string } | string;
-}
-
 function syncRunAvailability(): void {
   runButton.disabled = Boolean(activeRun) || !runtimeReady || (!conformanceOrigin && !authReady);
-}
-
-function authMessage(payload: AuthStatusPayload | DeviceAuthPayload, fallback: string): string {
-  if (typeof payload.error === "string") return payload.error;
-  if (payload.error && typeof payload.error.message === "string") return payload.error.message;
-  return fallback;
-}
-
-function showAuthenticated(payload: AuthStatusPayload | DeviceAuthPayload, local = false): void {
-  authReady = local || payload.eligible !== false;
-  const identity = payload.email || payload.subscriptionTier;
-  authStatus.textContent = local
-    ? `Local Grok Build credential${identity ? ` · ${identity}` : ""}`
-    : `${payload.subscriptionTier || "Connected"}${payload.email ? ` · ${payload.email}` : ""}${payload.eligible === false ? " · subscription not eligible" : ""}`;
-  connectGrokButton.hidden = true;
-  disconnectGrokButton.hidden = local;
-  deviceAuth.hidden = true;
-  if (authPoll !== undefined) window.clearTimeout(authPoll);
-  authPoll = undefined;
-  syncRunAvailability();
-  if (runtimeReady) startBundleSync();
 }
 
 function startBundleSync(): void {
@@ -241,117 +205,23 @@ function workflowCompletionReminder(name: string, runId: string, outcome: GrokBu
   return `<system-reminder>\nWhile you were idle, 1 background workflow run stopped (finished or paused):\n\n- Workflow '${name}' (run id ${runId}) — status: ${status}${detail ? `\n  ${outcome.status === "completed" ? "Result" : "Detail"}: ${detail}` : ""}\n</system-reminder>`;
 }
 
-async function readJson<T>(response: Response): Promise<T> {
-  const payload = await response.json().catch(() => ({})) as T;
-  if (!response.ok) throw new Error(authMessage(payload as AuthStatusPayload, `HTTP ${response.status}`));
-  return payload;
-}
-
-async function refreshAuthStatus(): Promise<void> {
-  try {
-    const cloudResponse = await fetch("/api/auth/status", { credentials: "include", cache: "no-store" });
-    const cloudJson = cloudResponse.headers.get("Content-Type")?.includes("application/json") === true;
-    if (cloudResponse.status !== 404 && cloudJson) {
-      cloudAuth = true;
-      const payload = await readJson<AuthStatusPayload>(cloudResponse);
-      if (payload.authenticated) showAuthenticated(payload);
-      else {
-        authReady = false;
-        authStatus.textContent = "Not connected";
-        connectGrokButton.hidden = false;
-        disconnectGrokButton.hidden = true;
-        syncRunAvailability();
-      }
-      return;
-    }
-  } catch (error) {
-    if (cloudAuth) {
-      authReady = false;
-      authStatus.textContent = error instanceof Error ? error.message : String(error);
-      connectGrokButton.hidden = false;
-      syncRunAvailability();
-      return;
-    }
-  }
-
-  try {
-    const payload = await readJson<AuthStatusPayload>(await fetch("/api/grok/status", { cache: "no-store" }));
-    if (payload.authenticated) showAuthenticated(payload, true);
-    else throw new Error(authMessage(payload, "No local Grok Build credential"));
-  } catch (error) {
-    authReady = false;
-    authStatus.textContent = error instanceof Error ? error.message : String(error);
-    connectGrokButton.hidden = true;
-    disconnectGrokButton.hidden = true;
+const authController = new BrowserGrokAuthController({
+  elements: {
+    status: authStatus,
+    connectButton: connectGrokButton,
+    disconnectButton: disconnectGrokButton,
+    devicePanel: deviceAuth,
+    deviceCode,
+    deviceLink,
+  },
+  onReadyChange(ready) {
+    authReady = ready;
     syncRunAvailability();
-  }
-}
-
-async function pollDeviceAuth(intervalSeconds: number): Promise<void> {
-  try {
-    const response = await fetch("/api/auth/device/poll", {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: "{}",
-    });
-    const payload = await response.json().catch(() => ({})) as DeviceAuthPayload;
-    if (response.ok && payload.status === "authenticated") {
-      showAuthenticated(payload);
-      return;
-    }
-    if (response.status !== 202 && response.status !== 429) {
-      throw new Error(authMessage(payload, `Sign-in polling failed with HTTP ${response.status}`));
-    }
-    const retryAfter = Number.parseInt(response.headers.get("Retry-After") || "", 10);
-    const nextSeconds = Number.isFinite(retryAfter) ? retryAfter : payload.intervalSeconds ?? intervalSeconds;
-    authPoll = window.setTimeout(() => void pollDeviceAuth(nextSeconds), Math.max(1, nextSeconds) * 1_000);
-  } catch (error) {
-    authStatus.textContent = error instanceof Error ? error.message : String(error);
-    connectGrokButton.hidden = false;
-    deviceAuth.hidden = true;
-  }
-}
-
-async function startDeviceAuth(): Promise<void> {
-  connectGrokButton.disabled = true;
-  authStatus.textContent = "Starting xAI device sign-in…";
-  try {
-    const payload = await readJson<DeviceAuthPayload>(await fetch("/api/auth/device/start", {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: "{}",
-    }));
-    if (!payload.userCode || !payload.verificationUri) throw new Error("xAI returned an incomplete device sign-in response.");
-    deviceCode.textContent = payload.userCode;
-    deviceLink.href = payload.verificationUriComplete || payload.verificationUri;
-    deviceAuth.hidden = false;
-    authStatus.textContent = "Waiting for approval at xAI…";
-    connectGrokButton.hidden = true;
-    const intervalSeconds = Math.max(1, payload.intervalSeconds ?? 5);
-    authPoll = window.setTimeout(() => void pollDeviceAuth(intervalSeconds), intervalSeconds * 1_000);
-  } catch (error) {
-    authStatus.textContent = error instanceof Error ? error.message : String(error);
-    connectGrokButton.hidden = false;
-  } finally {
-    connectGrokButton.disabled = false;
-  }
-}
-
-async function disconnectGrok(): Promise<void> {
-  await readJson<AuthStatusPayload>(await fetch("/api/auth/logout", {
-    method: "POST",
-    credentials: "include",
-    headers: { "Content-Type": "application/json" },
-    body: "{}",
-  }));
-  authReady = false;
-  authStatus.textContent = "Not connected";
-  connectGrokButton.hidden = false;
-  disconnectGrokButton.hidden = true;
-  syncRunAvailability();
-}
+  },
+  onAuthenticated() {
+    if (runtimeReady) startBundleSync();
+  },
+});
 
 function seedProject(profile?: GrokConformanceDriverProfile): void {
   const nativePongFixture = profile?.fixture === "three-pong-starter-v1";
@@ -539,10 +409,16 @@ function notifyAgentIdle(): void {
 }
 
 async function runBrowserSubagent(input: Record<string, unknown>, signal: AbortSignal, subagentId: string): Promise<string> {
-  return subagentAdmission.run(signal, () => runAdmittedBrowserSubagent(input, signal, subagentId));
+  const result = await subagentAdmission.run(signal, () => runAdmittedBrowserSubagent(input, signal, subagentId));
+  if (!result.success) throw new Error(result.error ?? result.output);
+  return result.output || `Subagent ${subagentId} completed.`;
 }
 
-async function runAdmittedBrowserSubagent(input: Record<string, unknown>, signal: AbortSignal, subagentId: string): Promise<string> {
+async function runAdmittedBrowserSubagent(
+  input: Record<string, unknown>,
+  signal: AbortSignal,
+  subagentId: string,
+): Promise<GrokBuildWorkflowSubagentResult> {
   const type = typeof input.subagent_type === "string" ? input.subagent_type : "general-purpose";
   const definition = discoverGrokBuildAgents(container.vfs).find((candidate) => candidate.name === type);
   if (!definition) throw new Error(`Unknown subagent type: ${type}`);
@@ -594,9 +470,36 @@ async function runAdmittedBrowserSubagent(input: Record<string, unknown>, signal
   });
   if (!latest) latest = session.snapshot();
   subagentSessions.set(subagentId, { type, snapshot: latest, status: "running" });
-  const result = await session.run(String(input.prompt ?? ""), signal);
-  subagentSessions.set(subagentId, { type, snapshot: session.snapshot(), status: "completed" });
-  return result.text || `Subagent ${subagentId} completed.`;
+  const started = performance.now();
+  try {
+    const result = await session.run(String(input.prompt ?? ""), signal);
+    subagentSessions.set(subagentId, { type, snapshot: session.snapshot(), status: "completed" });
+    const usage = session.usage();
+    const output = result.text || `Subagent ${subagentId} completed.`;
+    return {
+      childSessionId: subagentId,
+      success: result.status === "complete",
+      output,
+      ...(result.status === "limit" ? { error: "Subagent reached its maximum turn limit." } : {}),
+      totalTokensUsed: usage.totalTokensUsed,
+      durationMs: Math.max(0, Math.round(performance.now() - started)),
+      ...(usage.incomplete ? { usageIncomplete: true } : {}),
+    };
+  } catch (error) {
+    if (signal.aborted) throw error;
+    subagentSessions.set(subagentId, { type, snapshot: session.snapshot(), status: "completed" });
+    const usage = session.usage();
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      childSessionId: subagentId,
+      success: false,
+      output: message,
+      error: message,
+      totalTokensUsed: usage.totalTokensUsed,
+      durationMs: Math.max(0, Math.round(performance.now() - started)),
+      ...(usage.incomplete ? { usageIncomplete: true } : {}),
+    };
+  }
 }
 
 function subagentToolNames(type: string, capabilityMode?: string): Set<string> {
@@ -723,7 +626,7 @@ async function runAgent(): Promise<void> {
       const assertion = await fetch(`${conformanceOrigin}/__conformance__/assert-model-complete`);
       if (!assertion.ok) throw new Error(await assertion.text());
       const sideCalls = profile.modelRequests - profile.foregroundRequests;
-      eventItem("", "Conformance", `${profile.modelRequests} native model requests matched with zero drift (${profile.foregroundRequests} foreground + ${sideCalls} side calls).`);
+      eventItem("", "Conformance", `${profile.modelRequests} native model requests matched with zero drift (${profile.foregroundRequests} foreground + ${sideCalls} side calls); ${profile.toolResults.length} browser tool outputs matched native output exactly.`);
     }
   } catch (error) {
     const aborted = activeRun.signal.aborted;
@@ -766,106 +669,12 @@ async function resetProject(): Promise<void> {
 runButton.addEventListener("click", () => void runAgent());
 stopButton.addEventListener("click", () => activeRun?.abort());
 resetButton.addEventListener("click", () => void resetProject());
-connectGrokButton.addEventListener("click", () => void startDeviceAuth());
-disconnectGrokButton.addEventListener("click", () => void disconnectGrok());
+connectGrokButton.addEventListener("click", () => void authController.startDeviceAuth());
+disconnectGrokButton.addEventListener("click", () => void authController.disconnect());
 
 server.on("hmr-update", () => {
   hmrEvents += 1;
   hmrCount.textContent = String(hmrEvents);
-});
-
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = "";
-  const chunkSize = 0x8000;
-  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
-  }
-  return btoa(binary);
-}
-
-function sendSandboxResponse(message: unknown): void {
-  preview.contentWindow?.postMessage({
-    channel: SANDBOX_CHANNEL,
-    nonce: sandboxNonce,
-    type: "response",
-    payload: message,
-  } satisfies SandboxEnvelope, sandboxOrigin);
-}
-
-async function handleSandboxRequest(message: unknown): Promise<void> {
-  if (!message || typeof message !== "object") throw new Error("Malformed sandbox service-worker message.");
-  const request = message as {
-    type?: string;
-    id?: number;
-    data?: {
-      port?: number;
-      method?: string;
-      url?: string;
-      headers?: Record<string, string>;
-      body?: ArrayBuffer;
-      streaming?: boolean;
-    };
-  };
-  if (request.type !== "request" || !Number.isSafeInteger(request.id) || request.data?.port !== VIRTUAL_PORT) {
-    throw new Error("Rejected an invalid virtual-server request.");
-  }
-  const { method, url, headers, body, streaming } = request.data;
-  if (!method || !url || !url.startsWith("/") || !headers) throw new Error("Rejected an incomplete virtual-server request.");
-  if (body && body.byteLength > 16 * 1024 * 1024) throw new Error("Virtual-server request body exceeds 16 MiB.");
-
-  const response = await bridge.handleRequest(VIRTUAL_PORT, method, url, headers, body);
-  const responseBody = response.body instanceof Uint8Array ? response.body : new Uint8Array();
-  if (streaming) {
-    sendSandboxResponse({
-      type: "stream-start",
-      id: request.id,
-      data: { statusCode: response.statusCode, statusMessage: response.statusMessage, headers: response.headers },
-    });
-    if (responseBody.length > 0) {
-      sendSandboxResponse({ type: "stream-chunk", id: request.id, data: { chunkBase64: bytesToBase64(responseBody) } });
-    }
-    sendSandboxResponse({ type: "stream-end", id: request.id });
-    return;
-  }
-
-  sendSandboxResponse({
-    type: "response",
-    id: request.id,
-    data: {
-      statusCode: response.statusCode,
-      statusMessage: response.statusMessage,
-      headers: response.headers,
-      bodyBase64: bytesToBase64(responseBody),
-    },
-  });
-}
-
-window.addEventListener("message", (event) => {
-  if (event.source !== preview.contentWindow || event.origin !== sandboxOrigin || !isSandboxEnvelope(event.data, sandboxNonce)) return;
-  const envelope = event.data;
-  if (envelope.type === "request") {
-    void handleSandboxRequest(envelope.payload).catch((error) => {
-      const requestId = (envelope.payload as { id?: number } | undefined)?.id;
-      sendSandboxResponse({ type: "response", id: requestId, error: error instanceof Error ? error.message : String(error) });
-    });
-  } else if (envelope.type === "ready") {
-    resolveSandboxBridge();
-  } else if (envelope.type === "preview-load") {
-    iframeLoadCount += 1;
-    iframeLoads.textContent = String(iframeLoadCount);
-    resolveInitialPreview();
-  } else if (envelope.type === "rendered") {
-    const revision = (envelope.payload as { revision?: string } | undefined)?.revision;
-    renderedRevision.textContent = `Rendered: ${String(revision || "unknown")}`;
-  } else if (envelope.type === "error") {
-    const message = (envelope.payload as { message?: string } | undefined)?.message || "Sandbox bridge failed.";
-    const error = new Error(message);
-    rejectSandboxBridge(error);
-    rejectInitialPreview(error);
-    runtimeStatus.textContent = "Browser sandbox failed";
-    runtimeDot.classList.add("failed");
-    eventItem("error", "Runtime failed", message);
-  }
 });
 
 async function start(): Promise<void> {
@@ -935,8 +744,8 @@ async function start(): Promise<void> {
     // Do not let the agent mutate files until the cross-origin bridge and the
     // starter application have both loaded. This makes the first edit a real
     // HMR update instead of racing the initial navigation on a cold browser.
-    await sandboxBridgeReady;
-    await initialPreviewReady;
+    await sandboxBridge.ready;
+    await sandboxBridge.initialPreviewReady;
 
     runtimeStatus.textContent = "Browser sandbox ready";
     runtimeDot.classList.add("ready");
@@ -956,5 +765,5 @@ async function start(): Promise<void> {
   }
 }
 
-void refreshAuthStatus();
+void authController.refreshStatus();
 void start();

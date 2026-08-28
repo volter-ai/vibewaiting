@@ -27,7 +27,7 @@ export class GrokBuildFileSystemTools {
     if (content === "") return { output: "File is empty." };
 
     const skillMarkdown = isSkillMarkdown(path);
-    const requestedOffset = input.offset === undefined ? undefined : integer(input.offset, 1);
+    const requestedOffset = input.offset === undefined || input.offset === null ? undefined : lenientSignedInteger(input.offset);
     const offset = skillMarkdown ? undefined : requestedOffset;
     const limit = skillMarkdown ? Number.MAX_SAFE_INTEGER : Math.min(
       input.limit === undefined ? Number.MAX_SAFE_INTEGER : Math.max(0, integer(input.limit, 0)),
@@ -35,14 +35,14 @@ export class GrokBuildFileSystemTools {
     );
     const startLine = resolveReadStartLine(content, offset);
     const totalLines = occurrences(content, "\n") + 1;
-    const selected = grokReadLines(content, startLine, limit);
-    if (selected === "") {
+    const selected = grokReadWindow(content, startLine, limit);
+    if (selected.output === "") {
       if (requestedOffset !== undefined && requestedOffset >= 0 && requestedOffset > totalLines) {
         return { output: `(no lines returned: the requested window is past the end of the file; the file has ${totalLines} lines)` };
       }
       return { output: "(no lines returned)" };
     }
-    const tokenCount = new TextEncoder().encode(selected).byteLength >> 2;
+    const tokenCount = new TextEncoder().encode(selected.output).byteLength >> 2;
     if (!skillMarkdown && tokenCount > 25_000) {
       const rangeSpecified = input.offset !== undefined || input.limit !== undefined;
       const singleLineHint = grokRawReadLineCount(content, startLine, limit) <= 1
@@ -53,7 +53,7 @@ export class GrokBuildFileSystemTools {
       }
       return { output: `File content (${tokenCount} tokens) exceeds maximum allowed tokens (25000 tokens).\nPlease use offset and limit parameters to read a shorter range, or use the 'grep' to search for specific content.${singleLineHint}` };
     }
-    return { output: selected };
+    return { output: selected.output, ...(selected.images.length > 0 ? { images: selected.images } : {}) };
   }
 
   searchReplace(input: FileToolInput): string {
@@ -176,10 +176,13 @@ export class GrokBuildFileSystemTools {
 
   write(input: FileToolInput): string {
     const path = this.resolve(requiredString(input.file_path, "file_path"));
+    const existed = this.vfs.existsSync(path);
     const parent = path.slice(0, path.lastIndexOf("/")) || "/";
     this.vfs.mkdirSync(parent, { recursive: true });
     this.vfs.writeFileSync(path, requiredString(input.content, "content", true));
-    return `Wrote ${path}`;
+    return existed
+      ? `Wrote file successfully to ${path}.`
+      : `The file ${path} has been created.`;
   }
 
   private *files(path: string): Generator<string> {
@@ -200,6 +203,7 @@ const MAX_DOCUMENT_BYTES = 50 * 1024 * 1024;
 const MAX_IMAGE_RAW_BYTES = 768 * 1024 * 3 / 4;
 const MAX_IMAGE_PIXELS = 1_048_576;
 const MAX_IMAGE_DIMENSION = 2_000;
+const MAX_IMAGE_DECODE_PIXELS = 178_956_970;
 
 async function readImage(path: string, bytes: Uint8Array, mime: string): Promise<GrokBuildFileReadResult> {
   try {
@@ -219,29 +223,133 @@ async function readImage(path: string, bytes: Uint8Array, mime: string): Promise
 
 async function prepareImage(bytes: Uint8Array, mime: string): Promise<{ bytes: Uint8Array; mime: string }> {
   const endpointNative = mime === "image/png" || mime === "image/jpeg" || mime === "image/webp";
-  if (endpointNative && bytes.byteLength <= MAX_IMAGE_RAW_BYTES) return { bytes, mime };
+  const dimensions = imageDimensions(bytes, mime);
+  const withinPixelBudget = !dimensions || (
+    dimensions.width <= MAX_IMAGE_DIMENSION
+    && dimensions.height <= MAX_IMAGE_DIMENSION
+    && dimensions.width * dimensions.height <= MAX_IMAGE_PIXELS
+  );
+  // Native only passes through complete endpoint containers. In particular,
+  // PNG CRCs and a top-level JPEG EOI are checked before the small-byte fast path.
+  if (endpointNative && bytes.byteLength <= MAX_IMAGE_RAW_BYTES && withinPixelBudget && imageStructurallyComplete(bytes, mime)) {
+    return { bytes, mime };
+  }
+  if (dimensions && dimensions.width * dimensions.height > MAX_IMAGE_DECODE_PIXELS) {
+    throw new Error(`image dimensions ${dimensions.width}x${dimensions.height} exceed the ${MAX_IMAGE_DECODE_PIXELS} pixel decode limit`);
+  }
   if (typeof createImageBitmap !== "function") {
     throw new Error("image requires browser canvas transcoding but the canvas decoder is unavailable");
   }
   const bitmap = await createImageBitmap(new Blob([bytes.slice().buffer as ArrayBuffer], { type: mime }));
   try {
-    const scale = Math.min(
-      1,
-      MAX_IMAGE_DIMENSION / Math.max(bitmap.width, bitmap.height),
-      Math.sqrt(MAX_IMAGE_PIXELS / Math.max(1, bitmap.width * bitmap.height)),
-    );
-    let width = Math.max(1, Math.floor(bitmap.width * scale));
-    let height = Math.max(1, Math.floor(bitmap.height * scale));
-    for (const quality of [0.85, 0.7, 0.5, 0.4]) {
-      const rendered = await renderBitmap(bitmap, width, height, "image/jpeg", quality);
-      if (rendered.byteLength <= MAX_IMAGE_RAW_BYTES) return { bytes: rendered, mime: "image/jpeg" };
-      width = Math.max(128, Math.floor(width * 0.8));
-      height = Math.max(128, Math.floor(height * 0.8));
+    const long = Math.max(bitmap.width, bitmap.height);
+    const short = Math.min(bitmap.width, bitmap.height);
+    let maxSide = Math.min(MAX_IMAGE_DIMENSION, long);
+    if (bitmap.width * bitmap.height > MAX_IMAGE_PIXELS) {
+      maxSide = Math.min(maxSide, areaCappedImageSide(long, short, MAX_IMAGE_PIXELS));
+    }
+    for (;;) {
+      const scale = Math.min(1, maxSide / Math.max(1, long));
+      const width = Math.max(1, Math.round(bitmap.width * scale));
+      const height = Math.max(1, Math.round(bitmap.height * scale));
+      const png = await renderBitmap(bitmap, width, height, "image/png", 1);
+      const pngCandidate = png.byteLength <= MAX_IMAGE_RAW_BYTES ? png : undefined;
+      let jpegCandidate: Uint8Array | undefined;
+      for (const quality of [0.85, 0.7, 0.5, 0.4]) {
+        const jpeg = await renderBitmap(bitmap, width, height, "image/jpeg", quality);
+        if (jpeg.byteLength <= MAX_IMAGE_RAW_BYTES) { jpegCandidate = jpeg; break; }
+      }
+      if (pngCandidate && jpegCandidate) {
+        return pngCandidate.byteLength <= jpegCandidate.byteLength
+          ? { bytes: pngCandidate, mime: "image/png" }
+          : { bytes: jpegCandidate, mime: "image/jpeg" };
+      }
+      if (pngCandidate) return { bytes: pngCandidate, mime: "image/png" };
+      if (jpegCandidate) return { bytes: jpegCandidate, mime: "image/jpeg" };
+      if (maxSide <= 128) break;
+      maxSide = Math.floor(maxSide * 3 / 4);
     }
     throw new Error(`compressed image still exceeds the ${768 * 1024}-byte conversation payload cap`);
   } finally {
     bitmap.close();
   }
+}
+
+function areaCappedImageSide(long: number, short: number, maxPixels: number): number {
+  let side = Math.max(1, Math.min(long, Math.floor(long * Math.sqrt(maxPixels / Math.max(1, long * short)))));
+  while (side > 1 && Math.max(1, Math.round(long * side / long)) * Math.max(1, Math.round(short * side / long)) > maxPixels) side -= 1;
+  return side;
+}
+
+function imageStructurallyComplete(bytes: Uint8Array, mime: string): boolean {
+  if (mime === "image/png") return pngStructurallyValid(bytes);
+  if (mime === "image/jpeg") return jpegReachesEoi(bytes);
+  if (mime === "image/webp") {
+    if (bytes.length < 12 || decodeAscii(bytes.slice(0, 4)) !== "RIFF" || decodeAscii(bytes.slice(8, 12)) !== "WEBP") return false;
+    const riffSize = u32(bytes, 4);
+    return riffSize <= Number.MAX_SAFE_INTEGER - 8 && riffSize + 8 <= bytes.length;
+  }
+  return false;
+}
+
+function pngStructurallyValid(bytes: Uint8Array): boolean {
+  if (!starts(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return false;
+  let offset = 8;
+  while (offset + 12 <= bytes.length) {
+    const length = u32be(bytes, offset);
+    const dataStart = offset + 8;
+    const dataEnd = dataStart + length;
+    const end = dataEnd + 4;
+    if (!Number.isSafeInteger(end) || end > bytes.length) return false;
+    const expected = u32be(bytes, dataEnd);
+    if (crc32(bytes.subarray(offset + 4, dataEnd)) !== expected) return false;
+    if (decodeAscii(bytes.slice(offset + 4, offset + 8)) === "IEND") return true;
+    offset = end;
+  }
+  return false;
+}
+
+function jpegReachesEoi(bytes: Uint8Array): boolean {
+  if (bytes.length < 2 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return false;
+  let offset = 2;
+  for (;;) {
+    while (offset < bytes.length && bytes[offset] !== 0xff) offset += 1;
+    while (offset < bytes.length && bytes[offset] === 0xff) offset += 1;
+    if (offset >= bytes.length) return false;
+    const marker = bytes[offset++]!;
+    if (marker === 0x00) continue;
+    if (marker === 0xd9) return true;
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+    const next = skipJpegSegment(bytes, offset);
+    if (next === undefined) return false;
+    offset = next;
+    if (marker !== 0xda) continue;
+    for (;;) {
+      while (offset < bytes.length && bytes[offset] !== 0xff) offset += 1;
+      if (offset + 1 >= bytes.length) return false;
+      const following = bytes[offset + 1]!;
+      if (following === 0x00) offset += 2;
+      else if (following === 0xff) offset += 1;
+      else if (following >= 0xd0 && following <= 0xd7) offset += 2;
+      else break;
+    }
+  }
+}
+
+function skipJpegSegment(bytes: Uint8Array, offset: number): number | undefined {
+  if (offset + 2 > bytes.length) return undefined;
+  const length = ((bytes[offset] ?? 0) << 8) | (bytes[offset + 1] ?? 0);
+  if (length < 2 || offset + length > bytes.length) return undefined;
+  return offset + length;
+}
+
+function crc32(bytes: Uint8Array): number {
+  let crc = 0xffff_ffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb8_8320 : 0);
+  }
+  return (crc ^ 0xffff_ffff) >>> 0;
 }
 
 async function renderBitmap(bitmap: ImageBitmap, width: number, height: number, mime: string, quality: number): Promise<Uint8Array> {
@@ -277,9 +385,10 @@ async function readPdf(path: string, bytes: Uint8Array, input: FileToolInput): P
       ? new URL("../../../node_modules/pdfjs-dist/legacy/build/pdf.worker.min.mjs", import.meta.url).href
       : pdfWorkerUrl;
     const documentHandle = await pdfjs.getDocument({ data: bytes.slice(), useSystemFonts: true }).promise;
+    if (documentHandle.numPages === 0) return { output: "PDF has no pages" };
     let pageIndices: number[];
     try {
-      pageIndices = parsePdfPages(typeof input.pages === "string" ? input.pages : undefined, documentHandle.numPages);
+      pageIndices = parseGrokPdfPages(typeof input.pages === "string" ? input.pages : undefined, documentHandle.numPages);
     } catch (error) {
       return { output: error instanceof Error ? error.message : String(error) };
     }
@@ -312,9 +421,9 @@ async function readPdf(path: string, bytes: Uint8Array, input: FileToolInput): P
   }
 }
 
-function parsePdfPages(spec: string | undefined, pageCount: number): number[] {
-  if (pageCount === 0) throw new Error("PDF has no pages");
-  if (!spec) {
+/** Source-ported Grok Build PDF page-range parser, exported for corpus-style edge tests. */
+export function parseGrokPdfPages(spec: string | undefined, pageCount: number): number[] {
+  if (spec === undefined) {
     if (pageCount > 10) {
       throw new Error(`PDF has ${pageCount} pages which exceeds the 10 page auto-read limit. Use the \`pages\` parameter to specify which pages to read (e.g. pages="1-5"). Maximum 20 pages per call.`);
     }
@@ -324,8 +433,10 @@ function parsePdfPages(spec: string | undefined, pageCount: number): number[] {
   for (const rawPart of spec.split(",")) {
     const part = rawPart.trim();
     if (!part) continue;
-    if (part.includes("-")) {
-      const [rawStart = "", rawEnd = ""] = part.split("-", 2);
+    const dash = part.indexOf("-");
+    if (dash >= 0) {
+      const rawStart = part.slice(0, dash);
+      const rawEnd = part.slice(dash + 1);
       const start = pdfPageNumber(rawStart.trim());
       const end = rawEnd.trim() ? pdfPageNumber(rawEnd.trim()) : pageCount;
       if (start < 1 || start > pageCount) throw new Error(`page ${start} out of range (document has ${pageCount} pages)`);
@@ -428,14 +539,35 @@ function numberEveryDocumentLine(content: string): string {
   return content.split("\n").map((line, index) => `${index + 1}→${line}`).join("\n");
 }
 
-function imageMime(path: string, bytes: Uint8Array): string | undefined {
-  if (starts(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return "image/png";
+function imageMime(_path: string, bytes: Uint8Array): string | undefined {
   if (starts(bytes, [0xff, 0xd8, 0xff])) return "image/jpeg";
-  if (decodeAscii(bytes.slice(0, 6)) === "GIF87a" || decodeAscii(bytes.slice(0, 6)) === "GIF89a") return "image/gif";
-  if (decodeAscii(bytes.slice(0, 4)) === "RIFF" && decodeAscii(bytes.slice(8, 12)) === "WEBP") return "image/webp";
+  if (starts(bytes, [0x00, 0x00, 0x00, 0x0c, 0x6a, 0x50, 0x20, 0x20, 0x0d, 0x0a, 0x87, 0x0a, 0x00])) return "image/jp2";
+  if (starts(bytes, [0x89, 0x50, 0x4e, 0x47])) return "image/png";
+  if (starts(bytes, [0x47, 0x49, 0x46])) return "image/gif";
+  if (decodeAscii(bytes.slice(8, 12)) === "WEBP") return "image/webp";
+  const tiff = starts(bytes, [0x49, 0x49, 0x2a, 0x00]) || starts(bytes, [0x4d, 0x4d, 0x00, 0x2a]);
+  if (tiff && bytes.length > 10 && bytes[8] === 0x43 && bytes[9] === 0x52 && bytes[10] === 0x02) return "image/x-canon-cr2";
+  if (tiff && bytes.length > 9 && !(bytes[8] === 0x43 && bytes[9] === 0x52)) return "image/tiff";
   if (starts(bytes, [0x42, 0x4d])) return "image/bmp";
-  const extension = path.split(".").pop()?.toLowerCase();
-  return ({ png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif", bmp: "image/bmp", tif: "image/tiff", tiff: "image/tiff", svg: "image/svg+xml" } as Record<string, string>)[extension ?? ""];
+  if (starts(bytes, [0x49, 0x49, 0xbc])) return "image/vnd.ms-photo";
+  if (starts(bytes, [0x38, 0x42, 0x50, 0x53])) return "image/vnd.adobe.photoshop";
+  if (starts(bytes, [0x00, 0x00, 0x01, 0x00])) return "image/vnd.microsoft.icon";
+  if ((bytes.length > 2 && starts(bytes, [0xff, 0x0a])) || (bytes.length > 12 && starts(bytes, [0x00, 0x00, 0x00, 0x0c, 0x4a, 0x58, 0x4c, 0x20, 0x0d, 0x0a, 0x87, 0x0a]))) return "image/jxl";
+  const brands = isoBmffBrands(bytes);
+  if (brands && (brands.major === "heic" || brands.major === "heix" || ((brands.major === "mif1" || brands.major === "msf1") && brands.compatible.includes("heic")))) return "image/heif";
+  if (brands && (brands.major === "avif" || brands.major === "avis" || brands.compatible.some((brand) => brand === "avif" || brand === "avis"))) return "image/avif";
+  if (bytes.length > 57 && starts(bytes, [0x50, 0x4b, 0x03, 0x04]) && decodeAscii(bytes.slice(30, 54)) === "mimetypeimage/openraster") return "image/openraster";
+  if (bytes.length > 14 && decodeAscii(bytes.slice(0, 8)) === "AT&TFORM" && decodeAscii(bytes.slice(12, 15)) === "DJV") return "image/vnd.djvu";
+  return undefined;
+}
+
+function isoBmffBrands(bytes: Uint8Array): { major: string; compatible: string[] } | undefined {
+  if (bytes.length < 16 || decodeAscii(bytes.slice(4, 8)) !== "ftyp") return undefined;
+  const length = u32be(bytes, 0);
+  if (length < 16 || length > bytes.length) return undefined;
+  const compatible: string[] = [];
+  for (let offset = 16; offset + 4 <= length; offset += 4) compatible.push(decodeAscii(bytes.slice(offset, offset + 4)));
+  return { major: decodeAscii(bytes.slice(8, 12)), compatible };
 }
 
 function imageDimensions(bytes: Uint8Array, mime: string): { width: number; height: number } | undefined {
@@ -463,8 +595,12 @@ function isPdf(path: string, bytes: Uint8Array): boolean {
 
 function isBinary(path: string, bytes: Uint8Array): boolean {
   const extension = path.split(".").pop()?.toLowerCase() ?? "";
-  if (["zip", "gz", "tar", "exe", "dll", "so", "wasm", "mp3", "mp4", "mov", "avi"].includes(extension)) return true;
-  return bytes.slice(0, Math.min(bytes.length, 8_192)).includes(0);
+  if (["7z", "a", "avi", "avif", "bin", "bmp", "class", "dat", "dll", "doc", "docx", "dylib", "exe", "gif", "gz", "ico", "jar", "jpeg", "jpg", "lib", "mov", "mp3", "mp4", "o", "obj", "odp", "ods", "odt", "png", "ppt", "pyc", "pyd", "pyo", "qoi", "rar", "so", "tar", "tif", "tiff", "war", "wasm", "webp", "xls", "xlsx", "zip"].includes(extension)) return true;
+  const sample = bytes.slice(0, Math.min(bytes.length, 8_192));
+  if (sample.includes(0)) return true;
+  let nonPrintable = 0;
+  for (const byte of sample) if (byte < 9 || (byte >= 14 && byte <= 31)) nonPrintable += 1;
+  return sample.length > 0 && nonPrintable / sample.length > 0.3;
 }
 
 function bytesOf(value: Uint8Array | string): Uint8Array {
@@ -499,11 +635,136 @@ function resolveReadStartLine(content: string, offset: number | undefined): numb
   return Math.max(1, totalFields + raw + 1);
 }
 
-function grokReadLines(content: string, startLine: number, limit: number): string {
-  return lineFields(content).slice(startLine - 1, startLine - 1 + limit).map((line, index) => {
+function grokReadWindow(content: string, startLine: number, limit: number): { output: string; images: string[] } {
+  const images: string[] = [];
+  const output = lineFields(content).slice(startLine - 1, startLine - 1 + limit).map((line, index) => {
+    // Native read_file scans each visible line independently. Consequently the
+    // five-image safety cap also resets per line; preserve that observable edge.
+    const extracted = extractInlineAttachments(line);
+    images.push(...extracted.images.map(({ mime, payload }) => `data:${mime};base64,${payload}`));
     const lineNumber = startLine + index;
-    return index === 0 || lineNumber % 10 === 0 ? `${lineNumber}→${line}` : line;
+    return index === 0 || lineNumber % 10 === 0 ? `${lineNumber}→${extracted.text}` : extracted.text;
   }).join("\n");
+  return { output, images };
+}
+
+const INLINE_IMAGE_MIN_PAYLOAD = 1_024;
+const INLINE_IMAGE_MAX_PAYLOAD = 10 * 1_024 * 1_024;
+const INLINE_GROSS_PAYLOAD_CAP = INLINE_IMAGE_MAX_PAYLOAD * 2;
+const INLINE_MAX_IMAGES = 5;
+
+interface InlinePrefix {
+  start: number;
+  end: number;
+  kind: "image" | "pdf";
+  mime: string;
+}
+
+/** Browser translation of util/base64_images.rs, including its replacement text. */
+function extractInlineAttachments(text: string): { text: string; images: Array<{ mime: string; payload: string }> } {
+  const pdfStripped = stripInlinePdfUris(text);
+  const input = pdfStripped.modified ? pdfStripped.text : text;
+  if (!input.includes("data:image")) return { text: input, images: [] };
+  const prefixes = inlinePrefixes(input);
+  const imagePrefixes = prefixes.filter((prefix) => prefix.kind === "image");
+  if (imagePrefixes.length === 0) return { text: input, images: [] };
+  const images: Array<{ mime: string; payload: string }> = [];
+  let result = "";
+  let lastEnd = 0;
+  for (const prefix of imagePrefixes) {
+    const nextStart = prefixes.find((candidate) => candidate.start > prefix.start)?.start ?? input.length;
+    const payloadEnd = inlinePayloadEnd(input, prefix.end, nextStart);
+    const span = input.slice(prefix.end, payloadEnd);
+    if (span.length > INLINE_GROSS_PAYLOAD_CAP) {
+      result += `${input.slice(lastEnd, prefix.start)}[large image removed]`;
+      lastEnd = payloadEnd;
+      continue;
+    }
+    const cleaned = span.replace(/[\t\n\r\f ]/gu, "");
+    const payloadLength = cleaned.length - (cleaned.length % 4);
+    if (payloadLength < INLINE_IMAGE_MIN_PAYLOAD) continue;
+    result += input.slice(lastEnd, prefix.start);
+    if (payloadLength > INLINE_IMAGE_MAX_PAYLOAD) result += "[large image removed]";
+    else if (images.length >= INLINE_MAX_IMAGES) result += "[additional image omitted]";
+    else {
+      images.push({ mime: prefix.mime, payload: cleaned.slice(0, payloadLength) });
+      result += "[image content will be provided separately]";
+    }
+    lastEnd = payloadEnd;
+  }
+  if (lastEnd === 0) return { text: input, images: [] };
+  return { text: result + input.slice(lastEnd), images };
+}
+
+function stripInlinePdfUris(text: string): { text: string; modified: boolean } {
+  if (!text.toLowerCase().includes("data:application/pdf")) return { text, modified: false };
+  const prefixes = inlinePrefixes(text);
+  const pdfPrefixes = prefixes.filter((prefix) => prefix.kind === "pdf");
+  if (pdfPrefixes.length === 0) return { text, modified: false };
+  let result = "";
+  let lastEnd = 0;
+  for (const prefix of pdfPrefixes) {
+    const nextStart = prefixes.find((candidate) => candidate.start > prefix.start)?.start ?? text.length;
+    const payloadEnd = inlinePayloadEnd(text, prefix.end, nextStart);
+    const span = text.slice(prefix.end, payloadEnd);
+    const payloadLength = span.length > INLINE_GROSS_PAYLOAD_CAP ? span.length : span.replace(/[\t\n\r\f ]/gu, "").length;
+    result += `${text.slice(lastEnd, prefix.start)}[PDF attachment removed — ${Math.floor(payloadLength * 3 / 4 / 1_024)} KB]`;
+    lastEnd = payloadEnd;
+  }
+  return { text: result + text.slice(lastEnd), modified: true };
+}
+
+function inlinePrefixes(text: string): InlinePrefix[] {
+  const prefixes: InlinePrefix[] = [];
+  const patterns: Array<{ kind: InlinePrefix["kind"]; regex: RegExp }> = [
+    { kind: "image", regex: /(^|[^a-zA-Z0-9])(data:(image\/(?:png|jpeg|gif|webp|bmp|tiff))(?:;[^\s,;]{1,120})*;base64,)/giu },
+    { kind: "pdf", regex: /(^|[^a-zA-Z0-9])(data:(application\/pdf)(?:;[^\s,;]{1,120})*;base64,)/giu },
+  ];
+  for (const { kind, regex } of patterns) {
+    for (const match of text.matchAll(regex)) {
+      const leading = match[1] ?? "";
+      const prefix = match[2] ?? "";
+      const start = (match.index ?? 0) + leading.length;
+      prefixes.push({ start, end: start + prefix.length, kind, mime: match[3] ?? "" });
+    }
+  }
+  return prefixes.sort((left, right) => left.start - right.start);
+}
+
+function inlinePayloadEnd(text: string, start: number, endCap: number): number {
+  let index = start;
+  const isBase64 = (value: string | undefined): boolean => value !== undefined && /[a-zA-Z0-9+/=]/u.test(value);
+  while (index < endCap && isBase64(text[index])) index += 1;
+  if (index > start && text[index - 1] === "=") return index;
+  for (;;) {
+    let next = index;
+    if (next < endCap && text[next] === "\r") next += 1;
+    if (next >= endCap || text[next] !== "\n") break;
+    next += 1;
+    while (next < endCap && (text[next] === " " || text[next] === "\t")) next += 1;
+    const chunkStart = next;
+    while (next < endCap && isBase64(text[next])) next += 1;
+    if (next === chunkStart) break;
+    index = next;
+    if (text[next - 1] === "=") break;
+  }
+  return index;
+}
+
+function lenientSignedInteger(value: unknown): number {
+  if (typeof value !== "number" && typeof value !== "string") {
+    throw new Error(`expected number, got ${JSON.stringify(value)}`);
+  }
+  if (typeof value === "string" && value.length === 0) throw new Error('expected number, got string ""');
+  const number = typeof value === "number" ? value : Number(value);
+  if (Number.isNaN(number)) throw new Error(`expected number, got string "${value}"`);
+  if (!Number.isFinite(number)) throw new Error("expected finite number");
+  if (!Number.isInteger(number)) throw new Error(`expected whole number, got ${number}`);
+  const exactLimit = 9_007_199_254_740_992;
+  if (Math.abs(number) > exactLimit) {
+    throw new Error(`number ${number} exceeds f64 integer precision (whole floats above ${exactLimit} may be inaccurate)`);
+  }
+  return number;
 }
 
 function grokRawReadLineCount(content: string, startLine: number, limit: number): number {

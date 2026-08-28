@@ -8,6 +8,7 @@ import {
   type McpJsonObject,
   type McpToolDescription,
 } from "./grok-build-mcp-protocol.js";
+import { searchMcpDocuments } from "./grok-build-mcp-search.js";
 
 const MAX_MCP_DESCRIPTION_LENGTH = 2_048;
 const DESCRIPTION_TRUNCATION_SUFFIX = "… [truncated]";
@@ -48,10 +49,7 @@ interface ServerState {
   error: string | undefined;
   tools: IndexedTool[];
   pending: Promise<void> | undefined;
-}
-
-interface RankedTool extends IndexedTool {
-  score: number;
+  notificationRefresh: Promise<void> | undefined;
 }
 
 /** Browser-native MCP catalog used by Grok Build's search_tool/use_tool pair. */
@@ -70,15 +68,26 @@ export class GrokBuildMcpRegistry {
     }
     for (const config of configs) {
       if (this.servers.has(config.name)) throw new Error(`Duplicate MCP server name '${config.name}'.`);
-      this.servers.set(config.name, {
+      const client = new GrokBuildMcpHttpClient(config);
+      const state: ServerState = {
         config,
-        client: new GrokBuildMcpHttpClient(config),
+        client,
         status: "idle",
         instructions: undefined,
         error: undefined,
         tools: [],
         pending: undefined,
+        notificationRefresh: undefined,
+      };
+      client.onNotification((method) => {
+        if (method !== "notifications/tools/list_changed" || state.status !== "ready" || state.notificationRefresh) return;
+        const controller = new AbortController();
+        state.notificationRefresh = this.reloadTools(state, controller.signal).finally(() => {
+          state.notificationRefresh = undefined;
+        });
+        return state.notificationRefresh;
       });
+      this.servers.set(config.name, state);
     }
   }
 
@@ -121,7 +130,7 @@ export class GrokBuildMcpRegistry {
   formatSearch(query: string, limit = 5): string {
     validateSearchInput(query, limit);
     const tools = [...this.servers.values()].flatMap((state) => state.tools);
-    const ranked = searchIndex(tools, query, limit);
+    const ranked = searchMcpDocuments(tools, query, limit);
     const groups: Array<{ server: string; score: number; tools: Array<Record<string, unknown>> }> = [];
     for (const tool of ranked) {
       const rendered = {
@@ -198,8 +207,7 @@ export class GrokBuildMcpRegistry {
       try {
         const initialized = await state.client.initialize(signal);
         state.instructions = initialized.instructions;
-        const listed = await state.client.listTools(signal);
-        state.tools = listed.flatMap((tool) => indexTool(state, tool));
+        await this.reloadTools(state, signal);
         state.status = "ready";
       } catch (error) {
         state.status = "failed";
@@ -211,6 +219,11 @@ export class GrokBuildMcpRegistry {
       }
     })();
     return state.pending;
+  }
+
+  private async reloadTools(state: ServerState, signal: AbortSignal): Promise<void> {
+    const listed = await state.client.listTools(signal);
+    state.tools = listed.flatMap((tool) => indexTool(state, tool));
   }
 }
 
@@ -246,58 +259,6 @@ function indexTool(state: ServerState, tool: McpToolDescription): IndexedTool[] 
     client: state.client,
     exposeImageBase64: state.config.exposeImageBase64 ?? false,
   }];
-}
-
-function searchIndex(tools: IndexedTool[], query: string, limit: number): RankedTool[] {
-  if (tools.length === 0 || limit === 0) return [];
-  const queryLower = query.trim().toLowerCase();
-  const exact = tools.find((tool) => tool.qualifiedName.toLowerCase() === queryLower || tool.toolName.toLowerCase() === queryLower);
-  if (exact) return [{ ...exact, score: 1 }];
-
-  const documents = tools.map((tool) => tokenize(`${tool.serverName} ${tool.toolName} ${tool.description} ${tool.parameters.join(" ")} ${splitIdentifier(tool.serverName).join(" ")} ${splitIdentifier(tool.toolName).join(" ")} ${tool.parameters.flatMap(splitIdentifier).join(" ")}`));
-  const queryTerms = tokenize(normalizeQuery(query));
-  if (queryTerms.length === 0) return [];
-  const averageLength = documents.reduce((sum, document) => sum + document.length, 0) / documents.length || 1;
-  const documentFrequency = new Map<string, number>();
-  for (const term of new Set(queryTerms)) {
-    documentFrequency.set(term, documents.reduce((count, document) => count + (document.includes(term) ? 1 : 0), 0));
-  }
-  return tools.map((tool, index) => ({
-    ...tool,
-    score: bm25Score(documents[index] ?? [], queryTerms, documentFrequency, documents.length, averageLength),
-  })).filter((tool) => tool.score > 0)
-    .sort((left, right) => right.score - left.score)
-    .slice(0, limit);
-}
-
-function bm25Score(document: string[], query: string[], dfs: Map<string, number>, count: number, averageLength: number): number {
-  const frequency = new Map<string, number>();
-  for (const term of document) frequency.set(term, (frequency.get(term) ?? 0) + 1);
-  let score = 0;
-  for (const term of new Set(query)) {
-    const tf = frequency.get(term) ?? 0;
-    if (tf === 0) continue;
-    const df = dfs.get(term) ?? 0;
-    const idf = Math.log(1 + (count - df + 0.5) / (df + 0.5));
-    const denominator = tf + 1.2 * (1 - 0.75 + 0.75 * document.length / averageLength);
-    score += idf * tf * 2.2 / denominator;
-  }
-  return Math.fround(score);
-}
-
-function normalizeQuery(query: string): string {
-  const needsSplit = query.includes("__") || query.includes("_") || query.includes("-") || /[a-z][A-Z]/u.test(query);
-  if (!needsSplit) return query;
-  const extra = query.split(/\s+/u).flatMap(splitIdentifier);
-  return extra.length ? `${query} ${extra.join(" ")}` : query;
-}
-
-function splitIdentifier(value: string): string[] {
-  return value.split(/__|_|-/u).flatMap((part) => part.split(/(?<=[a-z])(?=[A-Z])/u)).filter(Boolean);
-}
-
-function tokenize(value: string): string[] {
-  return value.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
 }
 
 function parseQualifiedName(name: string): { server: string; tool: string } | undefined {

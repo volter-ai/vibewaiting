@@ -176,6 +176,21 @@ export class GrokBuildJournalRhaiEngine implements GrokBuildWorkflowEngine {
           return { __xai_workflow_host_error: error instanceof Error ? error.message : String(error) };
         }
       }));
+      // Native reservations are released and the entire live parallel panel is
+      // left unjournaled for resumable terminal outcomes. That lets resume run
+      // every member again without charging logical budget for cancelled work.
+      const terminal = values.find((value) => value && typeof value === "object" && "__xai_workflow_parallel_terminal" in value) as
+        | { __xai_workflow_parallel_terminal?: unknown }
+        | undefined;
+      const terminalKind = terminal?.__xai_workflow_parallel_terminal;
+      if (options.signal.aborted || terminalKind === "cancelled") {
+        spent -= agentCalls;
+        return { status: "cancelled" };
+      }
+      if (terminalKind === "budget_exceeded") {
+        spent -= agentCalls;
+        return { status: "budget_exceeded", message: "workflow agent budget exceeded" };
+      }
       for (let index = 0; index < step.requests.length; index += 1) {
         const request = step.requests[index]!;
         journal.push({ seq: request.seq, kind: request.kind, requestHash: request.requestHash, value: values[index] });

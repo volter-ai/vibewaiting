@@ -1,10 +1,50 @@
 import { describe, expect, it, vi } from "vitest";
 import { VirtualFS } from "almostnode";
 import { GrokBuildBrowserRuntime } from "../experiments/browser-agent/src/grok-build-runtime.js";
+import { parseGrokPdfPages } from "../experiments/browser-agent/src/grok-build-filesystem.js";
 
 const signal = new AbortController().signal;
 
 describe("Grok Build rich browser file reads", () => {
+  it("accepts native lenient signed offsets and extracts inline data-URI attachments", async () => {
+    const vfs = new VirtualFS();
+    const payload = "A".repeat(1_024);
+    vfs.writeFileSync("/notes.txt", `first\nsecond\nimage data:image/png;charset=utf-8;BASE64,${payload} tail\nlast\n`);
+    const runtime = new GrokBuildBrowserRuntime({ vfs, async run() { return { stdout: "", stderr: "", exitCode: 0 }; } });
+
+    const result = await runtime.execute({
+      callId: "inline-image",
+      name: "read_file",
+      arguments: JSON.stringify({ target_file: "/notes.txt", offset: "-3", limit: 1 }),
+    }, signal);
+    expect(result.output).toBe("3→image [image content will be provided separately] tail");
+    expect(result.images).toEqual([`data:image/png;base64,${payload}`]);
+  });
+
+  it("keeps small and word-internal data URIs but strips PDF attachments", async () => {
+    const vfs = new VirtualFS();
+    const pdfPayload = "A".repeat(2_000);
+    vfs.writeFileSync("/uris.txt", `metadata:image/png;base64,${"A".repeat(2_000)}\ndata:image/gif;base64,${"A".repeat(100)}\ndata:application/pdf;base64,${pdfPayload}`);
+    const runtime = new GrokBuildBrowserRuntime({ vfs, async run() { return { stdout: "", stderr: "", exitCode: 0 }; } });
+
+    const result = await runtime.execute({ callId: "uris", name: "read_file", arguments: '{"target_file":"/uris.txt"}' }, signal);
+    expect(result.output).toContain("1→metadata:image/png;base64,");
+    expect(result.output).toContain("data:image/gif;base64,");
+    expect(result.output).toContain("[PDF attachment removed — 1 KB]");
+    expect(result.images).toBeUndefined();
+  });
+
+  it("matches native PDF page-range parsing edge cases", () => {
+    expect(parseGrokPdfPages("1,3,7-9", 10)).toEqual([0, 2, 6, 7, 8]);
+    expect(parseGrokPdfPages("5,3,1,3,5", 10)).toEqual([0, 2, 4]);
+    expect(parseGrokPdfPages("1-100", 5)).toEqual([0, 1, 2, 3, 4]);
+    expect(() => parseGrokPdfPages("1-2-3", 10)).toThrow("invalid page number: '2-3'");
+    expect(() => parseGrokPdfPages("1-21", 30)).toThrow("requested 21 pages, maximum is 20 per call");
+    expect(() => parseGrokPdfPages("", 10)).toThrow("no pages specified");
+    expect(() => parseGrokPdfPages(",,,", 10)).toThrow("no pages specified");
+    expect(() => parseGrokPdfPages("1", 0)).toThrow("page 1 out of range (document has 0 pages)");
+  });
+
   it("attaches native-shaped image function output instead of treating bytes as text", async () => {
     const vfs = new VirtualFS();
     vfs.writeFileSync("/frame.png", Uint8Array.from(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAABHNCSVQICAgIfAhkiAAAAAFzUkdCAK7OHOkAAAAvSURBVFiF7c4xAQAwDIAwNv+eWxl9ggHypqbD/uUcAAAAAAAAAAAAAAAAAACgagEw4wI+0ujnJgAAAABJRU5ErkJggg==", "base64")));
@@ -16,17 +56,42 @@ describe("Grok Build rich browser file reads", () => {
     });
   });
 
+  it("does not pass a CRC-corrupt small PNG through the endpoint-native fast path", async () => {
+    const valid = Uint8Array.from(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAABHNCSVQICAgIfAhkiAAAAAFzUkdCAK7OHOkAAAAvSURBVFiF7c4xAQAwDIAwNv+eWxl9ggHypqbD/uUcAAAAAAAAAAAAAAAAAACgagEw4wI+0ujnJgAAAABJRU5ErkJggg==", "base64"));
+    const corrupt = valid.slice();
+    corrupt[80] = (corrupt[80] ?? 0) ^ 0x01;
+    const vfs = new VirtualFS();
+    vfs.writeFileSync("/corrupt.png", corrupt);
+    const runtime = new GrokBuildBrowserRuntime({ vfs, async run() { return { stdout: "", stderr: "", exitCode: 0 }; } });
+
+    const result = await runtime.execute({ callId: "bad-image", name: "read_file", arguments: '{"target_file":"/corrupt.png"}' }, signal);
+    expect(result.output).toContain("Could not embed image in conversation:");
+    expect(result.images).toBeUndefined();
+  });
+
+  it("uses magic bytes rather than an image extension to select multimodal reads", async () => {
+    const vfs = new VirtualFS();
+    vfs.writeFileSync("/pretend.png", "plain text");
+    vfs.writeFileSync("/vector.svg", "<svg><text>Hello</text></svg>");
+    const runtime = new GrokBuildBrowserRuntime({ vfs, async run() { return { stdout: "", stderr: "", exitCode: 0 }; } });
+
+    await expect(runtime.execute({ callId: "pretend", name: "read_file", arguments: '{"target_file":"/pretend.png"}' }, signal))
+      .resolves.toEqual({ output: "Cannot read binary file: /pretend.png" });
+    await expect(runtime.execute({ callId: "svg", name: "read_file", arguments: '{"target_file":"/vector.svg"}' }, signal))
+      .resolves.toEqual({ output: "1→<svg><text>Hello</text></svg>" });
+  });
+
   it("extracts ordered PPTX slide and notes text entirely in the browser", async () => {
     const vfs = new VirtualFS();
     vfs.writeFileSync("/deck.pptx", storedZip({
       "ppt/slides/slide10.xml": '<p:sld xmlns:a="a"><a:p><a:r><a:t>Ten</a:t></a:r></a:p></p:sld>',
-      "ppt/slides/slide2.xml": '<p:sld xmlns:a="a"><a:p><a:r><a:t>Two &amp; more</a:t></a:r></a:p></p:sld>',
+      "ppt/slides/slide2.xml": '<p:sld xmlns:a="a"><a:p><a:r><a:t>Two &amp; </a:t></a:r><a:r><a:t>more</a:t></a:r></a:p><a:p><a:r><a:t/></a:r>stray<a:r><a:t>Kept</a:t></a:r></a:p></p:sld>',
       "ppt/notesSlides/notesSlide2.xml": '<p:notes xmlns:a="a"><a:p><a:r><a:t>Remember this</a:t></a:r></a:p></p:notes>',
     }));
     const runtime = new GrokBuildBrowserRuntime({ vfs, async run() { return { stdout: "", stderr: "", exitCode: 0 }; } });
 
     const result = await runtime.execute({ callId: "pptx", name: "read_file", arguments: '{"target_file":"/deck.pptx"}' }, signal);
-    expect(result.output).toBe("1→--- Slide 2 ---\n2→Two & more\n3→\n4→Speaker Notes:\n5→Remember this\n6→\n7→--- Slide 10 ---\n8→Ten");
+    expect(result.output).toBe("1→--- Slide 2 ---\n2→Two & more\n3→Kept\n4→\n5→Speaker Notes:\n6→Remember this\n7→\n8→--- Slide 10 ---\n9→Ten");
   });
 
   it("extracts PDF text with native all-line anchors", async () => {
@@ -76,6 +141,54 @@ describe("Grok Build browser background task control", () => {
         .resolves.toEqual({ output: "killed: Task was terminated successfully" });
       await expect(runtime.execute({ callId: "kill-again", name: "kill_command_or_subagent", arguments: JSON.stringify({ task_id: id }) }, signal))
         .resolves.toEqual({ output: "already_exited: Task had already completed" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("exposes streamed output while running and preserves native empty-output wording", async () => {
+    const vfs = new VirtualFS();
+    let release: ((result: { stdout: string; stderr: string; exitCode: number }) => void) | undefined;
+    const runtime = new GrokBuildBrowserRuntime({
+      vfs,
+      async run(_command, options) {
+        options?.onStdout?.("partial output");
+        return new Promise((resolve) => { release = resolve; });
+      },
+    });
+    const started = await runtime.execute({ callId: "live-start", name: "run_terminal_command", arguments: '{"command":"stream","background":true}' }, signal);
+    const id = /task ID: ([0-9a-f-]+)/u.exec(started.output)?.[1] ?? "";
+    const live = await runtime.execute({ callId: "live-poll", name: "get_command_or_subagent_output", arguments: JSON.stringify({ task_ids: [id] }) }, signal);
+    expect(live.output).toContain("partial output\n\nUse timeout_ms to wait for completion.");
+    release?.({ stdout: "", stderr: "", exitCode: 0 });
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    const emptyRuntime = new GrokBuildBrowserRuntime({ vfs: new VirtualFS(), async run() { return { stdout: "", stderr: "", exitCode: 0 }; } });
+    const emptyStarted = await emptyRuntime.execute({ callId: "empty-start", name: "run_terminal_command", arguments: '{"command":"true","background":true}' }, signal);
+    const emptyId = /task ID: ([0-9a-f-]+)/u.exec(emptyStarted.output)?.[1] ?? "";
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    const empty = await emptyRuntime.execute({ callId: "empty-poll", name: "get_command_or_subagent_output", arguments: JSON.stringify({ task_ids: [emptyId] }) }, signal);
+    expect(empty.output).toContain("Status: completed");
+    expect(empty.output).toContain("=== Output ===\n(no output)");
+    expect(empty.output).not.toContain("Process exited with code");
+  });
+
+  it("reports both the requested wait and native per-call cap", async () => {
+    vi.useFakeTimers();
+    try {
+      const runtime = new GrokBuildBrowserRuntime({
+        vfs: new VirtualFS(),
+        async run(_command, options) {
+          return new Promise((resolve) => options?.signal?.addEventListener("abort", () => resolve({ stdout: "", stderr: "", exitCode: 130 }), { once: true }));
+        },
+      });
+      const started = await runtime.execute({ callId: "wait-start", name: "run_terminal_command", arguments: '{"command":"forever","background":true}' }, signal);
+      const id = /task ID: ([0-9a-f-]+)/u.exec(started.output)?.[1] ?? "";
+      const pending = runtime.execute({ callId: "wait", name: "get_command_or_subagent_output", arguments: JSON.stringify({ task_ids: [id], timeout_ms: 2_400_000 }) }, signal);
+      await vi.advanceTimersByTimeAsync(600_000);
+      const waited = await pending;
+      expect(waited.output).toContain("Waited 600s, the per-call maximum, of the 2400s you requested; the task is still running. You do not need to call this again.");
+      await runtime.execute({ callId: "wait-kill", name: "kill_command_or_subagent", arguments: JSON.stringify({ task_id: id }) }, signal);
     } finally {
       vi.useRealTimers();
     }

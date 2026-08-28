@@ -7,6 +7,7 @@ import {
   normalizeImageMediaRequest,
   normalizeVideoMediaRequest,
   normalizeGrokResponsesRequest,
+  normalizeGrokTelemetryRoute,
   sameWebFetchHost,
   validSessionId,
 } from "../cloudflare/security.js";
@@ -141,5 +142,21 @@ describe("Cloudflare browser-agent security boundary", () => {
       resolution: "480p",
       image: "https://example.com/a.png",
     })).toThrow(/6 or 10/u);
+  });
+
+  it("allows only fixed telemetry endpoints with valid Grok session UUIDs", () => {
+    const sessionId = "11111111-1111-4111-8111-111111111111";
+    expect(normalizeGrokTelemetryRoute("/api/grok/feedback/config", "GET")).toEqual({
+      upstreamPath: "/v1/feedback/config",
+      contentType: "application/json",
+    });
+    expect(normalizeGrokTelemetryRoute(`/api/grok/sessions/${sessionId}/signals`, "POST")?.upstreamPath)
+      .toBe(`/v1/sessions/${sessionId}/signals`);
+    expect(normalizeGrokTelemetryRoute(`/api/grok/sessions/${sessionId}/turn-deltas`, "POST")?.upstreamPath)
+      .toBe(`/v1/sessions/${sessionId}/turn-deltas`);
+    expect(normalizeGrokTelemetryRoute("/api/grok/traces", "POST")?.contentType).toBe("application/x-protobuf");
+    expect(normalizeGrokTelemetryRoute("/api/grok/traces", "GET")).toBeUndefined();
+    expect(normalizeGrokTelemetryRoute("/api/grok/sessions/not-a-uuid/signals", "POST")).toBeUndefined();
+    expect(normalizeGrokTelemetryRoute(`/api/grok/sessions/${sessionId}/arbitrary`, "POST")).toBeUndefined();
   });
 });

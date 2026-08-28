@@ -129,6 +129,13 @@ export interface GrokBuildSessionSnapshot {
   compactionCount?: number;
 }
 
+export interface GrokBuildSessionUsage {
+  /** Sum of provider-reported input + output tokens for this session object. */
+  totalTokensUsed: number;
+  /** True when at least one completed provider response omitted usable usage. */
+  incomplete: boolean;
+}
+
 export class GrokBuildSession {
   private readonly sessionId: string;
   private requestId: string;
@@ -138,6 +145,8 @@ export class GrokBuildSession {
   private estimatedTokens: number;
   private measuredInputBytes: number;
   private compactionCount: number;
+  private totalTokensUsed = 0;
+  private incompleteUsageResponses = 0;
 
   constructor(private readonly options: GrokBuildSessionOptions) {
     const restored = options.restore;
@@ -167,6 +176,10 @@ export class GrokBuildSession {
       measuredInputBytes: this.measuredInputBytes,
       compactionCount: this.compactionCount,
     };
+  }
+
+  usage(): GrokBuildSessionUsage {
+    return { totalTokensUsed: this.totalTokensUsed, incomplete: this.incompleteUsageResponses > 0 };
   }
 
   enqueueSystemReminder(reminder: string): void {
@@ -401,12 +414,23 @@ export class GrokBuildSession {
   }
 
   private async requestStream(init: RequestInit, kind: string, signal: AbortSignal) {
-    return requestGrokStream(this.options.endpoint, init, kind, signal, {
+    const result = await requestGrokStream(this.options.endpoint, init, kind, signal, {
       ...(this.options.retrySleep ? { sleep: this.options.retrySleep } : {}),
       ...(this.options.retryJitter ? { jitter: this.options.retryJitter } : {}),
       onRetry: (retry) => this.options.onEvent?.({ type: "retry", kind, ...retry }),
     });
+    const tokens = responseTotalTokens(result.response);
+    if (tokens === undefined) this.incompleteUsageResponses += 1;
+    else this.totalTokensUsed = Math.min(Number.MAX_SAFE_INTEGER, this.totalTokensUsed + tokens);
+    return result;
   }
+}
+
+function responseTotalTokens(response: GrokCompletedResponse): number | undefined {
+  const usage = response.usage;
+  if (!usage || typeof usage !== "object" || Array.isArray(usage)) return undefined;
+  const record = usage as Record<string, unknown>;
+  return numberValue(record.total_tokens) ?? sumNumbers(record.input_tokens, record.output_tokens);
 }
 
 function transcriptLocationFromHint(hint: string): string | undefined {

@@ -83,6 +83,29 @@ describe("browser-native Grok Build session", () => {
     vi.unstubAllGlobals();
   });
 
+  it("exposes exact provider-reported token totals for workflow child accounting", async () => {
+    const responses = [
+      stream({
+        usage: { input_tokens: 8, output_tokens: 3, total_tokens: 11 },
+        output: [{ type: "function_call", call_id: "read", name: "read_file", arguments: "{}" }],
+      }),
+      stream({
+        usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 },
+        output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "Done" }] }],
+      }, "Done"),
+    ];
+    vi.stubGlobal("fetch", vi.fn(async () => responses.shift() ?? stream({ output: [] })));
+    const session = new GrokBuildSession({
+      endpoint: "/api/grok/responses",
+      environment: { os: "Browser", shell: "/bin/sh", workspacePath: "/", today: "2026-08-27" },
+      runtime: { async execute() { return { output: "read" }; } },
+      enableSessionTitle: false,
+    });
+    await session.run("Inspect", new AbortController().signal);
+    expect(session.usage()).toEqual({ totalTokensUsed: 18, incomplete: false });
+    vi.unstubAllGlobals();
+  });
+
   it("escapes rule delimiters the same way as native Grok Build", () => {
     const prefix = createUserMessagePrefix({
       os: "Browser",

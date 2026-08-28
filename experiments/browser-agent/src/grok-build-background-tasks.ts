@@ -80,6 +80,8 @@ export class GrokBuildBackgroundTasks {
       if (!chunk) return;
       streamed = true;
       combined += chunk;
+      task.output = combined;
+      task.rawOutputBytes = utf8Length(combined);
       this.container.vfs.writeFileSync(outputFile, combined);
       onOutput?.(chunk, task);
     };
@@ -102,7 +104,7 @@ export class GrokBuildBackgroundTasks {
       onStderr: append,
     }).then((result) => {
       const output = streamed ? combined : joinOutput(result.stdout, result.stderr);
-      this.finish(task, output || `Process exited with code ${result.exitCode}`, result.exitCode === 0 ? "completed" : "failed", result.exitCode);
+      this.finish(task, output, result.exitCode === 0 ? "completed" : "failed", result.exitCode);
       return task.output;
     }, (error: unknown) => {
       const cancelled = controller.signal.aborted;
@@ -145,7 +147,7 @@ export class GrokBuildBackgroundTasks {
   kill(taskId: string): string {
     const task = this.tasks.get(taskId);
     if (!task) {
-      const ids = [...this.tasks.values()].filter((candidate) => candidate.kind !== "subagent").map((candidate) => candidate.id);
+      const ids = [...this.tasks.values()].filter((candidate) => candidate.kind === "command" || candidate.kind === "monitor").map((candidate) => candidate.id);
       return ids.length === 0
         ? `Task or subagent ${taskId} not found. No background tasks or subagents exist in this session.`
         : `Task or subagent ${taskId} not found. Known bash task IDs: [${ids.join(", ")}]`;
@@ -167,24 +169,24 @@ export class GrokBuildBackgroundTasks {
     const ids = resolveTaskIds(input.task_ids ?? input.task_id);
     if (ids.length === 0) throw new Error("Provide a non-empty task_ids list.");
     if (ids.length > MAX_MULTI_TASK_IDS) throw new Error(`task_ids exceeds maximum of ${MAX_MULTI_TASK_IDS} entries.`);
-    const timeoutMs = boundedTimeout(input.timeout_ms);
+    const wait = boundedTimeout(input.timeout_ms);
     const tasks = ids.map((id) => this.tasks.get(id));
-    if (timeoutMs > 0) {
-      await settleBefore(Promise.all(tasks.filter((task) => task?.status === "running").map((task) => task!.promise)), timeoutMs);
+    if (wait.effectiveMs > 0) {
+      await settleBefore(Promise.all(tasks.filter((task) => task?.status === "running").map((task) => task!.promise)), wait.effectiveMs);
     }
     if (ids.length === 1) {
       const task = tasks[0];
       if (!task) {
-        const known = [...this.tasks.keys()];
+        const known = [...this.tasks.values()].filter((candidate) => candidate.kind === "command" || candidate.kind === "monitor").map((candidate) => candidate.id);
         return known.length === 0
           ? `Task ${ids[0]} not found. No background tasks or subagents exist in this session.`
           : `Task ${ids[0]} not found. Known task IDs: [${known.join(", ")}]`;
       }
-      return formatSingleTask(task, timeoutMs);
+      return formatSingleTask(task, wait);
     }
-    const results = ids.map((id, index) => tasks[index] ? taskView(tasks[index]!, timeoutMs) : notFoundView(id));
+    const results = ids.map((id, index) => tasks[index] ? taskView(tasks[index]!, wait) : notFoundView(id));
     const completed = results.filter((result) => ["completed", "failed", "cancelled", "timed_out"].includes(result.status)).length;
-    const mode = timeoutMs > 0 ? "wait_all" : "poll";
+    const mode = wait.effectiveMs > 0 ? "wait_all" : "poll";
     const lines = [`=== Multi-wait (${mode}) ===`];
     for (const result of results) {
       lines.push(`--- Task ${result.taskId} [${result.status}] ---\nCommand: ${result.command}\nDuration: ${result.durationSecs.toFixed(2)}s`);
@@ -228,7 +230,12 @@ interface TaskView {
   truncated: boolean;
 }
 
-function taskView(task: BrowserBackgroundTask, timeoutMs: number): TaskView {
+interface WaitRequest {
+  requestedMs: number;
+  effectiveMs: number;
+}
+
+function taskView(task: BrowserBackgroundTask, wait: WaitRequest): TaskView {
   let output = task.output;
   let truncated = false;
   if (utf8Length(output) > MAX_TOOL_OUTPUT_BYTES) {
@@ -238,9 +245,13 @@ function taskView(task: BrowserBackgroundTask, timeoutMs: number): TaskView {
     output = softWrapLines(output, SOFT_WRAP_WIDTH);
   }
   if (task.status === "running") {
-    output = `${output}${output ? "\n\n" : ""}${timeoutMs > 0
-      ? `Waited the requested ${formatDuration(timeoutMs)}; the ${task.kind === "subagent" ? "subagent" : "task"} is still running.`
-      : "Use timeout_ms to wait for completion."} You will be notified automatically when the ${task.kind === "subagent" ? "subagent" : "task"} completes.`;
+    const subject = task.kind === "subagent" ? "subagent" : "task";
+    const waitHint = wait.effectiveMs > 0
+      ? wait.requestedMs > wait.effectiveMs
+        ? `Waited ${formatDuration(wait.effectiveMs)}, the per-call maximum, of the ${formatDuration(wait.requestedMs)} you requested; the ${subject} is still running. You do not need to call this again.`
+        : `Waited the requested ${formatDuration(wait.effectiveMs)}; the ${subject} is still running.`
+      : "Use timeout_ms to wait for completion.";
+    output = `${output}${output ? "\n\n" : ""}${waitHint} You will be notified automatically when the ${subject} completes.`;
   }
   return {
     taskId: task.id,
@@ -258,8 +269,8 @@ function notFoundView(taskId: string): TaskView {
   return { taskId, command: "", status: "not_found", durationSecs: 0, output: `Task ${taskId} not found.`, outputFile: "", truncated: false };
 }
 
-function formatSingleTask(task: BrowserBackgroundTask, timeoutMs: number): string {
-  const result = taskView(task, timeoutMs);
+function formatSingleTask(task: BrowserBackgroundTask, wait: WaitRequest): string {
+  const result = taskView(task, wait);
   const lines = [
     `=== Task ${result.taskId} ===`,
     `Command: ${result.command}`,
@@ -278,16 +289,20 @@ function resolveTaskIds(value: unknown): string[] {
   const seen = new Set<string>();
   const ids: string[] = [];
   for (const item of raw) {
+    if (typeof item !== "string" && typeof item !== "number") {
+      throw new Error(`expected a list of string ids (or a single string), got ${JSON.stringify(value)}`);
+    }
     const id = String(item).trim();
     if (id && !seen.has(id)) { seen.add(id); ids.push(id); }
   }
   return ids;
 }
 
-function boundedTimeout(value: unknown): number {
-  if (value === undefined || value === null) return 0;
+function boundedTimeout(value: unknown): WaitRequest {
+  if (value === undefined || value === null) return { requestedMs: 0, effectiveMs: 0 };
   if (!Number.isSafeInteger(value) || Number(value) < 0) throw new Error("Expected an integer");
-  return Math.min(Number(value), 600_000);
+  const requestedMs = Number(value);
+  return { requestedMs, effectiveMs: Math.min(requestedMs, 600_000) };
 }
 
 async function settleBefore(promise: Promise<unknown>, timeoutMs: number): Promise<void> {

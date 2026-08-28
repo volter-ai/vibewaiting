@@ -31,6 +31,11 @@ const WEB_FETCH_DOMAINS = [
 ] as const;
 
 export type GrokRelayRequestKind = "main" | "session-title" | "turn-summary" | "compaction";
+export type GrokTelemetryRoute =
+  | { upstreamPath: "/v1/feedback/config"; contentType: "application/json" }
+  | { upstreamPath: `/v1/sessions/${string}/signals`; contentType: "application/json" }
+  | { upstreamPath: `/v1/sessions/${string}/turn-deltas`; contentType: "application/json" }
+  | { upstreamPath: "/v1/traces"; contentType: "application/x-protobuf" };
 type JsonObject = Record<string, unknown>;
 
 export type GrokImageMediaRequest =
@@ -235,6 +240,24 @@ export function validUuid(value: string | null): string | undefined {
   return value && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value)
     ? value
     : undefined;
+}
+
+/** Fixed xAI telemetry surface; no arbitrary upstream path can cross the relay. */
+export function normalizeGrokTelemetryRoute(pathname: string, method: string): GrokTelemetryRoute | undefined {
+  if (method === "GET" && pathname === "/api/grok/feedback/config") {
+    return { upstreamPath: "/v1/feedback/config", contentType: "application/json" };
+  }
+  if (method === "POST" && pathname === "/api/grok/traces") {
+    return { upstreamPath: "/v1/traces", contentType: "application/x-protobuf" };
+  }
+  if (method !== "POST") return;
+  const match = pathname.match(/^\/api\/grok\/sessions\/([^/]+)\/(signals|turn-deltas)$/u);
+  const sessionId = validUuid(match?.[1] ?? null);
+  if (!sessionId || (match?.[2] !== "signals" && match?.[2] !== "turn-deltas")) return;
+  return {
+    upstreamPath: `/v1/sessions/${sessionId}/${match[2]}`,
+    contentType: "application/json",
+  };
 }
 
 export function positiveTurn(value: string | null): number {

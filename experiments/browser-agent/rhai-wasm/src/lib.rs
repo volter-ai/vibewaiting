@@ -14,6 +14,10 @@ const MAX_HOST_CALLS: u64 = 10_000;
 const MAX_PARALLEL: usize = 1_024;
 const HOST_ERROR_KEY: &str = "__xai_workflow_host_error";
 const HOST_TERMINAL_KEY: &str = "__xai_workflow_parallel_terminal";
+const SCHEMA_MAX_BYTES: usize = 256 * 1024;
+const CONTRACT_OUTPUT_MAX_BYTES: usize = 2 * 1024 * 1024;
+const SCHEMA_REGEX_SIZE_LIMIT: usize = 256 * 1024;
+const SCHEMA_REGEX_DFA_SIZE_LIMIT: usize = 2 * 1024 * 1024;
 
 type ScriptResult<T> = Result<T, Box<EvalAltResult>>;
 
@@ -147,6 +151,100 @@ pub fn evaluate_json(input_json: &str) -> String {
     serde_json::to_string(&step).unwrap_or_else(|error| {
         format!(r#"{{"type":"failed","error":"failed to serialize evaluator result: {error}"}}"#)
     })
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum ContractVerdict {
+    Valid { value: serde_json::Value },
+    Invalid { error: String },
+}
+
+#[derive(Debug)]
+struct RejectExternalSchemaRefs;
+
+impl jsonschema::Retrieve for RejectExternalSchemaRefs {
+    fn retrieve(
+        &self,
+        uri: &jsonschema::Uri<String>,
+    ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+        Err(format!("external JSON Schema references are disabled: {uri}").into())
+    }
+}
+
+/// Browser/WASM form of Grok Build's structured-output contract validator.
+/// An absent `final_text` compiles only, so callers reject bad schemas before
+/// consuming a physical child-agent run just like the native host service.
+#[wasm_bindgen]
+pub fn validate_contract_json(schema_json: &str, final_text: Option<String>) -> String {
+    let verdict = validate_contract(schema_json, final_text.as_deref())
+        .map_or_else(|error| ContractVerdict::Invalid { error }, |value| ContractVerdict::Valid { value });
+    serde_json::to_string(&verdict).unwrap_or_else(|error| {
+        format!(r#"{{"status":"invalid","error":"failed to serialize contract verdict: {error}"}}"#)
+    })
+}
+
+fn validate_contract(
+    schema_json: &str,
+    final_text: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    if schema_json.len() > SCHEMA_MAX_BYTES {
+        return Err(format!(
+            "output_schema is too large ({} bytes; maximum is {SCHEMA_MAX_BYTES})",
+            schema_json.len()
+        ));
+    }
+    let schema: serde_json::Value = serde_json::from_str(schema_json)
+        .map_err(|error| format!("output_schema cannot be serialized: {error}"))?;
+    let validator = jsonschema::options()
+        .with_retriever(RejectExternalSchemaRefs)
+        .with_pattern_options(
+            jsonschema::PatternOptions::regex()
+                .size_limit(SCHEMA_REGEX_SIZE_LIMIT)
+                .dfa_size_limit(SCHEMA_REGEX_DFA_SIZE_LIMIT),
+        )
+        .build(&schema)
+        .map_err(|error| format!("output_schema is not a valid self-contained JSON Schema: {error}"))?;
+    let Some(final_text) = final_text else {
+        return Ok(serde_json::Value::Null);
+    };
+    if final_text.len() > CONTRACT_OUTPUT_MAX_BYTES {
+        return Err(format!(
+            "final message exceeds the {CONTRACT_OUTPUT_MAX_BYTES} byte structured-output limit"
+        ));
+    }
+    let text = final_text.trim();
+    let mut candidates: Vec<&str> = Vec::new();
+    if let Some(start) = text.rfind("```json") {
+        let body = &text[start + "```json".len()..];
+        if let Some(end) = body.find("```") {
+            candidates.push(body[..end].trim());
+        }
+    }
+    candidates.push(text);
+    for (open, close) in [('{', '}'), ('[', ']')] {
+        if let (Some(start), Some(end)) = (text.find(open), text.rfind(close)) {
+            if start < end {
+                candidates.push(text[start..=end].trim());
+            }
+        }
+    }
+    let mut parse_error = String::new();
+    for candidate in candidates {
+        match serde_json::from_str::<serde_json::Value>(candidate) {
+            Ok(value) => {
+                return match validator.validate(&value) {
+                    Ok(()) => Ok(value),
+                    Err(error) => Err(format!("output does not match the required schema: {error}")),
+                };
+            }
+            Err(error) if parse_error.is_empty() => parse_error = error.to_string(),
+            Err(_) => {}
+        }
+    }
+    Err(format!(
+        "final message did not contain valid JSON (expected a ```json fenced block): {parse_error}"
+    ))
 }
 
 fn evaluate(input: Input) -> Step {
@@ -414,6 +512,31 @@ mod tests {
     fn completes_pure_rhai() {
         let step = evaluate(input("let meta = #{ name: \"x\", description: \"d\" }; complete(40 + 2);", vec![]));
         assert!(matches!(step, Step::Completed { result, .. } if result == serde_json::json!(42)));
+    }
+
+    #[test]
+    fn structured_contract_matches_native_candidate_order_and_schema_validation() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "required": ["ok"],
+            "properties": { "ok": { "type": "boolean" } }
+        })
+        .to_string();
+        let output = "```json\n{\"wrong\": 1}\n```\ncorrected:\n```json\n{\"ok\": true}\n```";
+        assert_eq!(
+            validate_contract(&schema, Some(output)).unwrap(),
+            serde_json::json!({"ok": true})
+        );
+        let error = validate_contract(&schema, Some("result: {\"ok\": \"yes\"}"))
+            .unwrap_err();
+        assert!(error.contains("output does not match the required schema"), "{error}");
+    }
+
+    #[test]
+    fn structured_contract_rejects_external_schema_references() {
+        let schema = serde_json::json!({ "$ref": "https://example.com/schema.json" }).to_string();
+        let error = validate_contract(&schema, None).unwrap_err();
+        assert!(error.contains("external JSON Schema references are disabled"), "{error}");
     }
 
     #[test]
