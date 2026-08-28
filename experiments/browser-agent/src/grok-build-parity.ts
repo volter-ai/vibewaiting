@@ -69,8 +69,8 @@ export const GROK_BUILD_SYSTEM_PARITY = {
   },
   permissions: {
     level: "partial",
-    evidence: ["experiments/browser-agent/src/grok-build-permissions.ts", "experiments/browser-agent/src/grok-build-permission-dialog.ts", "experiments/browser-agent/src/grok-build-runtime.ts", "test/grok-build-permissions.test.ts", "test/grok-build-runtime.test.ts", "e2e/browser-agent.e2e.mjs"],
-    gap: "Ask versus always-approve, safe read/grep access, serialized reverse prompts, edit-session grants, exact command/MCP grants, normalized domain grants, persistent grants/denials, subdomain-wide web denials, and root/child shared enforcement are browser-native. Remaining source work is native bash segment/safe-command analysis, protected-path and policy rules, MCP server-scope grants, per-agent permission modes, and permission telemetry/corpora.",
+    evidence: ["experiments/browser-agent/src/grok-build-permissions.ts", "experiments/browser-agent/src/grok-build-permission-policy.ts", "experiments/browser-agent/src/grok-build-permission-dialog.ts", "experiments/browser-agent/src/grok-build-runtime.ts", "test/grok-build-permission-policy.test.ts", "test/grok-build-permissions.test.ts", "test/grok-build-runtime.test.ts", "e2e/browser-agent.e2e.mjs"],
+    gap: "Ask versus always-approve, safe read/grep access, serialized reverse prompts, edit-session grants with protected-target floors, validated exact/server MCP grants, normalized domain grants, persistent grants/denials, subdomain-wide web denials, root/child shared enforcement, child-local bypassPermissions, and native word-only Bash segment/safe/dangerous/wrapper/flag scrutiny are browser-native. Remaining source work is the full shell AST/policy-rule corpus, static web-fetch allowlist, permission telemetry, and provider-backed permission traffic before promotion.",
   },
   telemetry_and_feedback: {
     level: "source-ported",

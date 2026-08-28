@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   GrokBuildPermissionManager,
+  parseGrokBuildMcpServer,
   type GrokBuildPermissionPromptOutcome,
   type GrokBuildPermissionRequest,
 } from "../experiments/browser-agent/src/grok-build-permissions.js";
@@ -23,6 +24,28 @@ describe("Grok Build browser permission manager", () => {
     expect(prompt).not.toHaveBeenCalled();
   });
 
+  it("auto-allows safe shell chains but never lets grants suppress dangerous prompts", async () => {
+    const outcomes: GrokBuildPermissionPromptOutcome[] = ["allow-always", "allow-once"];
+    const prompt = vi.fn(async () => outcomes.shift()!);
+    const manager = new GrokBuildPermissionManager(prompt);
+    const signal = new AbortController().signal;
+    await expect(manager.authorize(request("bash", "cd /tmp && git status | cat"), signal)).resolves.toEqual({ allowed: true, source: "safe" });
+    await expect(manager.authorize(request("bash", "rm -rf /tmp/example"), signal)).resolves.toMatchObject({ allowed: true });
+    await expect(manager.authorize(request("bash", "rm -rf /tmp/example"), signal)).resolves.toMatchObject({ allowed: true, source: "prompt" });
+    expect(prompt).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps protected edits behind a prompt after granting ordinary session edits", async () => {
+    const outcomes: GrokBuildPermissionPromptOutcome[] = ["allow-edits-session", "allow-once"];
+    const prompt = vi.fn(async () => outcomes.shift()!);
+    const manager = new GrokBuildPermissionManager(prompt);
+    const signal = new AbortController().signal;
+    await manager.authorize(request("edit", "/src/game.ts"), signal);
+    await expect(manager.authorize(request("edit", "/src/other.ts"), signal)).resolves.toMatchObject({ source: "session-grant" });
+    await expect(manager.authorize(request("edit", "/repo/.git/hooks/pre-commit"), signal)).resolves.toMatchObject({ source: "prompt" });
+    expect(prompt).toHaveBeenCalledTimes(2);
+  });
+
   it("ports edit-session, exact command, MCP, and domain grants", async () => {
     const outcomes: GrokBuildPermissionPromptOutcome[] = ["allow-edits-session", "allow-always", "allow-always", "allow-always"];
     const prompt = vi.fn(async () => outcomes.shift()!);
@@ -36,6 +59,20 @@ describe("Grok Build browser permission manager", () => {
         .resolves.toMatchObject({ allowed: true, source: "session-grant" });
     }
     expect(prompt).toHaveBeenCalledTimes(4);
+  });
+
+  it("ports validated MCP server-wide grants and rejects ambiguous qualified IDs", async () => {
+    expect(parseGrokBuildMcpServer("linear__list")).toBe("linear");
+    expect(parseGrokBuildMcpServer("server:scope__tool-name")).toBe("server:scope");
+    for (const malformed of ["server__part__tool", "foo___bar", "foo____bar", "server__", "server", "__tool", "server__bad.tool"])
+      expect(parseGrokBuildMcpServer(malformed), malformed).toBeUndefined();
+    const prompt = vi.fn(async () => "allow-mcp-server" as const);
+    const manager = new GrokBuildPermissionManager(prompt);
+    const signal = new AbortController().signal;
+    await manager.authorize(request("mcp", "linear__list"), signal);
+    await expect(manager.authorize(request("mcp", "linear__create"), signal)).resolves.toMatchObject({ allowed: true, source: "session-grant" });
+    await manager.authorize(request("mcp", "foobar__list"), signal);
+    expect(prompt).toHaveBeenCalledTimes(2);
   });
 
   it("remembers exact denials and makes the slash always-approve switch authoritative", async () => {

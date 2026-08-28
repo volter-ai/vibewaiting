@@ -2,6 +2,7 @@ import type {
   GrokBuildPermissionPromptOutcome,
   GrokBuildPermissionRequest,
 } from "./grok-build-permissions.js";
+import { parseGrokBuildMcpServer } from "./grok-build-permissions.js";
 
 /** Pager-shaped reverse permission request rendered in the browser. */
 export function requestGrokBuildToolPermission(
@@ -51,6 +52,8 @@ export function requestGrokBuildToolPermission(
       actions.append(action(doc, rejectAlwaysLabel(request), "reject-always", finish, "danger secondary"));
     }
     actions.append(action(doc, allowAlwaysLabel(request), request.kind === "edit" ? "allow-edits-session" : "allow-always", finish, "secondary"));
+    const mcpServer = request.kind === "mcp" ? parseGrokBuildMcpServer(request.detail ?? "") : undefined;
+    if (mcpServer) actions.append(action(doc, `Always allow all tools from ${mcpServer}`, "allow-mcp-server", finish, "secondary"));
     actions.append(action(doc, "Enable always approve", "enable-always-approve", finish, "secondary"));
     actions.append(action(doc, request.kind === "bash" ? "Yes, proceed" : "Yes", "allow-once", finish));
     dialog.addEventListener("cancel", (event) => { event.preventDefault(); finish("cancelled"); });

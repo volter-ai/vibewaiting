@@ -1,3 +1,5 @@
+import { analyzeGrokBuildBash, protectedGrokBuildEdit } from "./grok-build-permission-policy.js";
+
 export type GrokBuildPermissionAccessKind = "read" | "grep" | "edit" | "bash" | "mcp" | "web_fetch" | "web_search";
 
 export interface GrokBuildPermissionRequest {
@@ -11,6 +13,7 @@ export interface GrokBuildPermissionRequest {
 export type GrokBuildPermissionPromptOutcome =
   | "allow-once"
   | "allow-always"
+  | "allow-mcp-server"
   | "allow-edits-session"
   | "reject-once"
   | "reject-always"
@@ -67,10 +70,15 @@ export class GrokBuildPermissionManager {
     if (request.kind === "read" || request.kind === "grep" || request.kind === "web_search") {
       return { allowed: true, source: "safe" };
     }
-    if (request.kind === "edit" && this.allowEditsForSession) return { allowed: true, source: "session-grant" };
+    const protectedEdit = request.kind === "edit" && request.detail ? protectedGrokBuildEdit(request.detail) : undefined;
+    if (request.kind === "edit" && this.allowEditsForSession && !protectedEdit) return { allowed: true, source: "session-grant" };
+    const bash = request.kind === "bash" ? analyzeGrokBuildBash(request.detail ?? "") : undefined;
     const key = permissionKey(request);
     if (isDenied(request, this.denied)) return { allowed: false, source: "session-deny", reason: rememberedDenial(request) };
-    if (this.allowed.has(key)) return { allowed: true, source: "session-grant" };
+    if (bash && bash.needsPrompt.length === 0) return { allowed: true, source: "safe" };
+    if (!protectedEdit && (!bash ? this.allowed.has(key) || mcpServerGranted(request, this.allowed) : bashSegmentsGranted(bash, this.allowed))) {
+      return { allowed: true, source: "session-grant" };
+    }
     if (!this.prompt) return { allowed: false, source: "prompt", reason: "Failed to request permission from user: no permission client is available" };
 
     const outcome = await this.serialPrompt(request, signal);
@@ -83,12 +91,21 @@ export class GrokBuildPermissionManager {
         else this.allowed.add(key);
         return { allowed: true, source: "session-grant" };
       case "allow-always":
-        this.allowed.add(key);
+        if (bash?.parseable) for (const segment of bash.needsPrompt) this.allowed.add(`bash:${segment}`);
+        else this.allowed.add(key);
         this.persist();
         return { allowed: true, source: "session-grant" };
+      case "allow-mcp-server": {
+        const server = request.kind === "mcp" ? parseMcpServer(request.detail ?? "") : undefined;
+        if (server) this.allowed.add(`mcp_server:${server}`);
+        else this.allowed.add(key);
+        this.persist();
+        return { allowed: true, source: "session-grant" };
+      }
       case "allow-once": return { allowed: true, source: "prompt" };
       case "reject-always":
-        this.denied.add(denialKey(request));
+        if (bash?.parseable) for (const segment of bash.needsPrompt) this.denied.add(`bash:${segment}`);
+        else this.denied.add(denialKey(request));
         this.persist();
         return { allowed: false, source: "session-deny", reason: rememberedDenial(request) };
       case "cancelled": return { allowed: false, source: "prompt", reason: "User cancelled the execution" };
@@ -131,6 +148,11 @@ function denialKey(request: GrokBuildPermissionRequest): string {
 }
 
 function isDenied(request: GrokBuildPermissionRequest, denied: ReadonlySet<string>): boolean {
+  if (request.kind === "bash") {
+    const analysis = analyzeGrokBuildBash(request.detail ?? "");
+    return analysis.segments.some((segment) => [...denied].some((key) => key.startsWith("bash:") && matchesCommandPrefix(segment, key.slice(5))))
+      || (!analysis.parseable && denied.has(denialKey(request)));
+  }
   if (request.kind !== "web_fetch") return denied.has(denialKey(request));
   let host: string;
   try { host = normalizeDenyDomain(new URL(request.detail ?? "").hostname); }
@@ -141,6 +163,39 @@ function isDenied(request: GrokBuildPermissionRequest, denied: ReadonlySet<strin
     if (domain && (host === domain || host.endsWith(`.${domain}`))) return true;
   }
   return false;
+}
+
+function bashSegmentsGranted(
+  analysis: ReturnType<typeof analyzeGrokBuildBash>,
+  allowed: ReadonlySet<string>,
+): boolean {
+  if (!analysis.parseable || analysis.dangerous.length) return false;
+  return analysis.needsPrompt.every((segment) => [...allowed].some((key) => key.startsWith("bash:") && matchesCommandPrefix(segment, key.slice(5))));
+}
+
+function matchesCommandPrefix(command: string, prefix: string): boolean {
+  return command === prefix || (command.startsWith(prefix) && command.charAt(prefix.length) === " ");
+}
+
+function mcpServerGranted(request: GrokBuildPermissionRequest, allowed: ReadonlySet<string>): boolean {
+  if (request.kind !== "mcp") return false;
+  const server = parseMcpServer(request.detail ?? "");
+  return Boolean(server && allowed.has(`mcp_server:${server}`));
+}
+
+export function parseGrokBuildMcpServer(name: string): string | undefined { return parseMcpServer(name); }
+
+function parseMcpServer(name: string): string | undefined {
+  let boundary = -1;
+  let count = 0;
+  for (let index = 0; index < name.length - 1; index += 1) {
+    if (name[index] === "_" && name[index + 1] === "_") { boundary = index; count += 1; }
+  }
+  if (count !== 1) return;
+  const server = name.slice(0, boundary);
+  const tool = name.slice(boundary + 2);
+  if (!server || !tool || !/^[A-Za-z0-9_:-]+$/u.test(name)) return;
+  return server;
 }
 
 function normalizeAllowDomain(host: string): string {

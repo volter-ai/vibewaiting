@@ -222,7 +222,14 @@ export class GrokBuildBrowserSubagentRunner {
       spawnSubagent: (childInput, childSignal, childId) => this.run(childInput, childSignal, childId, runtime),
       suggestSkillPath: (path) => skillManager.suggestSkillPath(path),
     };
-    runtime = new GrokBuildBrowserRuntime(container, cwd, subagentServices, allowed, this.options.rootRuntime());
+    runtime = new GrokBuildBrowserRuntime(
+      container,
+      cwd,
+      subagentServices,
+      allowed,
+      this.options.rootRuntime(),
+      definition.permissionMode === "bypassPermissions",
+    );
     this.runtimeMcpRegistries.set(runtime, childRegistry);
     this.runtimeMcpConfigs.set(runtime, mcpResolution.owned);
     this.runtimeMcpPools.set(runtime, mcpCatalog);

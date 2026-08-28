@@ -68,6 +68,24 @@ describe("Grok Build browser tool runtime", () => {
     expect(tools.setAlwaysApprove(false)).toBe(false);
   });
 
+  it("ports child-local bypassPermissions without enabling parent yolo", async () => {
+    const vfs = new VirtualFS();
+    vfs.mkdirSync("/src", { recursive: true });
+    vfs.writeFileSync("/src/a.ts", "old");
+    const container = { vfs, async run() { return { stdout: "ok", stderr: "", exitCode: 0 }; } };
+    const prompt = vi.fn(async () => "reject-once" as const);
+    const root = new GrokBuildBrowserRuntime(container, "/", { requestToolPermission: prompt });
+    const child = new GrokBuildBrowserRuntime(container, "/", { requestToolPermission: prompt }, undefined, root, true);
+    const signal = new AbortController().signal;
+    await expect(child.execute({ callId: "child-edit", name: "search_replace", arguments: '{"file_path":"/src/a.ts","old_string":"old","new_string":"child"}' }, signal))
+      .resolves.toMatchObject({ output: expect.any(String) });
+    expect(vfs.readFileSync("/src/a.ts", "utf8")).toBe("child");
+    expect(root.isAlwaysApprove()).toBe(false);
+    await expect(root.execute({ callId: "root-edit", name: "search_replace", arguments: '{"file_path":"/src/a.ts","old_string":"child","new_string":"root"}' }, signal))
+      .resolves.toMatchObject({ isError: true });
+    expect(prompt).toHaveBeenCalledOnce();
+  });
+
   it("appends the native registered-skill recovery hint to a missing read", async () => {
     const vfs = new VirtualFS();
     const tools = new GrokBuildBrowserRuntime({

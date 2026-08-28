@@ -167,6 +167,18 @@ test("renders native structured question and plan approval interactions", async 
   await page.getByRole("button", { name: "Yes, allow all edits during this session" }).click();
   await expect.poll(() => page.evaluate(() => window.__grokPermission)).toBe("allow-edits-session");
 
+  await page.evaluate(() => {
+    window.__grokPermission = import("/src/grok-build-permission-dialog.ts").then(({ requestGrokBuildToolPermission }) => requestGrokBuildToolPermission({
+      toolCallId: "mcp-1",
+      toolName: "use_tool",
+      kind: "mcp",
+      detail: "linear__list_issues",
+      input: { tool_name: "linear__list_issues" },
+    }, new AbortController().signal));
+  });
+  await page.getByRole("button", { name: "Always allow all tools from linear" }).click();
+  await expect.poll(() => page.evaluate(() => window.__grokPermission)).toBe("allow-mcp-server");
+
   await page.getByRole("button", { name: "MCP", exact: true }).click();
   await expect(page.getByRole("heading", { name: "MCP servers" })).toBeVisible();
   await expect(page.getByText("No MCP servers are configured.", { exact: false })).toBeVisible();

@@ -118,6 +118,8 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
     private readonly allowedTools?: ReadonlySet<string>,
     /** Native nested agents share the root coordinator and scheduler. */
     private readonly controlPlaneOwner?: GrokBuildBrowserRuntime,
+    /** Native currently wires only a child definition's bypassPermissions mode. */
+    private readonly bypassPermissions = false,
   ) {
     installBrowserCommandIsolation(container);
     this.permissions = controlPlaneOwner?.permissions
@@ -302,7 +304,7 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
 
     try {
       const access = this.permissionAccess(call, input);
-      if (access && this.permissions) {
+      if (access && this.permissions && !this.bypassPermissions) {
         const decision = await this.permissions.authorize(access, signal);
         if (!decision.allowed) return failure(`${decision.reason ?? "User rejected the execution"} for tool \`${call.name}\``);
       }
