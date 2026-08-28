@@ -49,8 +49,8 @@ export const GROK_BUILD_SYSTEM_PARITY = {
   },
   bundled_agents: {
     level: "source-ported",
-    evidence: ["test/fixtures/grok-conformance/native-control-behaviors-v1.json", "test/grok-build-native-control-parity.test.ts", "test/grok-build-bundle.test.ts", "test/grok-build-agents.test.ts", "test/grok-build-subagent-config.test.ts", "test/grok-build-custom-agent.test.ts", "test/grok-build-agent-mcp.test.ts", "test/grok-build-agent.test.ts"],
-    gap: "Pinned native discovery/default/frontmatter/completion cases now have deterministic browser equivalence proof in addition to live definition, prompt, tool, memory, hook, and MCP wiring. Browser MCP cannot launch stdio child processes; provider-backed long-session child traffic remains before exact.",
+    evidence: ["test/fixtures/grok-conformance/native-control-behaviors-v1.json", "test/grok-build-native-control-parity.test.ts", "test/grok-build-bundle.test.ts", "test/grok-build-agents.test.ts", "test/grok-build-subagent-config.test.ts", "test/grok-build-custom-agent.test.ts", "test/grok-build-agent-mcp.test.ts", "test/grok-build-mcp-config.test.ts", "test/grok-build-mcp-stdio.test.ts", "test/grok-build-agent.test.ts"],
+    gap: "Pinned native discovery/default/frontmatter/completion cases now have deterministic browser equivalence proof in addition to live definition, prompt, tool, memory, hook, stdio MCP, named-reference, and shared parent-pool inheritance wiring. Provider-backed long-session child traffic remains before exact.",
   },
   bundled_workflows: {
     level: "source-ported",
@@ -144,8 +144,8 @@ export const GROK_BUILD_TOOL_PARITY = {
   use_tool: {
     owner: "browser",
     level: "source-ported",
-    evidence: ["test/fixtures/mcp/native-http-corpus.json", "test/grok-build-mcp-native-corpus.test.ts", "test/grok-build-mcp.test.ts", "experiments/browser-agent/src/grok-build-mcp-protocol.ts", "experiments/browser-agent/src/grok-build-mcp-events.ts", "experiments/browser-agent/src/grok-build-mcp-elicitation.ts", "experiments/browser-agent/src/grok-build-mcp-oauth.ts", "experiments/browser-agent/src/grok-build-mcp.ts"],
-    gap: "A trusted native long session now proves initialize/initialized/list/call request bodies, rmcp request-id/progress-token counters, no-OAuth discovery ordering, search_tool→use_tool dispatch, and model-visible output; strict browser replay preserves every stable field. Streamable HTTP/SSE/session lifecycle, notifications, elicitation, and OAuth DCR/PKCE/refresh/scope-upgrade/client-secret/private-key-JWT branches remain source-derived rather than native authenticated-traffic corpora. Browser Web Locks replace the native credential mutex/keychain, and cross-origin authorization metadata requires the relay's public-DNS validation contract.",
+    evidence: ["test/fixtures/mcp/native-http-corpus.json", "test/grok-build-mcp-native-corpus.test.ts", "test/grok-build-mcp.test.ts", "test/grok-build-mcp-config.test.ts", "test/grok-build-mcp-stdio.test.ts", "test/grok-build-managed-mcp.test.ts", "experiments/browser-agent/src/grok-build-mcp-protocol.ts", "experiments/browser-agent/src/grok-build-mcp-config-discovery.ts", "experiments/browser-agent/src/grok-build-mcp-events.ts", "experiments/browser-agent/src/grok-build-mcp-elicitation.ts", "experiments/browser-agent/src/grok-build-mcp-oauth.ts", "experiments/browser-agent/src/grok-build-mcp.ts"],
+    gap: "A trusted native long session proves initialize/initialized/list/call request bodies, rmcp counters, no-OAuth discovery ordering, search_tool→use_tool dispatch, and model-visible output. Native config precedence, setup materialization, disabled tools, per-tool timeouts, persistent stdio processes, managed gateway calls, and shared child-pool inheritance are source-ported and executable in the browser. OAuth DCR/PKCE/refresh/scope-upgrade branches still lack an in-app authorization continuation and authenticated native traffic corpus; cross-origin HTTP MCP also needs the secure relay path.",
   },
   workflow: {
     owner: "browser",

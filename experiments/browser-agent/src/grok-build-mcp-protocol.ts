@@ -33,6 +33,8 @@ export interface GrokBuildMcpHttpConfig {
   headers?: Readonly<Record<string, string>>;
   startupTimeoutMs?: number;
   toolTimeoutMs?: number;
+  /** Per-tool overrides, matching config.toml `tool_timeouts`. */
+  toolTimeoutsMs?: Readonly<Record<string, number>>;
   /** Used by tests and by a stateless CORS/credential relay. */
   fetchImpl?: typeof fetch;
   clientVersion?: string;
@@ -46,7 +48,7 @@ export interface GrokBuildMcpHttpConfig {
 
 const MCP_PROTOCOL_VERSION = "2025-11-25";
 const DEFAULT_STARTUP_TIMEOUT_MS = 30_000;
-const DEFAULT_TOOL_TIMEOUT_MS = 60_000;
+const DEFAULT_TOOL_TIMEOUT_MS = 6_000_000;
 
 export class McpProtocolError extends Error {
   constructor(
@@ -188,7 +190,7 @@ export class GrokBuildMcpHttpClient {
       "tools/call",
       { name, arguments: args },
       signal,
-      this.config.toolTimeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS,
+      this.config.toolTimeoutsMs?.[name] ?? this.config.toolTimeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS,
       true,
       onAuthRetry,
     );

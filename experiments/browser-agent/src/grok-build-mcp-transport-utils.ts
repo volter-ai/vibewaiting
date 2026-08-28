@@ -22,6 +22,9 @@ export function validateGrokBuildMcpHttpConfig(config: GrokBuildMcpHttpConfig): 
   for (const timeout of [config.startupTimeoutMs, config.toolTimeoutMs]) {
     if (timeout !== undefined && (!Number.isSafeInteger(timeout) || timeout <= 0)) throw new Error("MCP timeouts must be positive integers.");
   }
+  for (const [tool, timeout] of Object.entries(config.toolTimeoutsMs ?? {})) {
+    if (!tool || !Number.isSafeInteger(timeout) || timeout <= 0) throw new Error("MCP per-tool timeouts must have non-empty names and positive integer values.");
+  }
 }
 
 export async function waitForMcpReconnect(milliseconds: number, signal: AbortSignal): Promise<void> {

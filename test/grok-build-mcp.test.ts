@@ -647,6 +647,37 @@ describe("Grok Build browser MCP registry", () => {
     await vi.waitFor(() => expect(registry.serverSummaries()[0]?.toolNames).toEqual(["second"]));
   });
 
+  it("forks child catalogs over the parent's live client pool and closes only owned clients", async () => {
+    let parentInitializes = 0;
+    let parentDeletes = 0;
+    const parentFetch = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "DELETE") { parentDeletes += 1; return new Response(null, { status: 204 }); }
+      const request = JSON.parse(String(init?.body)) as WireRequest;
+      if (request.method === "initialize") { parentInitializes += 1; return jsonResponse({ jsonrpc: "2.0", id: request.id, result: { protocolVersion: "2025-11-25", capabilities: {} } }, { "Mcp-Session-Id": "shared" }); }
+      if (request.method === "notifications/initialized") return new Response(null, { status: 202 });
+      if (request.method === "tools/list") return jsonResponse({ jsonrpc: "2.0", id: request.id, result: { tools: [{ name: "read", inputSchema: {} }] } });
+      return jsonResponse({ jsonrpc: "2.0", id: request.id, result: { content: [{ type: "text", text: "parent" }] } });
+    }) as unknown as typeof fetch;
+    const parent = new GrokBuildMcpRegistry([{ name: "shared", url: "https://parent.example/mcp", fetchImpl: parentFetch, enableEventStream: false }]);
+    await parent.connectAll(new AbortController().signal);
+
+    const ownedFetch = catalogFetch([{ name: "write", inputSchema: {} }], () => ({ content: [{ type: "text", text: "owned" }] }));
+    const child = parent.fork(
+      [{ name: "owned", url: "https://owned.example/mcp", fetchImpl: ownedFetch }],
+      new Set(["shared"]),
+    );
+    await expect(child.useTool("shared__read", {}, new AbortController().signal)).resolves.toBe("parent");
+    await expect(child.useTool("owned__write", {}, new AbortController().signal)).resolves.toBe("owned");
+    expect(parentInitializes).toBe(1);
+    await child.closeAll(new AbortController().signal);
+    expect(parentDeletes).toBe(0);
+    await parent.closeAll(new AbortController().signal);
+    expect(parentDeletes).toBe(1);
+
+    const shadow = parent.fork([{ name: "shared", url: "https://owned.example/mcp", fetchImpl: ownedFetch }], new Set(["shared"]), new Set(["shared"]));
+    expect(shadow.serverSummaries().map((server) => server.name)).toEqual(["shared"]);
+  });
+
   it("indexes model-visible valid tools, patches object schemas, and formats grouped search results", async () => {
     const fetchImpl = catalogFetch([
       { name: "create_issue", description: "Create a Linear issue", inputSchema: { properties: { title: { type: "string" } }, required: ["title"] } },

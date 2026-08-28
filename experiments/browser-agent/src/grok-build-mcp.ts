@@ -78,6 +78,7 @@ interface ServerState {
 /** Browser-native MCP catalog used by Grok Build's search_tool/use_tool pair. */
 export class GrokBuildMcpRegistry {
   private readonly servers = new Map<string, ServerState>();
+  private readonly ownedServerNames = new Set<string>();
   private readonly enabledNativeToolNames: ReadonlySet<string>;
   private readonly nativeToolCorrection: boolean;
   private readonly maxOutputBytes: number;
@@ -115,7 +116,24 @@ export class GrokBuildMcpRegistry {
         return state.notificationRefresh;
       });
       this.servers.set(config.name, state);
+      this.ownedServerNames.add(config.name);
     }
+  }
+
+  /** Child view: owned clients are new; inherited clients are the parent's live shared pool. */
+  fork(
+    ownedConfigs: readonly GrokBuildMcpServerConfig[],
+    inheritedServerNames: ReadonlySet<string>,
+    ownedConfigNames: ReadonlySet<string> = new Set(ownedConfigs.map((config) => config.name)),
+    options: GrokBuildMcpRegistryOptions = {},
+  ): GrokBuildMcpRegistry {
+    const child = new GrokBuildMcpRegistry(ownedConfigs, options);
+    for (const [name, state] of this.servers) {
+      if (inheritedServerNames.has(name) && !ownedConfigNames.has(name) && !child.servers.has(name)) {
+        child.servers.set(name, state);
+      }
+    }
+    return child;
   }
 
   /** Complete all handshakes and build a consistent discovery snapshot. */
@@ -137,7 +155,10 @@ export class GrokBuildMcpRegistry {
   /** Session teardown: close every live HTTP session and stdio child. */
   async closeAll(signal: AbortSignal): Promise<void> {
     const results = await Promise.allSettled(
-      [...this.servers.values()].map((state) => state.client.close(signal)),
+      [...this.ownedServerNames].flatMap((name) => {
+        const state = this.servers.get(name);
+        return state ? [state.client.close(signal)] : [];
+      }),
     );
     signal.throwIfAborted();
     const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
@@ -334,6 +355,12 @@ export function createGrokBuildMcpServices(
   options?: GrokBuildMcpRegistryOptions,
 ): { registry: GrokBuildMcpRegistry; services: GrokBuildMcpServices } {
   const registry = new GrokBuildMcpRegistry(configs, options);
+  return grokBuildMcpServicesFromRegistry(registry);
+}
+
+export function grokBuildMcpServicesFromRegistry(
+  registry: GrokBuildMcpRegistry,
+): { registry: GrokBuildMcpRegistry; services: GrokBuildMcpServices } {
   return {
     registry,
     services: {

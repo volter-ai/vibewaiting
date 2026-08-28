@@ -7,8 +7,8 @@ import { GrokBuildSubagentAdmission } from "./grok-build-subagent-admission.js";
 import { GrokBuildSkillManager } from "./grok-build-skill-manager.js";
 import { formatGrokBuildSkillListing } from "./grok-build-skills.js";
 import { composeGrokBuildMcpCatalog, resolveGrokBuildAgentMcp } from "./grok-build-agent-mcp.js";
-import { createGrokBuildMcpServices } from "./grok-build-mcp.js";
-import { createGrokBuildAlmostNodeStdioConfig } from "./grok-build-mcp-stdio.js";
+import { createGrokBuildMcpServices, grokBuildMcpServicesFromRegistry, type GrokBuildMcpRegistry } from "./grok-build-mcp.js";
+import { projectGrokBuildMcpRuntimeConfig } from "./grok-build-mcp-config-runtime.js";
 import {
   configureGrokBuildAgentTools,
   formatGrokBuildPreloadedSkills,
@@ -48,6 +48,11 @@ export interface GrokBuildBrowserSubagentRunnerOptions {
   rootRuntime(): GrokBuildBrowserRuntime | undefined;
   rootSkillManager(): GrokBuildSkillManager | undefined;
   parentSnapshot(): GrokBuildSessionSnapshot | undefined;
+  rootMcpRegistry?(): GrokBuildMcpRegistry;
+  parentMcpConfigs?(): readonly import("./grok-build-agent-mcp.js").GrokBuildAcpMcpServer[];
+  parentMcpPool?(): readonly import("./grok-build-agent-mcp.js").GrokBuildAcpMcpServer[];
+  projectTrusted?(): boolean;
+  defaultMcpStartupTimeoutMs?(): number | undefined;
   traceMetadata?(): { clientName: string; clientVersion: string; serviceVersion: string; appEntrypoint: string } | undefined;
   takeConformanceLane?(): GrokConformanceSubagentLane | undefined;
 }
@@ -60,6 +65,9 @@ export class GrokBuildBrowserSubagentRunner {
   private readonly pendingStarts = new Set<Promise<void>>();
   private readonly pendingStartsById = new Map<string, () => void>();
   private readonly activeRuns = new Set<Promise<GrokBuildWorkflowSubagentResult>>();
+  private readonly runtimeMcpRegistries = new WeakMap<GrokBuildBrowserRuntime, GrokBuildMcpRegistry>();
+  private readonly runtimeMcpConfigs = new WeakMap<GrokBuildBrowserRuntime, readonly import("./grok-build-agent-mcp.js").GrokBuildAcpMcpServer[]>();
+  private readonly runtimeMcpPools = new WeakMap<GrokBuildBrowserRuntime, readonly import("./grok-build-agent-mcp.js").GrokBuildAcpMcpServer[]>();
 
   constructor(private readonly options: GrokBuildBrowserSubagentRunnerOptions) {
     this.admission = options.admission ?? new GrokBuildSubagentAdmission();
@@ -168,26 +176,36 @@ export class GrokBuildBrowserSubagentRunner {
     const baseTools = GROK_BUILD_TOOLS.filter((tool) => tool.type === "function"
       ? typeof tool.name === "string" && allowed.has(tool.name)
       : allowed.has(tool.type));
+    const parentConfigs = parentRuntime ? this.runtimeMcpConfigs.get(parentRuntime) : undefined;
+    const parentPool = parentRuntime ? this.runtimeMcpPools.get(parentRuntime) : undefined;
     const mcpResolution = resolveGrokBuildAgentMcp({
       definition: {
         mcpServers: definition.mcpServers,
         mcpInheritance: definition.mcpInheritance,
         scope: definition.source === "builtin" ? "built-in" : definition.source,
       },
-      parentConfigs: [], parentPool: [], projectTrusted: true,
+      parentConfigs: parentConfigs ?? this.options.parentMcpConfigs?.() ?? [],
+      parentPool: parentPool ?? this.options.parentMcpPool?.() ?? [],
+      projectTrusted: this.options.projectTrusted?.() ?? true,
     });
     const mcpCatalog = composeGrokBuildMcpCatalog(mcpResolution.owned, mcpResolution.inherited);
-    const browserMcp = createGrokBuildMcpServices(mcpCatalog.map((server) => server.type === "stdio"
-      ? createGrokBuildAlmostNodeStdioConfig(container.vfs, server, {
-          cwd,
-          sessionId: subagentId,
-        })
-      : {
-          name: server.name,
-          url: server.url,
-          headers: Object.fromEntries(server.headers.map((header) => [header.name, header.value])),
-          enableEventStream: server.type === "sse",
-        }), { traceSink: createGrokBuildMcpOtlpTraceSink(trace.tracer) });
+    const defaultMcpStartupTimeoutMs = this.options.defaultMcpStartupTimeoutMs?.();
+    const ownedRuntimeConfigs = mcpResolution.owned.map((server) => projectGrokBuildMcpRuntimeConfig(container.vfs, server, {
+      cwd,
+      sessionId: subagentId,
+      ...(defaultMcpStartupTimeoutMs !== undefined ? { defaultStartupTimeoutMs: defaultMcpStartupTimeoutMs } : {}),
+    }));
+    const parentRegistry = parentRuntime ? this.runtimeMcpRegistries.get(parentRuntime) : undefined;
+    const rootRegistry = parentRegistry ?? this.options.rootMcpRegistry?.();
+    const childRegistry = rootRegistry
+      ? rootRegistry.fork(
+          ownedRuntimeConfigs,
+          new Set((mcpResolution.inherited ?? []).map((server) => server.name)),
+          new Set(mcpResolution.owned.map((server) => server.name)),
+          { traceSink: createGrokBuildMcpOtlpTraceSink(trace.tracer) },
+        )
+      : createGrokBuildMcpServices(ownedRuntimeConfigs, { traceSink: createGrokBuildMcpOtlpTraceSink(trace.tracer) }).registry;
+    const browserMcp = grokBuildMcpServicesFromRegistry(childRegistry);
     let runtime!: GrokBuildBrowserRuntime;
     let skillManager!: GrokBuildSkillManager;
     const subagentServices: GrokBuildBrowserServices = {
@@ -200,6 +218,9 @@ export class GrokBuildBrowserSubagentRunner {
       suggestSkillPath: (path) => skillManager.suggestSkillPath(path),
     };
     runtime = new GrokBuildBrowserRuntime(container, cwd, subagentServices, allowed, this.options.rootRuntime());
+    this.runtimeMcpRegistries.set(runtime, childRegistry);
+    this.runtimeMcpConfigs.set(runtime, mcpResolution.owned);
+    this.runtimeMcpPools.set(runtime, mcpCatalog);
     skillManager = new GrokBuildSkillManager(container.vfs, cwd);
     const rootSkills = this.options.rootSkillManager();
     const discoveredSkills = definition.inheritSkills && rootSkills

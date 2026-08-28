@@ -55,6 +55,10 @@ import { GrokBuildSkillManager } from "./grok-build-skill-manager.js";
 import { askGrokUserQuestions } from "./grok-build-question-dialog.js";
 import { approveGrokPlanEntry, approveGrokPlanExit } from "./grok-build-plan-dialog.js";
 import { createGrokBuildMcpServices } from "./grok-build-mcp.js";
+import { discoverGrokBuildMcpServers } from "./grok-build-mcp-config-discovery.js";
+import { projectGrokBuildMcpRuntimeConfig, withGrokBuildMcpScope } from "./grok-build-mcp-config-runtime.js";
+import type { GrokBuildAcpMcpServer } from "./grok-build-agent-mcp.js";
+import type { GrokBuildMcpServerConfig } from "./grok-build-mcp.js";
 import {
   createGrokBuildManagedMcpConfigs,
   grokBuildManagedGatewayEnabled,
@@ -125,6 +129,10 @@ const mcpOptions = {
   traceSink: createGrokBuildMcpOtlpTraceSink(rootOtlpTracer),
 };
 let mcpRuntime = createGrokBuildMcpServices([], mcpOptions);
+let managedMcpConfigs: GrokBuildMcpServerConfig[] = [];
+let rootMcpConfigs: GrokBuildAcpMcpServer[] = [];
+let rootMcpPool: GrokBuildAcpMcpServer[] = [];
+let rootMcpSessionId: string | undefined;
 let workflowManager: GrokBuildBrowserWorkflowManager | undefined;
 const externalSyntheticWakes = new Map<string, GrokBuildAutoWakePayload>();
 const workflowWakeRevisions = new Map<string, number>();
@@ -249,16 +257,68 @@ async function prepareInteractiveStartup(profile: GrokConformanceDriverProfile |
   liveStartupProfile = await startupCoordinator.refreshForNewSession();
   const managedMcpPayload = await fetchInteractiveStartupResource("mcp/tools/list");
   const managedMcpCatalog = parseGrokBuildGatewayToolCatalog(managedMcpPayload);
-  const managedMcpConfigs = grokBuildManagedGatewayEnabled(liveStartupProfile.settings)
+  managedMcpConfigs = grokBuildManagedGatewayEnabled(liveStartupProfile.settings)
     ? createGrokBuildManagedMcpConfigs(managedMcpCatalog, { clientMode: "interactive" })
     : [];
-  const previousMcpRuntime = mcpRuntime;
-  mcpRuntime = createGrokBuildMcpServices(managedMcpConfigs, mcpOptions);
-  void previousMcpRuntime.registry.closeAll(new AbortController().signal).catch(() => undefined);
   liveStartupProfile = await startupCoordinator.refreshForNewSession();
   await fetchInteractiveStartupResource("billing");
   interactiveBootstrapPrepared = true;
 }
+
+function resolvedMcpStartupTimeoutMs(): number {
+  const remote = liveStartupProfile?.settings.mcp_startup_timeout_secs;
+  return typeof remote === "number" && Number.isSafeInteger(remote) && remote > 0 ? remote * 1_000 : 30_000;
+}
+
+function configureRootMcpRuntime(sessionId: string): void {
+  rootMcpSessionId = sessionId;
+  const discovered = discoverGrokBuildMcpServers(container.vfs, { cwd: "/", projectTrusted: true });
+  rootMcpConfigs = discovered.servers.map((entry) => withGrokBuildMcpScope(entry.server, entry.scope));
+  const localRuntimeConfigs = rootMcpConfigs.map((server) => projectGrokBuildMcpRuntimeConfig(container.vfs, server, {
+    cwd: "/",
+    sessionId,
+    defaultStartupTimeoutMs: resolvedMcpStartupTimeoutMs(),
+  }));
+  const localNames = new Set(rootMcpConfigs.map((server) => server.name));
+  const enabledManaged = managedMcpConfigs.filter((config) => !localNames.has(config.name));
+  rootMcpPool = [
+    ...rootMcpConfigs,
+    ...enabledManaged.map((config): GrokBuildAcpMcpServer => ({
+      type: "http",
+      name: config.name,
+      url: config.url,
+      headers: [],
+      _meta: { grokBrowserScope: "managed", grokManagedRuntime: true },
+    })),
+  ];
+  const previous = mcpRuntime;
+  mcpRuntime = createGrokBuildMcpServices([...localRuntimeConfigs, ...enabledManaged], mcpOptions);
+  void previous.registry.closeAll(new AbortController().signal).catch(() => undefined);
+  for (const skipped of discovered.skipped) {
+    if (skipped.reason !== "disabled") console.warn(`Skipped MCP server '${skipped.name}' from ${skipped.path}: ${skipped.reason}`);
+  }
+}
+
+function isMcpConfigPath(path: string): boolean {
+  return path === "/.grok/config.toml"
+    || path === "/.grok/mcp_preferences.json"
+    || path === "/.claude.json"
+    || path.endsWith("/.grok/config.toml")
+    || path.endsWith("/.cursor/mcp.json")
+    || path.endsWith("/.mcp.json");
+}
+
+const reloadMcpConfig = (path: string): void => {
+  if (!rootMcpSessionId || !isMcpConfigPath(path)) return;
+  try {
+    configureRootMcpRuntime(rootMcpSessionId);
+    eventItem("", "MCP configuration reloaded", path);
+  } catch (error) {
+    eventItem("error", "MCP configuration reload failed", error instanceof Error ? error.message : String(error));
+  }
+};
+container.vfs.on("change", reloadMcpConfig);
+container.vfs.on("delete", reloadMcpConfig);
 
 function currentCompactionReminder(runtime: GrokBuildBrowserRuntime): string | undefined {
   const listing = mergeGrokBuildExtensionListings(
@@ -480,6 +540,11 @@ subagentRunner = new GrokBuildBrowserSubagentRunner({
   rootRuntime: () => rootBrowserRuntime,
   rootSkillManager: () => rootSkillManager,
   parentSnapshot: () => agentSession?.snapshot(),
+  rootMcpRegistry: () => mcpRuntime.registry,
+  parentMcpConfigs: () => rootMcpConfigs,
+  parentMcpPool: () => rootMcpPool,
+  projectTrusted: () => true,
+  defaultMcpStartupTimeoutMs: () => resolvedMcpStartupTimeoutMs(),
   traceMetadata: () => conformanceProfile?.telemetryMetadata,
   takeConformanceLane: () => conformanceProfile?.subagentLanes?.[conformanceSubagentLaneIndex++],
 });
@@ -611,6 +676,7 @@ async function runAgent(mode: "send-now" | "queue" = "send-now"): Promise<void> 
     if (!agentSession) {
       const persistenceGeneration = agentSessionPersistenceGeneration;
       const sessionId = restoredAgentSession?.sessionId ?? crypto.randomUUID();
+      configureRootMcpRuntime(sessionId);
       telemetryLifecycle = new GrokBuildTelemetryLifecycle(sessionId, {
         model: liveStartupProfile?.model ?? "grok-4.6",
         clientMode: activeGrokClientMode(),
@@ -826,6 +892,12 @@ async function resetProject(): Promise<void> {
   recordedRuntime = undefined;
   rootBrowserRuntime = undefined;
   rootSkillManager = undefined;
+  rootMcpSessionId = undefined;
+  rootMcpConfigs = [];
+  rootMcpPool = [];
+  const previousMcpRuntime = mcpRuntime;
+  mcpRuntime = createGrokBuildMcpServices([], mcpOptions);
+  void previousMcpRuntime.registry.closeAll(new AbortController().signal).catch(() => undefined);
   conformanceSubagentLaneIndex = 0;
   autoWakeCoordinator.clear();
   externalSyntheticWakes.clear();
