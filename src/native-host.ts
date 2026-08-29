@@ -30,6 +30,11 @@ import { FileMessengerPersistence } from "./persistence.js";
 import { RemoteMessengerServer } from "./remote-messenger.js";
 import type { RemoteDeviceSnapshot } from "@volter-ai-dev/supercode-remote-access/client";
 import { formatWorkspacePath } from "@volter-ai-dev/supercode-ui/controller";
+import { BrowserProviderBroker } from "./browser-provider.js";
+import type {
+  BrowserOperationCall,
+  BrowserOperationResult,
+} from "@volter-ai-dev/supercode-playwright-shim";
 
 const HARNESS_IDS = new Set<HarnessId>(["claude-code", "codex"]);
 const STABLE_RELAY_ENV_KEYS = [
@@ -339,12 +344,73 @@ export async function runNativeHost(
   let activeDiscoveryClient: SupercodeHarnessClient | null = null;
   let fingerprint = "";
   let commandQueue = Promise.resolve();
+  const pendingBrowserOperations = new Map<
+    string,
+    {
+      operation: BrowserOperationCall["operation"];
+      resolve: (result: BrowserOperationResult) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >();
+  const browserBroker = new BrowserProviderBroker(async (id, call) => {
+    if (pendingBrowserOperations.has(id))
+      throw new Error(`Duplicate browser operation id: ${id}`);
+    return await new Promise<BrowserOperationResult>((resolve) => {
+      const timer = setTimeout(() => {
+        pendingBrowserOperations.delete(id);
+        resolve({
+          ok: false,
+          operation: call.operation,
+          error: {
+            code: "TIMED_OUT",
+            message: "The Vibewaiting extension did not answer in 10 seconds.",
+          },
+        });
+      }, 10_000);
+      pendingBrowserOperations.set(id, { operation: call.operation, resolve, timer });
+      void writer
+        .write({
+          protocol: VIBEWAITING_EXTENSION_PROTOCOL,
+          type: "browser-operation-request",
+          id,
+          call,
+        })
+        .catch((error: unknown) => {
+          const pending = pendingBrowserOperations.get(id);
+          if (!pending) return;
+          pendingBrowserOperations.delete(id);
+          clearTimeout(pending.timer);
+          pending.resolve({
+            ok: false,
+            operation: call.operation,
+            error: {
+              code: "NOT_AVAILABLE",
+              message: error instanceof Error ? error.message : String(error),
+            },
+          });
+        });
+    });
+  });
+
+  const stopBrowserBroker = async (): Promise<void> => {
+    for (const pending of pendingBrowserOperations.values()) {
+      clearTimeout(pending.timer);
+      pending.resolve({
+        ok: false,
+        operation: pending.operation,
+        error: { code: "NOT_AVAILABLE", message: "The Vibewaiting browser provider stopped." },
+      });
+    }
+    pendingBrowserOperations.clear();
+    await browserBroker.stop();
+  };
 
   const stopDaemon = async (): Promise<void> => {
     const active = daemon;
     daemon = null;
     bridge = null;
     fingerprint = "";
+    await stopBrowserBroker();
     await active?.stop();
     await activeDiscoveryClient?.close().catch(() => undefined);
     activeDiscoveryClient = null;
@@ -380,8 +446,9 @@ export async function runNativeHost(
       ...(command ? { command } : {}),
     });
     const nextBridge = new NativeWidgetBridge(remoteServer, writer);
+    let nextDaemon: Daemon | null = null;
     try {
-      const nextDaemon = await startDaemon({
+      nextDaemon = await startDaemon({
         sessionId: "web-extension",
         html: "",
         workspace: settings.workspace,
@@ -395,6 +462,7 @@ export async function runNativeHost(
         log: (message) => process.stderr.write(`[vibewaiting] ${message}\n`),
         terminalService,
       });
+      await browserBroker.start(settings.workspace);
       bridge = nextBridge;
       daemon = nextDaemon;
       activeDiscoveryClient = discoveryClient;
@@ -414,6 +482,11 @@ export async function runNativeHost(
           });
       }
     } catch (error) {
+      if (daemon === nextDaemon) await stopDaemon();
+      else {
+        await stopBrowserBroker();
+        await nextDaemon?.stop().catch(() => undefined);
+      }
       await client.close().catch(() => undefined);
       await discoveryClient.close().catch(() => undefined);
       await nextBridge.remove();
@@ -467,6 +540,25 @@ export async function runNativeHost(
       await publishRemoteAccess(
         remoteAccessSnapshot,
         remoteAccessSnapshot.status === "connected",
+      );
+      return;
+    }
+    if (command.type === "browser-operation-response") {
+      const pending = pendingBrowserOperations.get(command.id);
+      if (!pending) return;
+      pendingBrowserOperations.delete(command.id);
+      clearTimeout(pending.timer);
+      pending.resolve(
+        command.result.operation === pending.operation
+          ? command.result
+          : {
+              ok: false,
+              operation: pending.operation,
+              error: {
+                code: "FAILED",
+                message: "The extension answered with the wrong browser operation.",
+              },
+            },
       );
       return;
     }

@@ -6,10 +6,11 @@ attachment, and tunnels.
 
 ```text
 ordinary web page
-  └─ content script: launcher + explicit page-context capture
+  └─ content script: launcher + page context + structured browser executor
        └─ extension-owned iframe: full Supercode messenger UI
             └─ browser native messaging (bounded, chunked protocol)
                  └─ Vibewaiting native host
+                      ├─ workspace-scoped Supercode active-tab provider
                       ├─ Supercode controller: discovery, resume, input, settings
                       ├─ local terminal service: opaque short-lived attachment grants
                       ├─ local persistence: drafts, unread state, presentation memory
@@ -27,7 +28,8 @@ ordinary web page
 | Overlay lifecycle, geometry, iframe isolation | Widget Shell |
 | Optional managed/headless browser attachment | Lucarne |
 | Stable or temporary public transport | Supercode Remote Access and Volter Tunnel |
-| Browser permissions, context capture, native messaging, product composition | Vibewaiting |
+| Browser permissions, context capture, active-tab provider adaptation, native messaging, product composition | Vibewaiting |
+| Canonical browser operations, shared in-page executor, SDK/CLI/MCP projections, provider routing and agent policy | Supercode |
 
 If a change is useful to another Supercode frontend or overlay application without
 Vibewaiting's browser-companion workflow, it likely belongs upstream.
@@ -37,16 +39,21 @@ Vibewaiting's browser-companion workflow, it likely belongs upstream.
 The content script runs in ordinary pages but receives only the launcher state needed
 to render the fob and a redacted remote-access status. The complete messenger and all
 pairing URLs, passcodes, and device details render inside an extension-origin iframe.
-Page context crosses into the extension only after an explicit attach action and is
-normalized and bounded before native messaging.
+Attach context crosses into the extension only after an explicit attach action and is
+normalized and bounded before native messaging. Separately, Vibewaiting can register
+an active-tab provider for Supercode's canonical browser capability. That path carries
+structured locator plans rather than executable source and returns bounded
+JSON. Supercode's Playwright-shaped in-page package is a DOM compatibility surface: events are synthetic
+and it does not claim CDP semantics, arbitrary evaluation, trusted input, downloads,
+network interception, or hidden-tab selection.
 
 HTTP and HTTPS access is optional rather than an install-time host grant. Onboarding
 discloses the page-facing behavior before requesting access. The background worker
 registers the content script only after consent, injects it idempotently into existing
 ordinary tabs, and unregisters plus tears down mounted overlays when access is revoked.
 
-Native messages have an explicit protocol version, bounded frames, bounded
-reassembly, and parsed intent shapes. Unknown harness identities and unsupported
+Native messages have explicit protocol versions, bounded frames, bounded
+reassembly, parsed intent shapes, and correlated browser request IDs. Unknown harness identities and unsupported
 actions are omitted; the UI never invents a fallback capability.
 
 ## Terminal isolation

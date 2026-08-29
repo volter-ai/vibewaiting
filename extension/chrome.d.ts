@@ -91,7 +91,10 @@ declare const chrome: {
   };
   tabs: {
     create(options: { url: string }): Promise<{ id?: number }>;
-    query(options: Record<string, never>): Promise<Array<{ id?: number; url?: string }>>;
+    query(options: {
+      active?: boolean;
+      lastFocusedWindow?: boolean;
+    }): Promise<Array<{ id?: number; url?: string; title?: string; windowId?: number }>>;
   };
 };
 declare module "qrcode-generator" {
