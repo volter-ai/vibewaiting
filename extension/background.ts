@@ -468,7 +468,8 @@ async function routeBrowserOperation(
   id: string,
   call: BrowserOperationCall,
 ): Promise<void> {
-  const requestedPage = "page" in call.input ? call.input.page : undefined;
+  const requestedPage =
+    typeof call.input.page === "string" ? call.input.page : undefined;
   const tabId = requestedPage
     ? (tabByContentPage.get(requestedPage) ?? null)
     : await chrome.tabs.query({ active: true, lastFocusedWindow: true })
