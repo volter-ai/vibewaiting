@@ -56,12 +56,13 @@
   },
   "dependencies": {
     "@termfleet/terminal": "0.1.9",
-    "@volter-ai-dev/supercode-client": "0.3.41",
+    "@volter-ai-dev/supercode-client": "0.3.42",
     "@volter-ai-dev/supercode-harness-sdk": "0.3.18",
+    "@volter-ai-dev/supercode-playwright-shim": "0.1.0",
     "@volter-ai-dev/supercode-remote-access": "0.2.0",
     "@volter-ai-dev/supercode-terminal": "0.2.13",
     "@volter-ai-dev/supercode-ui": "0.1.66",
-    "@volter-ai-dev/widget-shell": "0.4.0",
+    "@volter-ai-dev/widget-shell": "0.4.1",
     "lucarne": "1.7.5",
     "ws": "8.21.3"
   },
@@ -69,6 +70,7 @@
     "@termfleet/terminal",
     "@volter-ai-dev/supercode-client",
     "@volter-ai-dev/supercode-harness-sdk",
+    "@volter-ai-dev/supercode-playwright-shim",
     "@volter-ai-dev/supercode-remote-access",
     "@volter-ai-dev/supercode-terminal",
     "@volter-ai-dev/supercode-ui",

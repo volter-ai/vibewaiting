@@ -16,6 +16,42 @@ import {
 } from "./browser-context.js";
 import { browserShortcutLabel } from "../src/browser-shortcuts.js";
 import { createRemoteAccessLauncher } from "./remote-access-companion.js";
+import {
+  BrowserActionRefusal,
+  BrowserPageExecutor,
+  type InPageAction,
+} from "@volter-ai-dev/supercode-playwright-shim";
+
+const CONSEQUENTIAL_BROWSER_ACTION =
+  /\b(buy|checkout|confirm|delete|log\s*out|pay|place\s+order|post|publish|purchase|remove|send|sign\s*out|submit|transfer)\b/i;
+
+function browserActionName(element: Element): string {
+  return (
+    element.getAttribute("aria-label") ||
+    element.getAttribute("title") ||
+    element.getAttribute("placeholder") ||
+    element.textContent ||
+    element.tagName.toLowerCase()
+  ).replace(/\s+/g, " ").trim();
+}
+
+function guardBrowserAction({ action, element, value }: InPageAction): void {
+  if (action === "fill" && element instanceof HTMLInputElement &&
+    (element.type === "password" || element.type === "file")) {
+    throw new BrowserActionRefusal(
+      "APPROVAL_REQUIRED",
+      "Filling password and file inputs requires explicit browser approval.",
+    );
+  }
+  const activating = action === "click" || action === "check" || action === "uncheck" ||
+    action === "select" || (action === "press" && ["Enter", "Space", " "].includes(String(value)));
+  if (activating && CONSEQUENTIAL_BROWSER_ACTION.test(browserActionName(element))) {
+    throw new BrowserActionRefusal(
+      "APPROVAL_REQUIRED",
+      `${action} on ${JSON.stringify(browserActionName(element))} may perform a consequential action.`,
+    );
+  }
+}
 
 interface VibewaitingContentGlobal {
   __vibewaitingContentMounted?: boolean;
@@ -29,6 +65,7 @@ if (!contentGlobal.__vibewaitingContentMounted) {
 
 function mountVibewaitingContent(): void {
   const contentPort = chrome.runtime.connect({ name: "vibewaiting:content" });
+  const browserPage = new BrowserPageExecutor(document, { actionGuard: guardBrowserAction });
   const remoteAccess = createRemoteAccessLauncher({
     open() {
       overlay.open();
@@ -59,6 +96,7 @@ function mountVibewaitingContent(): void {
     if (destroyed) return;
     destroyed = true;
     contentGlobal.__vibewaitingContentMounted = false;
+    browserPage.destroy();
     remoteAccess.destroy();
     contentPort.disconnect();
     overlay.destroy();
@@ -68,6 +106,19 @@ function mountVibewaitingContent(): void {
     const message = raw as Record<string, unknown>;
     if (message.type === "site-access-revoked") {
       destroy();
+      return;
+    }
+    if (
+      message.type === "browser-operation-request" &&
+      typeof message.id === "string"
+    ) {
+      void browserPage.execute(message.call).then((result) => {
+        contentPort.postMessage({
+          type: "browser-operation-response",
+          id: message.id,
+          result,
+        });
+      });
       return;
     }
     if (message.type === "remote-access-status") {

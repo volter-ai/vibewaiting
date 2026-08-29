@@ -23,6 +23,7 @@ if (!source) {
 const packages = [
   [join(source, "sdk/typescript"), "@volter-ai-dev/supercode-harness-sdk"],
   [join(source, "sdk/client"), "@volter-ai-dev/supercode-client"],
+  [join(source, "sdk/playwright-shim"), "@volter-ai-dev/supercode-playwright-shim"],
   [join(source, "sdk/ui"), "@volter-ai-dev/supercode-ui"],
 ];
 if (existsSync(join(source, "sdk/remote-access/package.json"))) {
