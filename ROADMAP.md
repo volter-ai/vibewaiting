@@ -16,6 +16,8 @@ local control over adding another standalone coding environment.
 - Installable mobile app behavior on stable origins only
 - Optional website access with an in-product disclosure, affirmative browser consent,
   and immediate revocation
+- A Vibewaiting active-tab provider for Supercode's shared browser capability, with
+  bounded accessibility snapshots and Playwright-shaped DOM locators
 
 ## Next
 

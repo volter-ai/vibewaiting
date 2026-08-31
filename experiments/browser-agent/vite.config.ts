@@ -6,6 +6,7 @@ import type { Plugin } from "vite";
 import { buildSync, type Plugin as EsbuildPlugin } from "esbuild";
 import { almostnodePlugin } from "almostnode/vite";
 import { createGrokRelay } from "./grok-relay.js";
+import { createCodexRelay } from "./codex-relay.js";
 import {
   hardenSandboxServiceWorker,
   THREE_CORE_ASSET_PATH,
@@ -149,7 +150,7 @@ function almostnodePublishedAssets(): Plugin {
 
 export default defineConfig({
   root: new URL(".", import.meta.url).pathname,
-  plugins: [almostnodePublishedAssets(), almostnodePlugin(), createGrokRelay()],
+  plugins: [almostnodePublishedAssets(), almostnodePlugin(), createGrokRelay(), createCodexRelay()],
   resolve: {
     alias: {
       "node:zlib": resolve(almostnodeDist, "../src/shims/zlib.ts"),

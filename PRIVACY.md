@@ -13,6 +13,7 @@ the tunnel provider you choose to a paired device.
 | Coding-agent messages and terminal traffic | Show and continue the local Claude Code or Codex session you select. | Read from the local harness. Browser-local drafts and unread boundaries remain until removed; the harness owns transcript retention. Remote traffic leaves the computer only while remote access is enabled. |
 | Page URL and title, selected text, and the latest link, image, or visible control pointed at or focused | Keep the messenger on ordinary pages and make the explicit **Attach** action work in one step. | Held temporarily in browser memory and replaced as you move, focus, navigate, or close the page. It enters the local companion only when you choose **Attach**; attached content then follows the selected harness's transcript retention. |
 | Pointer and focus activity | Determine which visible page target **Attach** should offer. | Used only in temporary browser memory. Vibewaiting does not create an activity history or send this activity to Volter. |
+| Active-page accessibility snapshots and browser-operation results | Answer a Supercode browser operation that you or a local agent invokes. | Returned through the loopback native companion to Supercode. Vibewaiting does not host a copy; the calling agent may retain tool input/output under its own transcript policy. |
 | Workspace path, UI choices, drafts, unread boundaries, and remote-device state | Restore local settings and the messenger state. | Stored in browser storage or `~/.vibewaiting` until you remove or purge it. |
 | Vibewaiting pairing grants, passcodes, and device-session cookies | Authenticate a phone or other remote browser that you explicitly pair. | Short-lived grants expire; paired devices remain authorized until revoked. Agent-provider passwords, API keys, and login cookies are not read or stored by Vibewaiting. |
 
@@ -20,7 +21,7 @@ the tunnel provider you choose to a paired device.
 
 | Permission | Why it is needed |
 | --- | --- |
-| Optional access to websites | Place the isolated messenger overlay on ordinary pages and capture context you explicitly attach. You grant or revoke HTTP/HTTPS access from Vibewaiting settings. |
+| Optional access to websites | Place the isolated messenger overlay on ordinary pages, capture context you explicitly attach, and let invoked local browser tools inspect or operate the active page. You grant or revoke HTTP/HTTPS access from Vibewaiting settings. |
 | Native messaging | Chrome cannot read local coding-agent transcripts, process state, or terminals. This connects the extension-owned messenger to the on-device Vibewaiting companion that can bridge those existing Claude Code and Codex sessions. |
 | Storage | Remember the selected workspace and local UI preferences. |
 | Context menus | Offer a precise fallback for attaching a link. |
@@ -29,15 +30,16 @@ The page-facing content script receives only enough coding-agent state to render
 launcher plus a redacted remote-access status. Full session state, pairing URLs,
 passcodes, and device details render inside an extension-origin iframe. Website access
 is requested only after an in-product disclosure names the page data and pointer/focus
-activity described above. Password fields are excluded. Page text, selections, links,
-and images do not cross into the local companion until you use **Attach**. URLs are
+activity described above. Password/file fields and consequential browser controls fail
+closed in browser tools. Page text, selections, links, and images do not cross into the
+local companion unless you use **Attach** or invoke a browser snapshot/query operation. URLs are
 normalized to remove credentials, credential-like parameters, and tracking parameters.
 Disabling website access unregisters the page script and removes the overlay from open
 pages.
 
 The use of information received from Google APIs adheres to the Chrome Web Store User
 Data Policy, including its Limited Use requirements. Vibewaiting uses browser and page
-data only to provide its disclosed messenger and explicit context-attachment features;
+data only to provide its disclosed messenger, context-attachment, and local browser-tool features;
 it does not sell the data, use it for advertising, or allow humans to read it.
 
 ## Data on your computer

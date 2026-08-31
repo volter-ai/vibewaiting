@@ -63,7 +63,7 @@ lanes are verified.
 
 | Permission | Dashboard justification |
 | --- | --- |
-| Optional HTTP/HTTPS host access | Granted from Vibewaiting onboarding after a prominent disclosure. It places the messenger on ordinary pages and remembers the latest pointed or focused page target locally so the user can explicitly attach it. No extension code runs on websites before consent. |
+| Optional HTTP/HTTPS host access | Granted from Vibewaiting onboarding after a prominent disclosure. It places the messenger on ordinary pages, supports explicit context attachment, and enables invoked local agent tools to inspect or operate the active tab through a fixed, bounded operation set. Password/file fields and consequential controls fail closed. No extension code runs on websites before consent. |
 | Native messaging | Chrome's sandbox cannot read the local transcripts, process state, or terminals created by Claude Code and Codex. This permission connects the extension-owned messenger to the on-device Vibewaiting companion that bridges those existing sessions. |
 | Scripting | Registers the content script only after optional website access is granted and unregisters it when access is revoked. |
 | Storage | Keeps workspace selection, browser-local UI preferences, and overlay geometry. |
@@ -75,9 +75,9 @@ downloads, or file-URL access.
 ## User-data declarations
 
 - Website content, browsing activity, and the latest pointer/focus target are handled
-  in temporary browser memory only for the disclosed overlay and explicit attachment
-  features.
-- Page context does not enter the native companion until the user chooses Attach.
+  for the disclosed overlay, explicit attachment, and invoked local browser-tool features.
+- Page context enters the native companion only when the user chooses Attach or a local
+  Supercode caller invokes a bounded browser snapshot/query operation.
 - Local agent session content is read from the user's computer and rendered only in an
   extension-owned iframe or an authenticated paired device.
 - Remote access is optional. When enabled, selected Cloudflare, ngrok, or configured

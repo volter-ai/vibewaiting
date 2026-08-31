@@ -5,6 +5,7 @@ import {
   type GrokBuildPermissionPromptOutcome,
   type GrokBuildPermissionRequest,
 } from "../experiments/browser-agent/src/grok-build-permissions.js";
+import { GrokBuildPermissionPolicy, parseGrokBuildPermissionRule } from "../experiments/browser-agent/src/grok-build-permission-rules.js";
 
 const request = (kind: GrokBuildPermissionRequest["kind"], detail = "value"): GrokBuildPermissionRequest => ({
   toolCallId: crypto.randomUUID(),
@@ -103,6 +104,16 @@ describe("Grok Build browser permission manager", () => {
     expect(prompt).not.toHaveBeenCalled();
   });
 
+  it("lets remembered web denials override the native static allowlist", async () => {
+    const prompt = vi.fn(async () => "reject-always" as const);
+    const manager = new GrokBuildPermissionManager(prompt);
+    const signal = new AbortController().signal;
+    await expect(manager.authorize(request("web_fetch", "https://docs.rs/private"), signal)).resolves.toEqual({ allowed: true, source: "safe" });
+    expect(prompt).not.toHaveBeenCalled();
+    const denied = new GrokBuildPermissionManager(prompt, { load: () => ({ denied: ["web_fetch:docs.rs"] }), save: () => undefined });
+    await expect(denied.authorize(request("web_fetch", "https://docs.rs/private"), signal)).resolves.toMatchObject({ allowed: false, source: "session-deny" });
+  });
+
   it("serializes concurrent reverse prompts like the native manager", async () => {
     let releaseFirst!: () => void;
     const first = new Promise<void>((resolve) => { releaseFirst = resolve; });
@@ -123,5 +134,19 @@ describe("Grok Build browser permission manager", () => {
     releaseFirst();
     await Promise.all([one, two]);
     expect(order).toEqual(["start:first", "end:first", "start:second", "end:second"]);
+  });
+
+  it("enforces managed deny and ask rules before always-approve and safe fast paths", async () => {
+    const prompt = vi.fn(async () => "allow-once" as const);
+    const policy = new GrokBuildPermissionPolicy({ rules: [
+      parseGrokBuildPermissionRule("Read(**/secret)", "deny")!,
+      parseGrokBuildPermissionRule("Bash(git status)", "ask")!,
+    ] });
+    const manager = new GrokBuildPermissionManager(prompt, undefined, policy);
+    manager.setAlwaysApprove(true);
+    const signal = new AbortController().signal;
+    await expect(manager.authorize(request("read", "/repo/secret"), signal)).resolves.toMatchObject({ allowed: false, source: "policy" });
+    await expect(manager.authorize(request("bash", "git status"), signal)).resolves.toMatchObject({ allowed: true, source: "prompt" });
+    expect(prompt).toHaveBeenCalledOnce();
   });
 });

@@ -189,7 +189,7 @@ async function renderSiteAccess(): Promise<void> {
   }
   if (siteAccessStatus)
     siteAccessStatus.textContent = enabled
-      ? "Enabled. Vibewaiting can appear on ordinary browser pages."
+      ? "Enabled. Vibewaiting and its local browser tools can use the active ordinary page."
       : "Disabled. No Vibewaiting code runs on ordinary browser pages.";
   renderOnboarding();
 }

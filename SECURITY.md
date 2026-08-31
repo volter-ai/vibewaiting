@@ -12,10 +12,16 @@ the agent processes it controls.
   remote-access status. Full messenger and pairing state live in an extension-owned
   iframe; native locators, tmux handles, agent credentials, and execution policy stay
   in the native host.
-- Before an explicit attach action, the content script remembers only the latest
-  pointed or focused element reference in page memory. It reads and bounds page text
-  only when the user chooses Attach. Credential-like URL parameters and tracking
-  parameters are removed before the resulting payload crosses the tab boundary.
+- The content script remembers the latest pointed or focused element reference for
+  Attach. It also executes Supercode's closed, structured browser-operation protocol
+  when the workspace-scoped provider receives a call. There is no
+  arbitrary JavaScript/evaluate operation. Snapshots and query results are bounded;
+  password/file fields and consequential controls fail closed. Credential-like URL
+  parameters and tracking parameters are removed from Attach payloads.
+- Browser-provider discovery files are owner-only under Supercode's configuration
+  directory; every native-host process binds a random-token-protected server to loopback
+  and removes its own record on shutdown. Requests start on the current active tab and
+  may continue only through the opaque page handle Vibewaiting returned for that tab.
 - Remote access terminates at the authenticated messenger server. Pairing grants are
   short-lived and single-use, cookies are HTTP-only, login is rate-limited, and terminal
   grants remain opaque and short-lived. Public chat and terminal transport uses

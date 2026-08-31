@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   analyzeGrokBuildBash,
+  GROK_BUILD_DEFAULT_WEB_FETCH_ALLOWLIST,
+  isGrokBuildStaticWebFetchAllowed,
   protectedGrokBuildEdit,
 } from "../experiments/browser-agent/src/grok-build-permission-policy.js";
 
@@ -51,5 +53,14 @@ describe("Grok Build native permission policy translation", () => {
     expect(protectedGrokBuildEdit("/home/me/.ssh/config")).toBe("ssh");
     expect(protectedGrokBuildEdit("/private/etc/hosts")).toBe("etc");
     expect(protectedGrokBuildEdit("/repo/src/game.ts")).toBeUndefined();
+  });
+
+  it("copies all 87 native static web-fetch entries and path-boundary matching", () => {
+    expect(GROK_BUILD_DEFAULT_WEB_FETCH_ALLOWLIST).toHaveLength(87);
+    expect(isGrokBuildStaticWebFetchAllowed("https://WWW.DOCS.RS./crate/serde")).toBe(true);
+    expect(isGrokBuildStaticWebFetchAllowed("https://vercel.com/docs/functions")).toBe(true);
+    expect(isGrokBuildStaticWebFetchAllowed("https://vercel.com/docs-old/private")).toBe(false);
+    expect(isGrokBuildStaticWebFetchAllowed("https://vercel.com/account")).toBe(false);
+    expect(isGrokBuildStaticWebFetchAllowed("https://unlisted.example/docs")).toBe(false);
   });
 });

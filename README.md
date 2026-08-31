@@ -26,6 +26,9 @@ switch the same conversation into a familiar terminal.
   temporary tunnel or a stable relay you configure.
 - **Attach the page in one action.** Send a selection, link, image, GitHub object,
   Hacker News item, or the visible page without copying it by hand.
+- **Let Supercode agents use the tab you are already in.** Vibewaiting hosts
+  Supercode's bounded accessibility and Playwright-shaped in-page package—without
+  CDP or a second automation browser.
 
 ## Try the alpha
 
@@ -75,9 +78,14 @@ four can be remapped from the browser's extension-shortcuts page.
 
 Vibewaiting has no account, analytics, ads, or hosted transcript service. The ordinary
 page sees only the launcher; full session state renders in an extension-owned iframe.
-Page context crosses into the local companion only when you explicitly attach it, and
-native paths, credentials, tmux handles, and execution policy never enter page content.
+Explicit attachment context crosses into the local companion only when you attach it;
+browser-operation results cross only when a local caller invokes one. Native paths,
+credentials, tmux handles, and execution policy never enter page content.
 Remote access is off until you enable it.
+
+When you invoke a local browser operation, its bounded result crosses the companion to
+that local caller. Password/file fields and consequential controls fail closed. See
+[Browser operations](docs/browser-operations.md) for the exact operations and trust boundary.
 
 Read the plain-language [privacy policy](PRIVACY.md), [security model](SECURITY.md),
 and [architecture](docs/architecture.md) before granting access.

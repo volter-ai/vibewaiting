@@ -32,6 +32,41 @@ const SIMPLE_SAFE = new Set([
 const SETUP = new Set(["cd", "pushd", "popd", "export", "unset", "set", "sleep", "timeout"]);
 const DANGEROUS = new Set(["rm", "chmod", "chown", "chgrp", "chattr", "pkill", "kill", "killall"]);
 
+/** Native WebFetchParams::DEFAULT_ALLOWED_DOMAINS, including its path-scoped entry. */
+export const GROK_BUILD_DEFAULT_WEB_FETCH_ALLOWLIST = [
+  "x.ai", "console.x.ai", "docs.x.ai", "api.x.ai",
+  "docs.python.org", "en.cppreference.com", "docs.oracle.com", "learn.microsoft.com", "developer.mozilla.org",
+  "go.dev", "pkg.go.dev", "www.php.net", "docs.swift.org", "kotlinlang.org", "ruby-doc.org", "doc.rust-lang.org",
+  "docs.rs", "www.typescriptlang.org", "react.dev", "angular.io", "vuejs.org", "nextjs.org", "expressjs.com",
+  "nodejs.org", "bun.sh", "jquery.com", "getbootstrap.com", "tailwindcss.com", "d3js.org", "threejs.org",
+  "redux.js.org", "webpack.js.org", "jestjs.io", "reactrouter.com", "docs.djangoproject.com", "flask.palletsprojects.com",
+  "fastapi.tiangolo.com", "pandas.pydata.org", "numpy.org", "www.tensorflow.org", "pytorch.org", "scikit-learn.org",
+  "matplotlib.org", "requests.readthedocs.io", "jupyter.org", "laravel.com", "symfony.com", "wordpress.org",
+  "docs.spring.io", "hibernate.org", "tomcat.apache.org", "gradle.org", "maven.apache.org", "asp.net",
+  "dotnet.microsoft.com", "nuget.org", "blazor.net", "reactnative.dev", "docs.flutter.dev", "developer.apple.com",
+  "developer.android.com", "keras.io", "spark.apache.org", "huggingface.co", "www.kaggle.com", "redis.io",
+  "www.postgresql.org", "dev.mysql.com", "www.sqlite.org", "graphql.org", "prisma.io", "docs.aws.amazon.com",
+  "cloud.google.com", "kubernetes.io", "www.docker.com", "www.terraform.io", "www.ansible.com", "vercel.com/docs",
+  "docs.netlify.com", "devcenter.heroku.com", "cypress.io", "selenium.dev", "docs.unity.com", "docs.unrealengine.com",
+  "git-scm.com", "nginx.org", "httpd.apache.org",
+] as const;
+
+export function isGrokBuildStaticWebFetchAllowed(rawUrl: string): boolean {
+  let url: URL;
+  try { url = new URL(rawUrl); } catch { return false; }
+  const host = normalizeWebDomain(url.hostname);
+  const path = url.pathname.toLowerCase();
+  return GROK_BUILD_DEFAULT_WEB_FETCH_ALLOWLIST.some((raw) => {
+    const normalized = normalizeWebDomain(raw);
+    const slash = normalized.indexOf("/");
+    const allowedHost = slash < 0 ? normalized : normalized.slice(0, slash);
+    if (host !== allowedHost) return false;
+    if (slash < 0) return true;
+    const prefix = normalized.slice(slash).replace(/\/$/u, "");
+    return path === prefix || (path.startsWith(prefix) && path.charAt(prefix.length) === "/");
+  });
+}
+
 /**
  * Browser translation of native `evaluate_bash_segments` for word-only command
  * sequences. Anything the browser parser cannot prove equivalent fails closed
@@ -279,4 +314,9 @@ function normalizePath(value: string): string {
     if (part === "..") output.pop(); else output.push(part);
   }
   return `/${output.join("/")}`;
+}
+
+function normalizeWebDomain(value: string): string {
+  const normalized = value.trim().replace(/[/.]+$/u, "").toLowerCase();
+  return normalized.startsWith("www.") ? normalized.slice(4) : normalized;
 }

@@ -5,6 +5,19 @@ the complete generated notes and downloadable artifacts for each version.
 
 ## [Unreleased]
 
+### Added
+
+- Vibewaiting can publish its active extension tab as a Supercode browser provider.
+  Supercode owns the shared SDK, CLI, MCP operation registry, and policy surface;
+  Vibewaiting supplies bounded accessibility snapshots and structured DOM actions
+  without CDP or arbitrary page evaluation.
+
+### Security
+
+- Supercode provider discovery is loopback-only with random-token, owner-only
+  discovery. Password/file fields and consequential controls fail closed with
+  `APPROVAL_REQUIRED`, and revoking website access removes the executor.
+
 ## [0.1.2] - 2026-08-26
 
 ### Changed

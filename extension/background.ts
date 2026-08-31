@@ -8,6 +8,12 @@ import { parseRemoteAccessConfiguration } from "../src/extension-protocol.js";
 import { parseBrowserContextAttachments } from "../src/browser-context.js";
 import { VIBEWAITING_NEUTRAL } from "../src/theme.js";
 import {
+  parseBrowserOperationCall,
+  parseBrowserOperationResult,
+  type BrowserOperationCall,
+  type BrowserOperationResult,
+} from "@volter-ai-dev/supercode-playwright-shim";
+import {
   launcherBadgeFromState,
   type LauncherBadgeTone,
 } from "../src/launcher.js";
@@ -22,6 +28,8 @@ const CONTENT_SCRIPT_ID = "vibewaiting-content";
 const SITE_ORIGINS = ["http://*/*", "https://*/*"];
 const contentPorts = new Set<ExtensionPort>();
 const contentPortsByTab = new Map<number, ExtensionPort>();
+const contentPageByTab = new Map<number, string>();
+const tabByContentPage = new Map<string, number>();
 const guestPorts = new Map<
   ExtensionPort,
   { id: string; visible: boolean; tabId: number | null }
@@ -30,6 +38,14 @@ const optionsPorts = new Set<ExtensionPort>();
 const pendingBrowserRequests = new Map<
   string,
   { guest: ExtensionPort; tabId: number }
+>();
+const pendingAgentBrowserRequests = new Map<
+  string,
+  {
+    tabId: number;
+    operation: BrowserOperationCall["operation"];
+    timer: ReturnType<typeof setTimeout>;
+  }
 >();
 const pendingHostEvents = new Map<number, unknown[]>();
 const pendingRemoteAccessOpen = new Set<number>();
@@ -383,6 +399,12 @@ function handleNativeMessage(raw: unknown): void {
     return;
   const message = decodeChunkedEvent(candidate);
   if (!message) return;
+  if (message.type === "browser-operation-request") {
+    const call = parseBrowserOperationCall(message.call);
+    if (typeof message.id === "string" && call)
+      void routeBrowserOperation(message.id, call);
+    return;
+  }
   if (message.type === "patch") {
     lastPatch = message.patch;
     broadcastPatch(message.patch);
@@ -420,6 +442,73 @@ function handleNativeMessage(raw: unknown): void {
     };
     broadcastRemoteAccess();
   }
+}
+
+function sendAgentBrowserResponse(id: string, result: BrowserOperationResult): void {
+  nativePort?.postMessage({
+    protocol: VIBEWAITING_EXTENSION_PROTOCOL,
+    type: "browser-operation-response",
+    id,
+    result,
+  });
+}
+
+function unavailableBrowserResult(
+  operation: BrowserOperationCall["operation"],
+  message: string,
+): BrowserOperationResult {
+  return {
+    ok: false,
+    operation,
+    error: { code: "NOT_AVAILABLE", message },
+  };
+}
+
+async function routeBrowserOperation(
+  id: string,
+  call: BrowserOperationCall,
+): Promise<void> {
+  const requestedPage =
+    typeof call.input.page === "string" ? call.input.page : undefined;
+  const tabId = requestedPage
+    ? (tabByContentPage.get(requestedPage) ?? null)
+    : await chrome.tabs.query({ active: true, lastFocusedWindow: true })
+      .then(([tab]) => Number.isInteger(tab?.id) ? tab!.id! : null);
+  if (tabId === null) {
+    sendAgentBrowserResponse(
+      id,
+      unavailableBrowserResult(
+        call.operation,
+        requestedPage
+          ? "The requested browser page is no longer available."
+          : "No active browser tab is available.",
+      ),
+    );
+    return;
+  }
+  const content = contentPortsByTab.get(tabId);
+  if (!content) {
+    sendAgentBrowserResponse(
+      id,
+      unavailableBrowserResult(
+        call.operation,
+        "The active tab is not an HTTP(S) page with Vibewaiting site access.",
+      ),
+    );
+    return;
+  }
+  const existing = pendingAgentBrowserRequests.get(id);
+  if (existing) clearTimeout(existing.timer);
+  const timer = setTimeout(() => {
+    if (!pendingAgentBrowserRequests.delete(id)) return;
+    sendAgentBrowserResponse(id, {
+      ok: false,
+      operation: call.operation,
+      error: { code: "TIMED_OUT", message: "The active page did not answer in 10 seconds." },
+    });
+  }, 10_000);
+  pendingAgentBrowserRequests.set(id, { tabId, operation: call.operation, timer });
+  post(content, { type: "browser-operation-request", id, call });
 }
 
 async function settings(): Promise<ExtensionSettings | null> {
@@ -523,6 +612,43 @@ function handleContentMessage(
 ): void {
   const message = record(raw);
   if (!message) return;
+  if (message.type === "browser-operation-response" && typeof message.id === "string") {
+    const pending = pendingAgentBrowserRequests.get(message.id);
+    if (!pending || pending.tabId !== tabId) return;
+    pendingAgentBrowserRequests.delete(message.id);
+    clearTimeout(pending.timer);
+    const result = parseBrowserOperationResult(message.result);
+    if (!result) {
+      sendAgentBrowserResponse(message.id, {
+        ok: false,
+        operation: pending.operation,
+        error: { code: "FAILED", message: "The page returned an invalid browser result." },
+      });
+      return;
+    }
+    if (result.operation !== pending.operation) {
+      sendAgentBrowserResponse(message.id, {
+        ok: false,
+        operation: pending.operation,
+        error: { code: "FAILED", message: "The page returned a result for the wrong browser operation." },
+      });
+      return;
+    }
+    sendAgentBrowserResponse(message.id, {
+      ...result,
+      ...(result.target
+        ? {
+            target: {
+              ...result.target,
+              ...(contentPageByTab.get(tabId)
+                ? { page: contentPageByTab.get(tabId)! }
+                : {}),
+            },
+          }
+        : {}),
+    });
+    return;
+  }
   if (message.type === "remote-access-open") {
     let delivered = false;
     for (const [guestPort, guest] of guestPorts)
@@ -661,7 +787,14 @@ chrome.runtime.onConnect.addListener((port) => {
   if (port.name === "vibewaiting:content") {
     const { tabId } = senderTab(port);
     contentPorts.add(port);
-    if (tabId !== null) contentPortsByTab.set(tabId, port);
+    if (tabId !== null) {
+      const priorPage = contentPageByTab.get(tabId);
+      if (priorPage) tabByContentPage.delete(priorPage);
+      const page = `vibewaiting:${crypto.randomUUID()}`;
+      contentPortsByTab.set(tabId, port);
+      contentPageByTab.set(tabId, page);
+      tabByContentPage.set(page, tabId);
+    }
     if (lastPatch !== undefined)
       post(port, { type: "launcher", ...launcherFromPatch(lastPatch) });
     post(port, { type: "status", ...lastStatus });
@@ -678,8 +811,12 @@ chrome.runtime.onConnect.addListener((port) => {
       contentPorts.delete(port);
       if (tabId !== null) {
         pendingRemoteAccessOpen.delete(tabId);
-        if (contentPortsByTab.get(tabId) === port)
+        if (contentPortsByTab.get(tabId) === port) {
           contentPortsByTab.delete(tabId);
+          const page = contentPageByTab.get(tabId);
+          contentPageByTab.delete(tabId);
+          if (page) tabByContentPage.delete(page);
+        }
       }
       for (const [id, pending] of pendingBrowserRequests) {
         if (pending.tabId !== tabId) continue;
@@ -687,6 +824,16 @@ chrome.runtime.onConnect.addListener((port) => {
         browserResponse(pending.guest, id, {
           ok: false,
           error: "The page changed before context capture finished.",
+        });
+      }
+      for (const [id, pending] of pendingAgentBrowserRequests) {
+        if (pending.tabId !== tabId) continue;
+        pendingAgentBrowserRequests.delete(id);
+        clearTimeout(pending.timer);
+        sendAgentBrowserResponse(id, {
+          ok: false,
+          operation: pending.operation,
+          error: { code: "NOT_AVAILABLE", message: "The active page disconnected during the browser operation." },
         });
       }
     });

@@ -24,6 +24,7 @@ import {
   type GrokBuildPermissionRequest,
   type GrokBuildPermissionStore,
 } from "./grok-build-permissions.js";
+import { discoverGrokBuildPermissionPolicy } from "./grok-build-permission-rules.js";
 
 interface RunResult {
   stdout: string;
@@ -123,7 +124,11 @@ export class GrokBuildBrowserRuntime implements GrokBuildToolRuntime {
   ) {
     installBrowserCommandIsolation(container);
     this.permissions = controlPlaneOwner?.permissions
-      ?? (services.requestToolPermission ? new GrokBuildPermissionManager(services.requestToolPermission, permissionStore(container.vfs)) : undefined);
+      ?? (services.requestToolPermission ? new GrokBuildPermissionManager(
+        services.requestToolPermission,
+        permissionStore(container.vfs),
+        discoverGrokBuildPermissionPolicy(container.vfs, workspacePath),
+      ) : undefined);
     this.files = new GrokBuildFileSystemTools(container.vfs, workspacePath);
     this.background = new GrokBuildBackgroundTasks(container, workspacePath);
     const restoredPlanMode = this.restorePlanMode();

@@ -1,6 +1,7 @@
-import { analyzeGrokBuildBash, protectedGrokBuildEdit } from "./grok-build-permission-policy.js";
+import { analyzeGrokBuildBash, isGrokBuildStaticWebFetchAllowed, protectedGrokBuildEdit } from "./grok-build-permission-policy.js";
+import { GrokBuildPermissionPolicy } from "./grok-build-permission-rules.js";
 
-export type GrokBuildPermissionAccessKind = "read" | "grep" | "edit" | "bash" | "mcp" | "web_fetch" | "web_search";
+export type GrokBuildPermissionAccessKind = "read" | "grep" | "edit" | "bash" | "mcp" | "web_fetch" | "web_search" | "agent_message";
 
 export interface GrokBuildPermissionRequest {
   toolCallId: string;
@@ -22,7 +23,7 @@ export type GrokBuildPermissionPromptOutcome =
 
 export interface GrokBuildPermissionDecision {
   allowed: boolean;
-  source: "safe" | "always-approve" | "session-grant" | "session-deny" | "prompt";
+  source: "safe" | "always-approve" | "policy" | "session-grant" | "session-deny" | "prompt";
   reason?: string;
 }
 
@@ -44,7 +45,11 @@ export class GrokBuildPermissionManager {
   private readonly denied = new Set<string>();
   private promptTail: Promise<void> = Promise.resolve();
 
-  constructor(private readonly prompt?: GrokBuildPermissionPrompter, private readonly store?: GrokBuildPermissionStore) {
+  constructor(
+    private readonly prompt?: GrokBuildPermissionPrompter,
+    private readonly store?: GrokBuildPermissionStore,
+    private readonly policy = new GrokBuildPermissionPolicy(),
+  ) {
     const restored = store?.load();
     for (const key of restored?.allowed ?? []) if (typeof key === "string") this.allowed.add(key);
     for (const key of restored?.denied ?? []) if (typeof key === "string") this.denied.add(key);
@@ -66,19 +71,27 @@ export class GrokBuildPermissionManager {
 
   async authorize(request: GrokBuildPermissionRequest, signal: AbortSignal): Promise<GrokBuildPermissionDecision> {
     signal.throwIfAborted();
-    if (this.alwaysApprove) return { allowed: true, source: "always-approve" };
-    if (request.kind === "read" || request.kind === "grep" || request.kind === "web_search") {
+    const policyDecision = this.policy.evaluate(request);
+    if (policyDecision?.action === "deny") return { allowed: false, source: "policy", reason: policyDecision.reason };
+    const policyForcesPrompt = policyDecision?.action === "ask";
+    if ((this.alwaysApprove || this.policy.bypassPermissions) && !policyForcesPrompt) return { allowed: true, source: "always-approve" };
+    if (!policyForcesPrompt && (request.kind === "read" || request.kind === "grep" || request.kind === "web_search")) {
       return { allowed: true, source: "safe" };
     }
     const protectedEdit = request.kind === "edit" && request.detail ? protectedGrokBuildEdit(request.detail) : undefined;
-    if (request.kind === "edit" && this.allowEditsForSession && !protectedEdit) return { allowed: true, source: "session-grant" };
+    if (!policyForcesPrompt && request.kind === "edit" && this.allowEditsForSession && !protectedEdit) return { allowed: true, source: "session-grant" };
     const bash = request.kind === "bash" ? analyzeGrokBuildBash(request.detail ?? "") : undefined;
     const key = permissionKey(request);
     if (isDenied(request, this.denied)) return { allowed: false, source: "session-deny", reason: rememberedDenial(request) };
-    if (bash && bash.needsPrompt.length === 0) return { allowed: true, source: "safe" };
-    if (!protectedEdit && (!bash ? this.allowed.has(key) || mcpServerGranted(request, this.allowed) : bashSegmentsGranted(bash, this.allowed))) {
+    if (!policyForcesPrompt && request.kind === "web_fetch" && isGrokBuildStaticWebFetchAllowed(request.detail ?? "")) return { allowed: true, source: "safe" };
+    if (!policyForcesPrompt && bash && bash.needsPrompt.length === 0) return { allowed: true, source: "safe" };
+    const bashFloor = Boolean(bash && (bash.dangerous.length || !bash.parseable));
+    if (policyDecision?.action === "allow" && !protectedEdit && !bashFloor) return { allowed: true, source: "policy" };
+    if (!policyForcesPrompt && !protectedEdit && (!bash ? this.allowed.has(key) || mcpServerGranted(request, this.allowed) : bashSegmentsGranted(bash, this.allowed))) {
       return { allowed: true, source: "session-grant" };
     }
+    if (this.policy.promptPolicy === "deny") return { allowed: false, source: "policy", reason: "Permission policy denied an unapproved tool call" };
+    if (this.policy.promptPolicy === "allow") return { allowed: true, source: "policy" };
     if (!this.prompt) return { allowed: false, source: "prompt", reason: "Failed to request permission from user: no permission client is available" };
 
     const outcome = await this.serialPrompt(request, signal);

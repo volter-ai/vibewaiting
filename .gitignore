@@ -7,3 +7,4 @@ test-results/
 .wrangler/
 test/fixtures/grok-conformance/*.jsonl
 experiments/browser-agent/rhai-wasm/target/
+experiments/browser-agent/codex-wasm/target/
