@@ -5,20 +5,31 @@ import {
   VIBEWAITING_EXTENSION_PROTOCOL,
 } from "../src/extension-protocol.js";
 import { parseRemoteAccessConfiguration } from "../src/extension-protocol.js";
-import {
-  parseBrowserContextAttachments,
-} from "../src/browser-context.js";
+import { parseBrowserContextAttachments } from "../src/browser-context.js";
 import { VIBEWAITING_NEUTRAL } from "../src/theme.js";
-import { launcherBadgeFromState, type LauncherBadgeTone } from "../src/launcher.js";
+import {
+  parseBrowserOperationCall,
+  parseBrowserOperationResult,
+  type BrowserOperationCall,
+  type BrowserOperationResult,
+} from "@volter-ai-dev/supercode-playwright-shim";
+import {
+  launcherBadgeFromState,
+  type LauncherBadgeTone,
+} from "../src/launcher.js";
 import {
   parseRemoteDeviceSnapshot,
   type RemoteDeviceSnapshot,
-} from "../src/remote-devices.js";
+} from "@volter-ai-dev/supercode-remote-access/client";
 
 const SETTINGS_KEY = "vibewaiting:settings";
 const ATTACH_LINK_MENU = "vibewaiting:attach-link";
+const CONTENT_SCRIPT_ID = "vibewaiting-content";
+const SITE_ORIGINS = ["http://*/*", "https://*/*"];
 const contentPorts = new Set<ExtensionPort>();
 const contentPortsByTab = new Map<number, ExtensionPort>();
+const contentPageByTab = new Map<number, string>();
+const tabByContentPage = new Map<string, number>();
 const guestPorts = new Map<
   ExtensionPort,
   { id: string; visible: boolean; tabId: number | null }
@@ -28,14 +39,27 @@ const pendingBrowserRequests = new Map<
   string,
   { guest: ExtensionPort; tabId: number }
 >();
+const pendingAgentBrowserRequests = new Map<
+  string,
+  {
+    tabId: number;
+    operation: BrowserOperationCall["operation"];
+    timer: ReturnType<typeof setTimeout>;
+  }
+>();
 const pendingHostEvents = new Map<number, unknown[]>();
+const pendingRemoteAccessOpen = new Set<number>();
 const pendingIntents: Array<{ id: string; payload: unknown }> = [];
 const chunks = new Map<string, { total: number; parts: string[] }>();
 let nativePort: ExtensionPort | null = null;
 let nativeReady = false;
 let nativeConnecting: Promise<void> | null = null;
 let lastPatch: unknown;
-let lastStatus: { phase: string; message?: string } = { phase: "stopped" };
+let lastStatus: {
+  phase: string;
+  message?: string;
+  scope?: "companion" | "runtime" | "setup";
+} = { phase: "stopped" };
 let lastRemoteAccess: {
   devices: RemoteDeviceSnapshot;
   pairing?: unknown;
@@ -56,8 +80,6 @@ function installContextMenus(): void {
     });
   });
 }
-
-installContextMenus();
 
 function record(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -116,6 +138,77 @@ function post(port: ExtensionPort, message: unknown): void {
   }
 }
 
+let siteAccessSync: Promise<void> = Promise.resolve();
+function syncSiteAccess(injectExisting = false): Promise<void> {
+  siteAccessSync = siteAccessSync
+    .catch(() => undefined)
+    .then(async () => {
+      const allowed = await chrome.permissions.contains({
+        origins: SITE_ORIGINS,
+      });
+      const registered = await chrome.scripting.getRegisteredContentScripts({
+        ids: [CONTENT_SCRIPT_ID],
+      });
+      const active = registered.some(
+        (script) => script.id === CONTENT_SCRIPT_ID,
+      );
+      let registeredNow = false;
+      if (allowed && !active) {
+        await chrome.scripting.registerContentScripts([
+          {
+            id: CONTENT_SCRIPT_ID,
+            js: ["content.js"],
+            matches: SITE_ORIGINS,
+            persistAcrossSessions: true,
+            runAt: "document_idle",
+          },
+        ]);
+        registeredNow = true;
+      } else if (!allowed && active) {
+        for (const port of contentPorts)
+          post(port, { type: "site-access-revoked" });
+        await chrome.scripting.unregisterContentScripts({
+          ids: [CONTENT_SCRIPT_ID],
+        });
+      }
+      if (allowed) installContextMenus();
+      else chrome.contextMenus.removeAll(() => void chrome.runtime.lastError);
+
+      if (!allowed || (!injectExisting && !registeredNow)) return;
+      const tabs = (await chrome.tabs.query({})).filter(
+        (tab) =>
+          Number.isInteger(tab.id) &&
+          typeof tab.url === "string" &&
+          /^https?:/.test(tab.url),
+      );
+      for (let offset = 0; offset < tabs.length; offset += 12) {
+        await Promise.all(
+          tabs
+            .slice(offset, offset + 12)
+            .map((tab) =>
+              chrome.scripting
+                .executeScript({
+                  files: ["content.js"],
+                  target: { tabId: tab.id! },
+                })
+                .catch(() => undefined),
+            ),
+        );
+      }
+    });
+  return siteAccessSync;
+}
+
+function requestSiteAccessSync(injectExisting = false): void {
+  void syncSiteAccess(injectExisting).catch((error) => {
+    console.error("Vibewaiting could not synchronize website access", error);
+  });
+}
+
+requestSiteAccessSync();
+chrome.permissions.onAdded.addListener(() => requestSiteAccessSync(true));
+chrome.permissions.onRemoved.addListener(() => requestSiteAccessSync());
+
 function forwardHostEvent(tabId: number, event: unknown): void {
   let delivered = false;
   for (const [port, guest] of guestPorts) {
@@ -164,8 +257,22 @@ function broadcastStatus(): void {
 
 function broadcastRemoteAccess(): void {
   if (!lastRemoteAccess) return;
-  for (const port of optionsPorts) post(port, { type: "remote-access", ...lastRemoteAccess });
-  for (const port of contentPorts) post(port, { type: "remote-access", ...lastRemoteAccess });
+  for (const port of optionsPorts)
+    post(port, { type: "remote-access", ...lastRemoteAccess });
+  for (const port of guestPorts.keys())
+    post(port, { type: "remote-access", ...lastRemoteAccess });
+  const snapshot = record(lastRemoteAccess.snapshot);
+  const status = snapshot?.status;
+  if (
+    status !== "connected" &&
+    status !== "error" &&
+    status !== "off" &&
+    status !== "reconnecting" &&
+    status !== "starting"
+  )
+    return;
+  for (const port of contentPorts)
+    post(port, { type: "remote-access-status", status });
 }
 
 async function configureRemoteAccess(rawConfiguration: unknown): Promise<void> {
@@ -275,9 +382,11 @@ function disconnectNative(): boolean {
 
 // The development runner evaluates inside this service worker over its private CDP target. A web
 // page cannot reach this global, and production behavior never calls it.
-(globalThis as typeof globalThis & {
-  __vibewaitingDisconnectNativeForDevelopment?: () => boolean;
-}).__vibewaitingDisconnectNativeForDevelopment = () => {
+(
+  globalThis as typeof globalThis & {
+    __vibewaitingDisconnectNativeForDevelopment?: () => boolean;
+  }
+).__vibewaitingDisconnectNativeForDevelopment = () => {
   const connected = nativePort !== null;
   // Let Runtime.evaluate return before disconnecting the port that keeps this worker alive.
   setTimeout(disconnectNative, 0);
@@ -290,6 +399,12 @@ function handleNativeMessage(raw: unknown): void {
     return;
   const message = decodeChunkedEvent(candidate);
   if (!message) return;
+  if (message.type === "browser-operation-request") {
+    const call = parseBrowserOperationCall(message.call);
+    if (typeof message.id === "string" && call)
+      void routeBrowserOperation(message.id, call);
+    return;
+  }
   if (message.type === "patch") {
     lastPatch = message.patch;
     broadcastPatch(message.patch);
@@ -299,13 +414,17 @@ function handleNativeMessage(raw: unknown): void {
     nativeReady = message.phase === "ready";
     lastStatus = {
       phase: message.phase,
+      ...(message.phase === "error" ? { scope: "runtime" as const } : {}),
       ...(message.message ? { message: message.message } : {}),
     };
     broadcastStatus();
     if (nativeReady) flushIntents();
     return;
   }
-  if (message.type === "remote-access" && typeof message.passcode === "string") {
+  if (
+    message.type === "remote-access" &&
+    typeof message.passcode === "string"
+  ) {
     const devices = parseRemoteDeviceSnapshot(message.devices);
     if (!devices) {
       lastStatus = {
@@ -325,6 +444,73 @@ function handleNativeMessage(raw: unknown): void {
   }
 }
 
+function sendAgentBrowserResponse(id: string, result: BrowserOperationResult): void {
+  nativePort?.postMessage({
+    protocol: VIBEWAITING_EXTENSION_PROTOCOL,
+    type: "browser-operation-response",
+    id,
+    result,
+  });
+}
+
+function unavailableBrowserResult(
+  operation: BrowserOperationCall["operation"],
+  message: string,
+): BrowserOperationResult {
+  return {
+    ok: false,
+    operation,
+    error: { code: "NOT_AVAILABLE", message },
+  };
+}
+
+async function routeBrowserOperation(
+  id: string,
+  call: BrowserOperationCall,
+): Promise<void> {
+  const requestedPage =
+    typeof call.input.page === "string" ? call.input.page : undefined;
+  const tabId = requestedPage
+    ? (tabByContentPage.get(requestedPage) ?? null)
+    : await chrome.tabs.query({ active: true, lastFocusedWindow: true })
+      .then(([tab]) => Number.isInteger(tab?.id) ? tab!.id! : null);
+  if (tabId === null) {
+    sendAgentBrowserResponse(
+      id,
+      unavailableBrowserResult(
+        call.operation,
+        requestedPage
+          ? "The requested browser page is no longer available."
+          : "No active browser tab is available.",
+      ),
+    );
+    return;
+  }
+  const content = contentPortsByTab.get(tabId);
+  if (!content) {
+    sendAgentBrowserResponse(
+      id,
+      unavailableBrowserResult(
+        call.operation,
+        "The active tab is not an HTTP(S) page with Vibewaiting site access.",
+      ),
+    );
+    return;
+  }
+  const existing = pendingAgentBrowserRequests.get(id);
+  if (existing) clearTimeout(existing.timer);
+  const timer = setTimeout(() => {
+    if (!pendingAgentBrowserRequests.delete(id)) return;
+    sendAgentBrowserResponse(id, {
+      ok: false,
+      operation: call.operation,
+      error: { code: "TIMED_OUT", message: "The active page did not answer in 10 seconds." },
+    });
+  }, 10_000);
+  pendingAgentBrowserRequests.set(id, { tabId, operation: call.operation, timer });
+  post(content, { type: "browser-operation-request", id, call });
+}
+
 async function settings(): Promise<ExtensionSettings | null> {
   const value = (await chrome.storage.local.get(SETTINGS_KEY))[SETTINGS_KEY];
   const candidate = record(value);
@@ -340,14 +526,14 @@ async function ensureNative(): Promise<void> {
     return await (nativeConnecting ?? Promise.resolve());
   nativeConnecting = (async () => {
     const configured = await settings();
-    if (!configured) {
-      lastStatus = {
-        phase: "setup",
-        message: "Choose a workspace in Vibewaiting extension settings.",
-      };
-      broadcastStatus();
-      return;
-    }
+    lastStatus = {
+      phase: "starting",
+      scope: configured ? "runtime" : "setup",
+      message: configured
+        ? "Connecting to local coding sessions…"
+        : "Checking the local companion…",
+    };
+    broadcastStatus();
     try {
       const port = chrome.runtime.connectNative(NATIVE_HOST_NAME);
       nativePort = port;
@@ -360,21 +546,40 @@ async function ensureNative(): Promise<void> {
         nativeReady = false;
         lastStatus = {
           phase: "error",
+          scope: "companion",
           message:
             detail ||
             `Run vibewaiting native install --extension-id ${chrome.runtime.id}`,
         };
         broadcastStatus();
       });
-      port.postMessage({
-        protocol: VIBEWAITING_EXTENSION_PROTOCOL,
-        type: "start",
-        settings: configured,
-      });
+      if (configured) {
+        port.postMessage({
+          protocol: VIBEWAITING_EXTENSION_PROTOCOL,
+          type: "start",
+          settings: configured,
+        });
+      } else {
+        // Presence is inferred from the native channel instead of a new protocol command so a
+        // freshly updated extension can still onboard against the previous companion. This probe
+        // is deliberately short-lived; the real host starts only after the workspace is saved.
+        globalThis.setTimeout(() => {
+          if (nativePort !== port) return;
+          nativePort = null;
+          port.disconnect();
+          lastStatus = {
+            phase: "setup",
+            scope: "setup",
+            message: "Local companion ready. Choose a folder for new chats.",
+          };
+          broadcastStatus();
+        }, 150);
+      }
     } catch (error) {
       nativePort = null;
       lastStatus = {
         phase: "error",
+        scope: "companion",
         message:
           error instanceof Error ? error.message : "Native host unavailable",
       };
@@ -395,16 +600,66 @@ function visibleGuestCount(): number {
 function browserResponse(
   port: ExtensionPort,
   id: string,
-  value:
-    | { ok: true; attachments: unknown }
-    | { ok: false; error: string },
+  value: { ok: true; attachments: unknown } | { ok: false; error: string },
 ): void {
   post(port, { type: "browser-context-response", id, ...value });
 }
 
-function handleContentMessage(port: ExtensionPort, tabId: number, raw: unknown): void {
+function handleContentMessage(
+  port: ExtensionPort,
+  tabId: number,
+  raw: unknown,
+): void {
   const message = record(raw);
-  if (!message || typeof message.id !== "string") return;
+  if (!message) return;
+  if (message.type === "browser-operation-response" && typeof message.id === "string") {
+    const pending = pendingAgentBrowserRequests.get(message.id);
+    if (!pending || pending.tabId !== tabId) return;
+    pendingAgentBrowserRequests.delete(message.id);
+    clearTimeout(pending.timer);
+    const result = parseBrowserOperationResult(message.result);
+    if (!result) {
+      sendAgentBrowserResponse(message.id, {
+        ok: false,
+        operation: pending.operation,
+        error: { code: "FAILED", message: "The page returned an invalid browser result." },
+      });
+      return;
+    }
+    if (result.operation !== pending.operation) {
+      sendAgentBrowserResponse(message.id, {
+        ok: false,
+        operation: pending.operation,
+        error: { code: "FAILED", message: "The page returned a result for the wrong browser operation." },
+      });
+      return;
+    }
+    sendAgentBrowserResponse(message.id, {
+      ...result,
+      ...(result.target
+        ? {
+            target: {
+              ...result.target,
+              ...(contentPageByTab.get(tabId)
+                ? { page: contentPageByTab.get(tabId)! }
+                : {}),
+            },
+          }
+        : {}),
+    });
+    return;
+  }
+  if (message.type === "remote-access-open") {
+    let delivered = false;
+    for (const [guestPort, guest] of guestPorts)
+      if (guest.tabId === tabId) {
+        post(guestPort, { type: "remote-access-open" });
+        delivered = true;
+      }
+    if (!delivered) pendingRemoteAccessOpen.add(tabId);
+    return;
+  }
+  if (typeof message.id !== "string") return;
   if (message.type === "browser-context-response") {
     const pending = pendingBrowserRequests.get(message.id);
     if (!pending || pending.tabId !== tabId) return;
@@ -507,9 +762,15 @@ chrome.runtime.onConnect.addListener((port) => {
   if (port.name === "vibewaiting:options") {
     optionsPorts.add(port);
     post(port, { type: "status", ...lastStatus });
-    if (lastRemoteAccess) post(port, { type: "remote-access", ...lastRemoteAccess });
+    if (lastRemoteAccess)
+      post(port, { type: "remote-access", ...lastRemoteAccess });
     port.onMessage.addListener((raw) => {
       const message = record(raw);
+      if (message?.type === "retry-native") {
+        disconnectNative();
+        void ensureNative();
+        return;
+      }
       if (message?.type === "remote-access-configure") {
         void configureRemoteAccess(message.configuration);
         return;
@@ -526,32 +787,37 @@ chrome.runtime.onConnect.addListener((port) => {
   if (port.name === "vibewaiting:content") {
     const { tabId } = senderTab(port);
     contentPorts.add(port);
-    if (tabId !== null) contentPortsByTab.set(tabId, port);
+    if (tabId !== null) {
+      const priorPage = contentPageByTab.get(tabId);
+      if (priorPage) tabByContentPage.delete(priorPage);
+      const page = `vibewaiting:${crypto.randomUUID()}`;
+      contentPortsByTab.set(tabId, port);
+      contentPageByTab.set(tabId, page);
+      tabByContentPage.set(page, tabId);
+    }
     if (lastPatch !== undefined)
       post(port, { type: "launcher", ...launcherFromPatch(lastPatch) });
     post(port, { type: "status", ...lastStatus });
-    if (lastRemoteAccess) post(port, { type: "remote-access", ...lastRemoteAccess });
+    if (lastRemoteAccess) {
+      const status = record(lastRemoteAccess.snapshot)?.status;
+      if (typeof status === "string")
+        post(port, { type: "remote-access-status", status });
+    }
     if (tabId !== null)
-      port.onMessage.addListener((raw) => {
-        const message = record(raw);
-        if (message?.type === "remote-access-configure") {
-          void configureRemoteAccess(message.configuration);
-          return;
-        }
-        if (message?.type === "remote-access-pairing-request") {
-          void requestRemotePairing();
-          return;
-        }
-        if (message?.type === "remote-access-revoke-request") {
-          void revokeRemoteDevices();
-          return;
-        }
-        handleContentMessage(port, tabId, raw);
-      });
+      port.onMessage.addListener((raw) =>
+        handleContentMessage(port, tabId, raw),
+      );
     port.onDisconnect.addListener(() => {
       contentPorts.delete(port);
-      if (tabId !== null && contentPortsByTab.get(tabId) === port)
-        contentPortsByTab.delete(tabId);
+      if (tabId !== null) {
+        pendingRemoteAccessOpen.delete(tabId);
+        if (contentPortsByTab.get(tabId) === port) {
+          contentPortsByTab.delete(tabId);
+          const page = contentPageByTab.get(tabId);
+          contentPageByTab.delete(tabId);
+          if (page) tabByContentPage.delete(page);
+        }
+      }
       for (const [id, pending] of pendingBrowserRequests) {
         if (pending.tabId !== tabId) continue;
         pendingBrowserRequests.delete(id);
@@ -560,17 +826,38 @@ chrome.runtime.onConnect.addListener((port) => {
           error: "The page changed before context capture finished.",
         });
       }
+      for (const [id, pending] of pendingAgentBrowserRequests) {
+        if (pending.tabId !== tabId) continue;
+        pendingAgentBrowserRequests.delete(id);
+        clearTimeout(pending.timer);
+        sendAgentBrowserResponse(id, {
+          ok: false,
+          operation: pending.operation,
+          error: { code: "NOT_AVAILABLE", message: "The active page disconnected during the browser operation." },
+        });
+      }
     });
     void ensureNative();
     return;
   }
   if (port.name !== "vibewaiting:guest") return;
   const sender = senderTab(port);
+  if (
+    sender.tabId === null ||
+    contentPortsByTab.get(sender.tabId) === undefined
+  ) {
+    port.disconnect();
+    return;
+  }
   const guest = { id: crypto.randomUUID(), visible: false, ...sender };
   guestPorts.set(port, guest);
   if (lastPatch !== undefined) post(port, { type: "patch", patch: lastPatch });
   post(port, { type: "status", ...lastStatus });
+  if (lastRemoteAccess)
+    post(port, { type: "remote-access", ...lastRemoteAccess });
   if (guest.tabId !== null) {
+    if (pendingRemoteAccessOpen.delete(guest.tabId))
+      post(port, { type: "remote-access-open" });
     for (const event of pendingHostEvents.get(guest.tabId) ?? [])
       post(port, { type: "host-event", event });
     pendingHostEvents.delete(guest.tabId);
@@ -578,6 +865,18 @@ chrome.runtime.onConnect.addListener((port) => {
   port.onMessage.addListener((raw) => {
     const message = record(raw);
     if (message && handleBrowserRequest(port, guest, message)) return;
+    if (message?.type === "remote-access-configure") {
+      void configureRemoteAccess(message.configuration);
+      return;
+    }
+    if (message?.type === "remote-access-pairing-request") {
+      void requestRemotePairing();
+      return;
+    }
+    if (message?.type === "remote-access-revoke-request") {
+      void revokeRemoteDevices();
+      return;
+    }
     if (message?.type !== "intent" || typeof message.id !== "string") return;
     const payload = record(message.payload);
     const action = payload?.action;
@@ -605,9 +904,20 @@ chrome.runtime.onConnect.addListener((port) => {
 
 chrome.runtime.onMessage.addListener((raw) => {
   const message = record(raw);
-  if (message?.type !== "settings-changed") return;
-  disconnectNative();
-  void ensureNative();
+  if (message?.type === "settings-changed") {
+    disconnectNative();
+    void ensureNative();
+    return;
+  }
+  if (message?.type === "site-access-changed")
+    return syncSiteAccess(message.enabled === true).then(
+      () => ({ ok: true }),
+      (error) => ({
+        ok: false,
+        error:
+          error instanceof Error ? error.message : "website access sync failed",
+      }),
+    );
 });
 
 chrome.action.onClicked.addListener(

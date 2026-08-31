@@ -3,8 +3,8 @@ import { deflateSync } from "node:zlib";
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 
 export function createMobileIconPng(size) {
-  if (!Number.isInteger(size) || size < 64 || size > 1024)
-    throw new Error("Mobile icon size must be an integer from 64 through 1024");
+  if (!Number.isInteger(size) || size < 16 || size > 1024)
+    throw new Error("Icon size must be an integer from 16 through 1024");
   const pixels = Buffer.alloc(size * size * 4);
   const background = [17, 19, 24, 255];
   const foreground = [242, 242, 238, 255];

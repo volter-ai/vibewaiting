@@ -7,6 +7,10 @@ Read the [Code of Conduct](CODE_OF_CONDUCT.md), [architecture](docs/architecture
 and [roadmap](ROADMAP.md) before proposing a substantial change. Security-sensitive
 work should follow [SECURITY.md](SECURITY.md).
 
+Release and repository-administration work also follows the
+[public launch checklist](docs/public-launch-checklist.md) and
+[release procedure](docs/releasing.md).
+
 ## Development setup
 
 Requirements:
@@ -33,12 +37,19 @@ To exercise an unpacked development extension:
 npm run dev:extension
 ```
 
-This uses an isolated browser profile and installs a development native host. See the
-README's zero-touch development section before pointing it at a non-default checkout.
+This uses an isolated browser profile, installs a development native host, watches the
+relevant sources, and reloads only after a successful build. See
+[the development guide](docs/development.md) before pointing it at a non-default
+checkout.
 
 Contributors working on Supercode and Vibewaiting together can run `npm run sync:local`
 to install a coherent adjacent Supercode build into this checkout without modifying the
 lockfile, or use `npm run dev:extension:local` for the initial sync and development launch.
+
+Vibewaiting consumes published Supercode packages in a normal checkout. Contributors
+can build and test this repository without Supercode source access; changes to agent
+semantics or shared UI require coordination with the Supercode maintainers until that
+repository is publicly available.
 
 ## Scope and design rules
 

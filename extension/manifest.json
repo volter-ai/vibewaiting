@@ -1,18 +1,31 @@
 {
   "manifest_version": 3,
   "name": "Vibewaiting",
-  "version": "0.1.0",
-  "description": "Continue local coding-agent sessions from a messenger overlay on any page.",
-  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmjhLmjhkYM/7MfgyVzcSswjRTiTCtFPanDWK6gv6+P6mOKCO6VMYH45qVs9/7OzgThGnnAi+FsPzQH63aeLN5GF2qxRacTmQTJMLADqsb2FqT3GVtG1aSK5sIYLuckDTlE2V9tFuzU9pJGbQTl+HeQnbHd4VQ6xE+en4zyKHLJ+Ugaw0O+UCJrG66/umfelUm+3E48DFyMPIE01i+Q5Zmk2ExEcuW/2Xg7hyd4cACtmHKn3BLJsgzWKo2H5zo+cZZiSgXK11sZ3xZO8rYDAn28557l9aJ1ev+yedXcRvwgXq71EMhwuO44kdm3R/IwDDGPoEYBPcZgELkxGSgNfY2wIDAQAB",
+  "version": "0.1.2",
+  "description": "Follow and continue local Claude Code and Codex sessions from any browser tab.",
+  "icons": {
+    "16": "icon-16.png",
+    "32": "icon-32.png",
+    "48": "icon-48.png",
+    "128": "icon-128.png"
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAs/Bc8d853qc8IaZLPiIFjKSwCWvIMv80iMpuNPqFJhNnBsZtxCq67ekqn9U43hDTCrnETVHJpelBz5cKft796vxpNb5vtJtJI6btWBrDHCuyZ4yIfP/i5KuE79wP+/0m9W3gVO4DZpJ6aNknX+bG5Z/qJ3St80FW/fS2yStcNpLS20kIlKg8Ae0ScZM7iX4DeZ4qySnnEKXZIHF2MW89rBTB8zB7Zt8q2uwlhBpp62A+M6+3JqCdY3FOvJ+sC0/MRSasHFizi3QKhFwYwmawyRtTh0/4Pg/k3wZS9On+ZP0yqnS7FxiGCGiRnsYY2LHHJWOfcqQTs5/I5kyKxe1AnwIDAQAB",
   "browser_specific_settings": {
     "gecko": { "id": "vibewaiting@volter.ai" }
   },
-  "permissions": ["contextMenus", "nativeMessaging", "storage"],
+  "permissions": ["contextMenus", "nativeMessaging", "scripting", "storage"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' ws://127.0.0.1:*"
   },
   "background": { "service_worker": "background.js", "type": "module" },
-  "action": { "default_title": "Vibewaiting settings" },
+  "action": {
+    "default_title": "Vibewaiting settings",
+    "default_icon": {
+      "16": "icon-16.png",
+      "32": "icon-32.png"
+    }
+  },
   "commands": {
     "focus-composer": {
       "suggested_key": { "default": "Alt+Shift+V" },
@@ -32,17 +45,11 @@
     }
   },
   "options_page": "options.html",
-  "content_scripts": [
-    {
-      "matches": ["http://*/*", "https://*/*"],
-      "js": ["content.js"],
-      "run_at": "document_idle"
-    }
-  ],
   "web_accessible_resources": [
     {
       "resources": ["app.html", "app.js", "app.css"],
-      "matches": ["http://*/*", "https://*/*"]
+      "matches": ["http://*/*", "https://*/*"],
+      "use_dynamic_url": true
     }
   ]
 }

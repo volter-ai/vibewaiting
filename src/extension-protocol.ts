@@ -1,6 +1,17 @@
-import type { RemoteDeviceSnapshot } from "./remote-devices.js";
+import type {
+  RemoteDeviceSnapshot,
+  RemotePairingHandoff,
+} from "@volter-ai-dev/supercode-remote-access/client";
+import {
+  parseBrowserOperationResult,
+  type BrowserOperationCall,
+  type BrowserOperationResult,
+} from "@volter-ai-dev/supercode-playwright-shim";
 
-export type { RemoteDeviceSnapshot } from "./remote-devices.js";
+export type {
+  RemoteDeviceSnapshot,
+  RemotePairingHandoff,
+} from "@volter-ai-dev/supercode-remote-access/client";
 
 export const VIBEWAITING_EXTENSION_PROTOCOL =
   "vibewaiting/extension-v1" as const;
@@ -11,11 +22,6 @@ export type RemoteAccessProvider = "auto" | "cloudflare" | "ngrok" | "stable";
 export interface RemoteAccessConfiguration {
   enabled: boolean;
   provider: RemoteAccessProvider;
-}
-
-export interface RemotePairingHandoff {
-  expiresAt: number;
-  url: string;
 }
 
 export interface ExtensionSettings {
@@ -49,6 +55,12 @@ export type NativeHostCommand =
       type: "intent";
       id: string;
       payload: unknown;
+    }
+  | {
+      protocol: typeof VIBEWAITING_EXTENSION_PROTOCOL;
+      type: "browser-operation-response";
+      id: string;
+      result: BrowserOperationResult;
     };
 
 export type NativeHostEvent =
@@ -70,6 +82,12 @@ export type NativeHostEvent =
       pairing?: RemotePairingHandoff;
       passcode: string;
       snapshot: unknown;
+    }
+  | {
+      protocol: typeof VIBEWAITING_EXTENSION_PROTOCOL;
+      type: "browser-operation-request";
+      id: string;
+      call: BrowserOperationCall;
     }
   | {
       protocol: typeof VIBEWAITING_EXTENSION_PROTOCOL;
@@ -116,6 +134,17 @@ export function parseNativeHostCommand(
           type: "intent",
           id: candidate.id,
           payload: candidate.payload,
+        }
+      : null;
+  }
+  if (candidate.type === "browser-operation-response") {
+    const result = parseBrowserOperationResult(candidate.result);
+    return typeof candidate.id === "string" && result
+      ? {
+          protocol: VIBEWAITING_EXTENSION_PROTOCOL,
+          type: "browser-operation-response",
+          id: candidate.id,
+          result,
         }
       : null;
   }

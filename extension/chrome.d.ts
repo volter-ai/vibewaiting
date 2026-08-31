@@ -27,6 +27,28 @@ declare const chrome: {
     onMessage: ExtensionEvent<(message: unknown) => void>;
     onInstalled: ExtensionEvent<(details: { reason: "install" | "update" | "chrome_update" | "shared_module_update" }) => void>;
   };
+  permissions: {
+    contains(permissions: { origins?: string[] }): Promise<boolean>;
+    request(permissions: { origins?: string[] }): Promise<boolean>;
+    remove(permissions: { origins?: string[] }): Promise<boolean>;
+    onAdded: ExtensionEvent<(permissions: { origins?: string[] }) => void>;
+    onRemoved: ExtensionEvent<(permissions: { origins?: string[] }) => void>;
+  };
+  scripting: {
+    getRegisteredContentScripts(filter?: { ids?: string[] }): Promise<Array<{ id: string }>>;
+    registerContentScripts(scripts: Array<{
+      id: string;
+      js: string[];
+      matches: string[];
+      persistAcrossSessions?: boolean;
+      runAt?: "document_idle";
+    }>): Promise<void>;
+    unregisterContentScripts(filter?: { ids?: string[] }): Promise<void>;
+    executeScript(injection: {
+      files: string[];
+      target: { tabId: number };
+    }): Promise<unknown[]>;
+  };
   storage: {
     local: {
       get(key: string): Promise<Record<string, unknown>>;
@@ -69,6 +91,10 @@ declare const chrome: {
   };
   tabs: {
     create(options: { url: string }): Promise<{ id?: number }>;
+    query(options: {
+      active?: boolean;
+      lastFocusedWindow?: boolean;
+    }): Promise<Array<{ id?: number; url?: string; title?: string; windowId?: number }>>;
   };
 };
 declare module "qrcode-generator" {

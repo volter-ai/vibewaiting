@@ -9,40 +9,115 @@
   </head>
   <body>
     <main>
-      <h1>Vibewaiting</h1>
-      <p>Connect the overlay to coding sessions on this machine.</p>
-      <form>
-        <label>Workspace<input id="workspace" type="text" required autocomplete="off" placeholder="/Users/you/project" spellcheck="false"></label>
-        <label>Preferred harness<select id="harness"><option value="">First available</option><option value="claude-code">Claude Code</option><option value="codex">Codex</option><option value="gemini">Gemini</option><option value="goose">Goose</option><option value="opencode">OpenCode</option><option value="pi">Pi</option><option value="grok">Grok</option></select></label>
-        <label>Execution policy<select id="policy"><option value="">Controller default</option><option value="default">Default</option><option value="yolo">Yolo</option></select></label>
-        <button type="submit">Save and connect</button>
-      </form>
-      <output aria-live="polite"></output>
-      <section class="remote" aria-labelledby="remote-title">
-        <div class="remote-heading">
-          <div><h2 id="remote-title">Remote access</h2><p>Open these chats securely from another device.</p></div>
-          <label class="switch"><input id="remote-enabled" type="checkbox" aria-label="Enable remote access"><span></span></label>
+      <header class="hero">
+        <img src="icon-128.png" alt="">
+        <div>
+          <h1>Vibewaiting</h1>
+          <p>Your local coding agents, in a messenger on every browser tab.</p>
         </div>
-        <label class="remote-provider">Provider<select id="remote-provider"><option value="auto">Automatic</option><option value="cloudflare">Cloudflare</option><option value="ngrok">ngrok</option><option value="stable">Stable relay</option></select></label>
-        <small id="remote-detail">Checking available tunnel providers…</small>
-        <div id="remote-handoff" class="remote-handoff" hidden>
-          <img id="remote-qr" alt="QR code for one-scan remote pairing">
-          <div><p id="remote-pairing-instruction">Scan to open directly.</p><small id="remote-code-label">Or enter:</small><strong id="remote-code"></strong><a id="remote-link" target="_blank" rel="noreferrer"></a><button id="remote-copy" type="button">Copy link</button><small id="remote-stability"></small><small id="remote-devices">Checking paired phones…</small><button id="remote-disconnect" type="button" hidden>Disconnect devices</button></div>
+      </header>
+
+      <ol class="setup-progress" aria-label="Setup progress">
+        <li id="progress-companion"><span>1</span>Companion</li>
+        <li id="progress-workspace"><span>2</span>Workspace</li>
+        <li id="progress-access"><span>3</span>Website access</li>
+      </ol>
+
+      <section id="companion-card" class="setup-card" aria-labelledby="companion-title">
+        <div class="step-heading">
+          <span class="step-number">1</span>
+          <div>
+            <h2 id="companion-title">Connect the local companion</h2>
+            <p>Chrome cannot read local Claude Code or Codex transcripts and terminals. The on-device companion stays on this computer and bridges the extension to those existing sessions.</p>
+          </div>
         </div>
-        <p id="remote-error" class="remote-error" role="alert"></p>
+        <output id="companion-status" aria-live="polite">Checking the local companion…</output>
+        <div id="native-install-hint" class="install-help" hidden>
+          <p>Install the native package from the latest release, then register this browser.</p>
+          <a class="button-link" href="https://github.com/volter-ai/vibewaiting/releases/latest" target="_blank" rel="noreferrer">Download companion</a>
+          <label>Browser
+            <select id="install-browser">
+              <option value="chrome">Chrome</option>
+              <option value="brave">Brave</option>
+              <option value="chromium">Chromium</option>
+            </select>
+          </label>
+          <div class="command-row">
+            <code id="native-command">vibewaiting native install --browser chrome</code>
+            <button id="copy-native-command" type="button">Copy</button>
+          </div>
+          <small>Extension ID: <span id="extension-id"></span></small>
+        </div>
+        <button id="retry-native" class="secondary-action" type="button" hidden>Check again</button>
       </section>
-      <section class="shortcuts" aria-labelledby="shortcuts-title">
-        <h2 id="shortcuts-title">Keyboard shortcuts</h2>
-        <p>Call Vibewaiting without leaving the page you are working in.</p>
-        <dl>
-          <div><dt>Focus message box</dt><dd><kbd data-shortcut="focus"></kbd></dd></div>
-          <div><dt>Attach what you point at</dt><dd><kbd data-shortcut="attach"></kbd></dd></div>
-          <div><dt>Previous conversation</dt><dd><kbd data-shortcut="previous"></kbd></dd></div>
-          <div><dt>Next conversation</dt><dd><kbd data-shortcut="next"></kbd></dd></div>
-        </dl>
-        <button id="configure-shortcuts" type="button">Change shortcuts in browser</button>
+
+      <section id="workspace-card" class="setup-card" aria-labelledby="workspace-title">
+        <div class="step-heading">
+          <span class="step-number">2</span>
+          <div>
+            <h2 id="workspace-title">Choose where new chats run</h2>
+            <p>Existing sessions are discovered automatically. This folder is only the default for new sessions.</p>
+          </div>
+        </div>
+        <form>
+          <label>Project folder<input id="workspace" type="text" required autocomplete="off" placeholder="/Users/you/project" spellcheck="false"></label>
+          <output id="workspace-status" aria-live="polite" hidden></output>
+          <details class="agent-defaults">
+            <summary>Agent defaults</summary>
+            <div>
+              <label>Preferred agent<select id="harness"><option value="">First available</option><option value="claude-code">Claude Code</option><option value="codex">Codex</option></select></label>
+              <label>Agent safety<select id="policy"><option value="">Use the agent default (recommended)</option><option value="default">Require confirmations</option><option value="yolo">Skip confirmations (advanced)</option></select></label>
+              <small>Skipping confirmations lets the coding agent act without its normal approval prompts.</small>
+            </div>
+          </details>
+          <button type="submit">Save workspace</button>
+        </form>
       </section>
-      <aside>Before first use, run <code>vibewaiting native install --extension-id <span id="extension-id"></span></code>.</aside>
+
+      <section id="site-access-card" class="setup-card site-access" aria-labelledby="site-access-title">
+        <div class="step-heading">
+          <span class="step-number">3</span>
+          <div>
+            <h2 id="site-access-title">Show Vibewaiting on websites</h2>
+            <p>Allowing website access places the messenger on HTTP(S) pages and temporarily keeps the page URL/title, selection, and latest pointed or focused link, image, or visible control in browser memory for one-action Attach. Password fields are excluded. Nothing enters an agent session or paired device until you choose Attach. Disable anytime to remove the page script.</p>
+          </div>
+        </div>
+        <button id="site-access-toggle" type="button">Allow website access</button>
+        <small id="site-access-status" aria-live="polite">Checking website access…</small>
+      </section>
+
+      <section id="ready-card" class="ready-card" aria-live="polite" hidden>
+        <strong>Vibewaiting is ready</strong>
+        <span>Open any regular browser tab and use the launcher in the corner.</span>
+      </section>
+
+      <details id="more-settings" class="more-settings" hidden>
+        <summary>Remote access and shortcuts</summary>
+        <section class="remote" aria-labelledby="remote-title">
+          <div class="remote-heading">
+            <div><h2 id="remote-title">Remote access</h2><p>Open these chats securely from another device.</p></div>
+            <label class="switch"><input id="remote-enabled" type="checkbox" aria-label="Enable remote access"><span></span></label>
+          </div>
+          <label class="remote-provider">Provider<select id="remote-provider"><option value="auto">Automatic</option><option value="cloudflare">Cloudflare</option><option value="ngrok">ngrok</option><option value="stable">Stable relay</option></select></label>
+          <small id="remote-detail">Checking available tunnel providers…</small>
+          <div id="remote-handoff" class="remote-handoff" hidden>
+            <img id="remote-qr" alt="QR code for one-scan remote pairing">
+            <div><p id="remote-pairing-instruction">Scan to open directly.</p><small id="remote-code-label">Or enter:</small><strong id="remote-code"></strong><a id="remote-link" target="_blank" rel="noreferrer"></a><button id="remote-copy" type="button">Copy link</button><small id="remote-stability"></small><small id="remote-devices">Checking paired phones…</small><button id="remote-disconnect" type="button" hidden>Disconnect devices</button></div>
+          </div>
+          <p id="remote-error" class="remote-error" role="alert"></p>
+        </section>
+        <section class="shortcuts" aria-labelledby="shortcuts-title">
+          <h2 id="shortcuts-title">Keyboard shortcuts</h2>
+          <p>Call Vibewaiting without leaving the page you are working in.</p>
+          <dl>
+            <div><dt>Focus message box</dt><dd><kbd data-shortcut="focus"></kbd></dd></div>
+            <div><dt>Attach what you point at</dt><dd><kbd data-shortcut="attach"></kbd></dd></div>
+            <div><dt>Previous conversation</dt><dd><kbd data-shortcut="previous"></kbd></dd></div>
+            <div><dt>Next conversation</dt><dd><kbd data-shortcut="next"></kbd></dd></div>
+          </dl>
+          <button id="configure-shortcuts" type="button">Change shortcuts in browser</button>
+        </section>
+      </details>
     </main>
     <script type="module" src="options.js"></script>
   </body>

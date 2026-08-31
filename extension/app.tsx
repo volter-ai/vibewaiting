@@ -12,12 +12,11 @@ import type {
   MessengerHostEvent,
   MessengerTransport,
 } from "../widget/transport.js";
+import { createRemoteAccessCompanion } from "./remote-access-companion.js";
 
-function LocalTerminalPanel({
-  state,
-  send,
-}: TerminalPanelProps): JSX.Element {
-  if (!state.attachment) throw new Error("Terminal mode requires an attachment.");
+function LocalTerminalPanel({ state, send }: TerminalPanelProps): JSX.Element {
+  if (!state.attachment)
+    throw new Error("Terminal mode requires an attachment.");
   const attachment = state.attachment;
   return (
     <section class="vw-terminal-surface" aria-label="Terminal view">
@@ -38,6 +37,22 @@ function LocalTerminalPanel({
 
 const shell = connectOverlayApp();
 const port = chrome.runtime.connect({ name: "vibewaiting:guest" });
+const remoteAccess = createRemoteAccessCompanion({
+  embedded: true,
+  configure(configuration) {
+    port.postMessage({ type: "remote-access-configure", configuration });
+  },
+  requestPairing() {
+    port.postMessage({ type: "remote-access-pairing-request" });
+  },
+  revokeDevices() {
+    port.postMessage({ type: "remote-access-revoke-request" });
+  },
+});
+document.body.append(remoteAccess.node);
+const unsubscribeRemoteVisibility = shell.onVisibility((visible) => {
+  if (!visible) remoteAccess.close();
+});
 const patchListeners = new Set<(patch: unknown) => void>();
 const hostEventListeners = new Set<(event: MessengerHostEvent) => void>();
 const pendingHostEvents: MessengerHostEvent[] = [];
@@ -55,6 +70,19 @@ const clientId = crypto.randomUUID();
 port.onMessage.addListener((raw) => {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return;
   const message = raw as Record<string, unknown>;
+  if (message.type === "remote-access") {
+    remoteAccess.update(
+      message.snapshot,
+      message.passcode,
+      message.pairing,
+      message.devices,
+    );
+    return;
+  }
+  if (message.type === "remote-access-open") {
+    remoteAccess.open();
+    return;
+  }
   if (message.type === "patch") {
     for (const listener of patchListeners) listener(message.patch);
     return;
@@ -83,7 +111,9 @@ port.onMessage.addListener((raw) => {
     }
     const attachments = parseBrowserContextAttachments(message.attachments);
     if (!attachments) {
-      pending.reject(new Error("The extension returned invalid browser context."));
+      pending.reject(
+        new Error("The extension returned invalid browser context."),
+      );
       return;
     }
     pending.resolve(attachments);
@@ -105,10 +135,10 @@ function isHostEvent(value: unknown): value is MessengerHostEvent {
   if (
     candidate.type !== "shortcut" ||
     typeof candidate.id !== "string" ||
-    candidate.command !== "focus-composer" &&
+    (candidate.command !== "focus-composer" &&
       candidate.command !== "attach-browser-context" &&
       candidate.command !== "previous-conversation" &&
-      candidate.command !== "next-conversation"
+      candidate.command !== "next-conversation")
   )
     return false;
   if (candidate.attachments === undefined) return true;
@@ -149,10 +179,14 @@ const transport: MessengerTransport = {
     hostEventListeners.clear();
     for (const [id, pending] of browserRequests) {
       clearTimeout(pending.timer);
-      pending.reject(new Error("The page closed before context capture finished."));
+      pending.reject(
+        new Error("The page closed before context capture finished."),
+      );
       browserRequests.delete(id);
     }
     port.disconnect();
+    unsubscribeRemoteVisibility();
+    remoteAccess.destroy();
     shell.destroy();
   },
 };

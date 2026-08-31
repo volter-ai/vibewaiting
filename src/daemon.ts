@@ -10,28 +10,44 @@
 // recording pushes, the agent half by the real `SupercodeController` driven through a fake harness
 // client. Nothing here reaches for a global.
 //
-// TWO controllers, deliberately. The one the daemon starts OWNS a runtime, and the client package
-// refuses to point an owning controller at someone else's session (`runtime_owned`) — while
-// `setWorkspace` would silently close that runtime to go looking. So a foreign session is followed
-// by a SECOND, non-owning controller scoped to that session's own workspace, sharing this process's
-// one harness transport (`ownsClient: false`). Attaching therefore never touches the session the
-// daemon started, and detaching is just closing the second controller.
-import { conversationPreviewText, SessionWindowCache, SupercodeController } from "@volter-ai-dev/supercode-client";
+// The controller pool keeps the daemon-started runtime durable while foreign sessions use bounded
+// non-owning mirrors over the same transport. Supercode disposes passive followers, retains only
+// continuations that gained runtime ownership, and prevents a slow older selection from replacing
+// the latest one; this bridge owns only messenger selection and error presentation.
+import {
+  HarnessAuthenticationController,
+  SessionControllerPool,
+  SessionFamilyInspector,
+  SupercodeSessionCatalog,
+  SupercodeController,
+} from "@volter-ai-dev/supercode-client";
+import { sessionReconnectIdentitySync as sessionKey } from "@volter-ai-dev/supercode-client/node";
 import type {
   FrontendHarness,
   HarnessClientAdapter,
+  SupercodeSessionCatalogClient,
+  SupercodeSessionCatalogSnapshot,
   SupercodeClientAction,
   SupercodeClientSnapshot,
 } from "@volter-ai-dev/supercode-client";
 import { createNativeInteractiveStart } from "@volter-ai-dev/supercode-harness-sdk";
-import type { DiscoveryQuery, HarnessId, SessionArtifact, SessionDescriptor, SessionFormat, SessionLocator, StructuredLaunch } from "@volter-ai-dev/supercode-harness-sdk";
+import type { HarnessId, SessionArtifact, SessionDescriptor, SessionFormat, StructuredLaunch } from "@volter-ai-dev/supercode-harness-sdk";
 import type { ContinuationMode } from "@volter-ai-dev/supercode-ui";
-import { parseSupercodeUiIntent } from "@volter-ai-dev/supercode-ui/core";
+import { normalizeUiState, parseSupercodeUiIntent } from "@volter-ai-dev/supercode-ui/core";
 import {
   dispatchControllerIntent,
+  matchesSessionRef as matchesActive,
+  projectAttachedSession as attachmentFor,
+  projectSessionInventory as projectSessions,
   projectSubagentInventory,
   projectSubagentTranscript,
+  sessionDescriptorRuntimeStatus as sessionRuntimeStatus,
+  type ActiveSessionRef,
 } from "@volter-ai-dev/supercode-ui/controller";
+import {
+  createNativeMessengerState,
+  normalizeNativeMessengerState,
+} from "@volter-ai-dev/supercode-ui/host";
 import { createLucarneInjector } from "@volter-ai-dev/widget-shell/lucarne";
 import { WidgetHost } from "lucarne/widget/host";
 import {
@@ -40,8 +56,6 @@ import {
   toAttachError,
   type AttachError,
   type ProjectionOptions,
-  type SessionAttention,
-  type SessionAttentionKind,
   type StartupPhase,
   type WidgetState,
 } from "./projection.js";
@@ -51,23 +65,12 @@ import { join } from "node:path";
 import type { MessengerPersistence } from "./persistence.js";
 import { writeSessionArtifact } from "./artifacts.js";
 import type { ExportReceipt } from "./projection.js";
-import {
-  MAX_SESSION_ROWS,
-  attachmentFor,
-  matchesActive,
-  projectSessions,
-  conversationUpdatedAt,
-  sessionKey,
-  sessionRuntimeStatus,
-  type ActiveSessionRef,
-  type SessionRow,
-} from "./sessions.js";
 import { VIBEWAITING_RADIUS } from "./theme.js";
 import {
   VIBEWAITING_PRESENTATION,
   VIBEWAITING_PRESENTATIONS,
 } from "./presentations.js";
-import type { TerminalServiceSnapshot } from "./terminal-service.js";
+import type { SupercodeTerminalSnapshot as TerminalServiceSnapshot } from "@volter-ai-dev/supercode-terminal";
 
 /** Namespaces every page global / element id / sticky-injection id the widget mints (see `lucarne/widget/ns`). */
 export const WIDGET_NS = "vibewaiting";
@@ -85,8 +88,8 @@ export const DEFAULT_INTENT_POLL_MS = 100;
 export const DEFAULT_REPUSH_INTERVAL_MS = 0;
 /** Slow recovery/inventory cadence. Claude Code and Codex update through the native index stream. */
 export const DEFAULT_DISCOVER_INTERVAL_MS = 60_000;
-/** Re-check a still-untitled new Claude/Codex session without rescanning topic history every tick. */
-const TOPIC_RETRY_MS = 30_000;
+/** Each explicit inventory page adds the same bounded number of rows. */
+export const MAX_SESSION_ROWS = 30;
 /** Tool-stream churn is not unread. A no-status peer must be quiet this long before it asks for attention. */
 export const DEFAULT_ATTENTION_SETTLE_MS = 15_000;
 /** A broken harness attach must become a visible row error, never an eternal local spinner. */
@@ -103,16 +106,21 @@ const PASSIVE_MIRROR_VIEW = Object.freeze({
   includeSubagents: false,
   displayHistory: true,
 });
-/** Each explicit history request adds one bounded page, never the entire transcript/session store. */
-export const TRANSCRIPT_PAGE_SIZE = DEFAULT_MAX_ENTRIES;
 /** A historical image is fetched only on click, but each request still has a hard memory bound. */
 export const MAX_HISTORICAL_IMAGE_BYTES = 16 * 1024 * 1024;
 export const MAX_HISTORICAL_IMAGE_URL_CHARS = 22_400_000;
 
+export interface WidgetIntent {
+  id: string | number;
+  payload: unknown;
+  /** Whether this click came from the local extension or a paired remote browser. */
+  source?: "local" | "remote";
+}
+
 /** The slice of `WidgetHost` this daemon uses — the seam a test replaces with a recorder. */
 export interface WidgetBridge {
   push(patch: unknown): Promise<void>;
-  onIntent(name: string, cb: (intent: { id: string | number; payload: unknown }) => void | Promise<void>): void;
+  onIntent(name: string, cb: (intent: WidgetIntent) => void | Promise<void>): void;
   /**
    * Lucarne's context-aware queue primitive. Newer hosts expose this so a latency-sensitive app
    * can choose its own drain cadence instead of waiting for the conservative shared 1.2s pump.
@@ -135,62 +143,7 @@ export interface AgentController {
   close(): Promise<void>;
 }
 
-/**
- * The discovery slice of the harness transport, widened where the controller's adapter narrows it.
- *
- * `HarnessClientAdapter.discover` demands a `workspace` because the controller is workspace-scoped;
- * the SDK's own `discover` does not, and calling it with no workspace is exactly the GLOBAL scan
- * this panel exists to show. A real `SupercodeHarnessClient` satisfies both shapes.
- */
-export interface SessionDiscoveryClient {
-  discover(query: DiscoveryQuery): Promise<{ sessions: SessionDescriptor[] }>;
-  subscribeSessionActivity?(
-    locators: SessionLocator[],
-  ): Promise<{ subscription: string; initial: SessionActivityObservation[] }>;
-  unsubscribeSessionActivity?(subscription: string): Promise<{ removed: boolean }>;
-  subscribeSessionIndex?(
-    query: DiscoveryQuery,
-  ): Promise<{ subscription: string; revision: number; initial: SessionDescriptor[] }>;
-  unsubscribeSessionIndex?(subscription: string): Promise<{ removed: boolean }>;
-}
-
-interface SessionActivityObservation {
-  harness: HarnessId;
-  session_id: string;
-  presence: "persisted" | "running" | "shutting_down";
-  turn: "unknown" | "idle" | "working" | "needs_input";
-  evidence: {
-    source: string;
-    native_state: string | null;
-    observed_at_ms: number;
-    harness_version: string | null;
-  };
-}
-
-interface SessionActivityEvent {
-  subscription: string;
-  activities: SessionActivityObservation[];
-}
-
-interface SessionActivityEventSource {
-  on(event: "sessionActivityEvent", listener: (event: SessionActivityEvent) => void): unknown;
-  off(event: "sessionActivityEvent", listener: (event: SessionActivityEvent) => void): unknown;
-}
-
-interface SessionIndexEvent {
-  subscription: string;
-  revision?: number;
-  changes?: Array<
-    | { kind: "added" | "updated"; descriptor: SessionDescriptor }
-    | { kind: "removed"; key: { harness: HarnessId; session_id: string } }
-  >;
-  error?: { recoverable: true; message: string };
-}
-
-interface SessionIndexEventSource {
-  on(event: "sessionIndexEvent", listener: (event: SessionIndexEvent) => void): unknown;
-  off(event: "sessionIndexEvent", listener: (event: SessionIndexEvent) => void): unknown;
-}
+export type SessionDiscoveryClient = SupercodeSessionCatalogClient;
 
 /**
  * Native stores are independent inbox sources. Asking for them separately lets the messenger paint
@@ -279,8 +232,22 @@ export interface TerminalService {
     launch: StructuredLaunch,
     conversationKey?: string | null,
     initialInput?: string,
+    options?: {
+      conversationDiscovery?: {
+        knownConversationKeys: readonly string[];
+        prompt: string;
+        startedAtMs?: number;
+      };
+    },
   ): Promise<TerminalServiceSnapshot>;
-  bindContext(sessionId: string, conversationKey: string): Promise<TerminalServiceSnapshot>;
+  reconcileConversationBindings(
+    descriptors: readonly SessionDescriptor[],
+    keyForDescriptor: (descriptor: SessionDescriptor) => string,
+    options?: { now?: number },
+  ): Promise<{
+    bindings: readonly { conversationKey: string; sessionId: string }[];
+    snapshot: TerminalServiceSnapshot;
+  }>;
   canMoveSession(harness: HarnessId, sessionId: string, cwd: string): boolean;
   prepareMoveSession(
     harness: HarnessId,
@@ -376,11 +343,11 @@ function parseTerminalHostIntent(payload: unknown): TerminalIntent | null {
 export function bindIntentQueue(
   host: WidgetBridge,
   name: string,
-  handler: (intent: { id: string | number; payload: unknown }) => void | Promise<void>,
+  handler: (intent: WidgetIntent) => void | Promise<void>,
   pollMs = DEFAULT_INTENT_POLL_MS,
-  onSettled?: (intent: { id: string | number; payload: unknown }) => void | Promise<void>,
+  onSettled?: (intent: WidgetIntent) => void | Promise<void>,
 ): () => void {
-  const handle = async (intent: { id: string | number; payload: unknown }): Promise<void> => {
+  const handle = async (intent: WidgetIntent): Promise<void> => {
     try {
       await handler(intent);
     } finally {
@@ -526,11 +493,6 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const daemonStartedAt = performance.now();
   const debounceMs = options.pushDebounceMs ?? DEFAULT_PUSH_DEBOUNCE_MS;
   const attach = options.attachHost ?? defaultAttachHost;
-  // Foreign mirrors are intentionally disposable, but their bounded display
-  // windows are not. Sharing this headless cache makes returning to a chat an
-  // immediate paint while its native transcript refresh continues.
-  const mirrorCache = new SessionWindowCache({ maxEntries: 12 });
-
   const controller: AgentController =
     options.controller ??
     new SupercodeController({
@@ -560,9 +522,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const persisted = persistence
     ? await persistence.load().catch((error: unknown) => {
         log(`messenger state load failed (continuing): ${message(error)}`);
-        return { attention: [], observedCursors: {}, drafts: {}, preferredLaunchModes: {} };
+        return normalizeNativeMessengerState(null);
       })
-    : { attention: [], observedCursors: {}, drafts: {}, preferredLaunchModes: {} };
+    : normalizeNativeMessengerState(null);
 
   let stopped = false;
   let lastPushed: WidgetState | null = null;
@@ -580,36 +542,80 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const discovery: SessionDiscoveryClient | undefined = options.discoveryClient ?? options.client;
   /** The last global scan, held whole — the row keys the panel echoes back resolve through it. */
   let descriptors: readonly SessionDescriptor[] = [];
-  let subagentDescriptors: readonly SessionDescriptor[] = [];
-  let subagentInspector: WidgetState["subagentInspector"] = null;
-  let subagentLoadGeneration = 0;
-  const activityBySession = new Map<string, SessionActivityObservation>();
-  let activitySubscription: string | null = null;
-  let activityLocatorFingerprint = "";
-  let activitySubscriptionGeneration = 0;
-  let indexSubscription: string | null = null;
-  let indexRevision = 0;
-  let indexLimitFingerprint = "";
-  let indexSubscriptionGeneration = 0;
-  let indexRecoveryInFlight: Promise<void> | null = null;
+  const familyInspector = new SessionFamilyInspector({
+    client: {
+      discover: async (query) => {
+        if (!discovery) throw new Error("Session discovery is unavailable.");
+        return discovery.discover(query);
+      },
+      session: (locator) => requireClient(options).session(locator),
+    },
+    keyForDescriptor: (descriptor) => sessionKey(descriptor.locator),
+    maxChildren: 100,
+    view: PASSIVE_MIRROR_VIEW,
+  });
+  let catalogActivities = new Map<string, SupercodeSessionCatalogSnapshot["activities"][number]>();
   let sessionLimit = MAX_SESSION_ROWS;
   let hasMoreSessions = false;
   const initialTranscriptLimit = options.projection?.maxEntries ?? DEFAULT_MAX_ENTRIES;
-  const transcriptLimits = new Map<string, number>();
+  const attachTimeoutMs = options.attachTimeoutMs ?? DEFAULT_ATTACH_TIMEOUT_MS;
   /** A page action can fail before the controller publishes a structured error. Keep it visible. */
   let actionError: string | null = null;
   let exportReceipt: ExportReceipt | null = null;
   let terminalHost = options.terminalService ? await options.terminalService.snapshot() : null;
-  const pendingTerminalStarts = new Map<string, {
-    cwd: string;
-    harness: "claude-code" | "codex";
-    knownSessionKeys: Set<string>;
-    prompt: string;
-    startedAtMs: number;
-  }>();
-  let terminalBindingInFlight: Promise<void> | null = null;
-  let bindPendingTerminalStarts: () => Promise<void> = async () => undefined;
+  let authenticationTerminalSessionId: string | null = null;
+  const authentication = options.client?.beginHarnessAuthentication && options.client.verifyHarnessAuthentication
+    ? new HarnessAuthenticationController({
+        client: options.client,
+        cwd: options.workspace,
+        timeoutMs: 10 * 60_000,
+        host: {
+          launch: async (plan) => {
+            const terminalService = options.terminalService;
+            if (!terminalService) {
+              throw new Error("Harness sign-in needs the local terminal companion.");
+            }
+            terminalHost = await terminalService.snapshot();
+            if (!terminalHost.available) {
+              throw new Error("Harness sign-in needs the local terminal companion.");
+            }
+            terminalHost = await terminalService.launchSession(plan.harness, plan.launch);
+            const sessionId = terminalHost.attachment?.sessionId;
+            if (!sessionId) {
+              throw new Error("The terminal host did not expose the native sign-in session.");
+            }
+            authenticationTerminalSessionId = sessionId;
+            let released = false;
+            const release = async (): Promise<void> => {
+              if (released) return;
+              released = true;
+              try {
+                terminalHost = await terminalService.close(sessionId);
+              } finally {
+                if (authenticationTerminalSessionId === sessionId) {
+                  authenticationTerminalSessionId = null;
+                }
+              }
+            };
+            return {
+              wait: async () => {
+                while (!released && !stopped) {
+                  terminalHost = await terminalService.snapshot();
+                  const session = terminalHost.sessions.find((item) => item.id === sessionId);
+                  if (!session?.activeCommand) return { success: true };
+                  await new Promise((resolve) => setTimeout(resolve, 1_000));
+                }
+                return { success: false, reason: `${plan.harness} sign-in was cancelled.` };
+              },
+              cancel: release,
+              close: release,
+            };
+          },
+        },
+      })
+    : null;
   const terminalMoves = new Map<string, "waiting" | "moving">();
+  let reconcileTerminalBindings: () => Promise<void> = async () => undefined;
   let terminalMoveInFlight: Promise<void> | null = null;
   let terminalMoveRetryTimer: ReturnType<typeof setTimeout> | null = null;
   const scheduleTerminalMoveRetry = (): void => {
@@ -647,46 +653,17 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const materializeArtifact = options.materializeArtifact
     ?? ((artifact: SessionArtifact): Promise<ExportReceipt> => writeSessionArtifact(artifact, join(options.workspace, ".supercode", "exports")));
 
-  // Messenger attention belongs to the daemon so it remains consistent across every injected page.
-  // Native message cursors distinguish a new human-visible message from a growing preview, tool
-  // record, or heartbeat. The persisted ledger also reconciles messages written while the daemon
-  // was stopped without replaying imported history on the next launch.
-  interface ConversationObservation {
-    cursor: string | null;
-    candidates: Array<{ cursor: string; role: "user" | "assistant"; preview: string }>;
-  }
-  const observeConversation = (descriptor: SessionDescriptor | undefined): ConversationObservation => {
-    const candidates = (descriptor?.latest_message_candidates ?? []).flatMap((candidate) => {
-      if (typeof candidate.cursor !== "string" || candidate.cursor === "") return [];
-      const preview = conversationPreviewText([candidate]);
-      return preview
-        ? [{ cursor: candidate.cursor, role: candidate.role, preview }]
-        : [];
-    });
-    return { cursor: candidates[0]?.cursor ?? null, candidates };
-  };
-  const newAssistantMessages = (current: ConversationObservation, priorCursor: string | null): number => {
-    if (current.cursor === null || current.cursor === priorCursor) return 0;
-    const priorIndex = priorCursor === null
-      ? -1
-      : current.candidates.findIndex((candidate) => candidate.cursor === priorCursor);
-    const newlyObserved = priorIndex >= 0
-      ? current.candidates.slice(0, priorIndex)
-      : current.candidates;
-    return newlyObserved.filter((candidate) => candidate.role === "assistant").length;
-  };
-  const observedUpdates = new Map<string, Pick<SessionRow, "messages" | "runtimeStatus"> & { cursor: string | null }>();
-  const observedCursors = new Map<string, string>(Object.entries(persisted.observedCursors));
-  const attention = new Map<string, SessionAttention>(persisted.attention.map((item) => [item.key, item]));
-  const drafts = new Map<string, string>(Object.entries(persisted.drafts));
-  const preferredLaunchModes = new Map<string, ContinuationMode>(Object.entries(persisted.preferredLaunchModes));
   let persistenceTimer: ReturnType<typeof setTimeout> | null = null;
   let persistenceInFlight: Promise<void> = Promise.resolve();
+  const messengerState = createNativeMessengerState({
+    state: persisted,
+    onChange: () => schedulePersistence(),
+  });
   const flushPersistence = (): Promise<void> => {
     if (!persistence) return Promise.resolve();
     if (persistenceTimer) clearTimeout(persistenceTimer);
     persistenceTimer = null;
-    const state = { attention: [...attention.values()], observedCursors: Object.fromEntries(observedCursors), drafts: Object.fromEntries(drafts), preferredLaunchModes: Object.fromEntries(preferredLaunchModes) };
+    const state = messengerState.snapshot();
     persistenceInFlight = persistenceInFlight
       .catch(() => undefined)
       .then(() => persistence.save(state))
@@ -698,38 +675,6 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     persistenceTimer = setTimeout(() => { void flushPersistence(); }, 300);
     persistenceTimer.unref?.();
   };
-  const markAttention = (
-    key: string,
-    kind: SessionAttentionKind,
-    preview?: string,
-    unreadDelta = 1,
-    afterMessages?: number | null,
-  ): void => {
-    const prior = attention.get(key);
-    const boundedPreview = preview?.slice(0, 240);
-    const sameEvent = boundedPreview
-      ? prior?.preview === boundedPreview
-      : prior?.kind === kind && prior.preview === undefined;
-    const unreadCount = sameEvent
-      ? (prior?.unreadCount ?? Math.max(1, unreadDelta))
-      : Math.min((prior?.unreadCount ?? 0) + Math.max(1, unreadDelta), 999);
-    const next: SessionAttention = {
-      key,
-      kind: prior?.kind === "failed" && kind !== "failed" ? "failed" : kind,
-      unreadCount,
-      ...(prior?.afterMessages !== undefined
-        ? { afterMessages: prior.afterMessages }
-        : Number.isSafeInteger(afterMessages) && (afterMessages as number) >= 0
-          ? { afterMessages: afterMessages as number }
-          : {}),
-      ...(boundedPreview ? { preview: boundedPreview } : {}),
-    };
-    if (JSON.stringify(attention.get(key)) === JSON.stringify(next)) return;
-    attention.set(key, next);
-    schedulePersistence();
-  };
-  let priorRuntimeActive = false;
-  let priorRuntimeKey: string | null = null;
   let panelVisible = false;
   let attentionTimer: ReturnType<typeof setTimeout> | null = null;
   let attentionDueAt = Number.POSITIVE_INFINITY;
@@ -758,83 +703,56 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
    * must survive navigation to another chat, just like a background conversation in a messenger.
    * Passive mirrors are still closed when left so their transcript followers cannot accumulate.
    */
-  interface ForeignControllerSlot {
-    controller: AgentController;
-    unsubscribe: () => void;
-    sourceHarness: HarnessId;
-  }
-  const foreignControllers = new Map<string, ForeignControllerSlot>();
-  let activeForeignKey: string | null = null;
-  const activeForeign = (): ForeignControllerSlot | null =>
-    activeForeignKey === null ? null : foreignControllers.get(activeForeignKey) ?? null;
-  const activeController = (): AgentController => activeForeign()?.controller ?? controller;
+  const controllerPool = new SessionControllerPool<AgentController>({
+    primary: controller,
+    tailMessages: initialTranscriptLimit,
+    timeoutMs: attachTimeoutMs,
+    maxCachedWindows: 12,
+    createController: ({ descriptor, tailMessages, mirrorCache }) => options.createController
+      ? options.createController({
+          workspace: descriptor.cwd ?? options.workspace,
+          descriptor,
+          harnesses: controller.getSnapshot().harnesses,
+          tailMessages,
+        })
+      : new SupercodeController({
+          client: requireClient(options),
+          workspace: descriptor.cwd ?? options.workspace,
+          ownsClient: false,
+          autoObserve: false,
+          initialInventory: {
+            harnesses: controller.getSnapshot().harnesses,
+            sessions: [descriptor],
+          },
+          inventorySubscriptions: false,
+          mirrorView: { ...PASSIVE_MIRROR_VIEW, tailMessages },
+          mirrorCache,
+          allowHarnessConfiguration: true,
+        }),
+  });
+  const activeForeign = () => controllerPool.activeEntry();
+  const activeController = (): AgentController => controllerPool.activeController();
 
   const observeAttention = (
     snapshot: SupercodeClientSnapshot,
     sessions: ReturnType<typeof projectSessions>,
     attached: ReturnType<typeof attachmentFor>,
     observedAt: number,
-  ): SessionAttention[] => {
-    for (const row of sessions) {
-      const descriptor = descriptors.find((candidate) => sessionKey(candidate.locator) === row.key);
-      const current = observeConversation(descriptor);
-      let prior = observedUpdates.get(row.key);
-      if (prior === undefined) {
-        const persistedCursor = observedCursors.get(row.key) ?? null;
-        prior = { cursor: persistedCursor, messages: row.messages, runtimeStatus: row.runtimeStatus };
-        if (persistedCursor === null) {
-          observedUpdates.set(row.key, { cursor: current.cursor, messages: row.messages, runtimeStatus: row.runtimeStatus });
-          if (current.cursor !== null) {
-            observedCursors.set(row.key, current.cursor);
-            schedulePersistence();
-          }
-          continue;
-        }
-      }
-
-      const rewritten = row.messages !== null && prior.messages !== null && row.messages < prior.messages;
-      const cursorChanged = current.cursor !== null && current.cursor !== prior.cursor;
-      const settledAt = row.previewUpdatedAt ?? row.updatedAt;
-      const settled = settledAt !== null && observedAt - settledAt >= DEFAULT_ATTENTION_SETTLE_MS;
-      const completed = prior.runtimeStatus === "busy" && row.runtimeStatus === "idle";
-
-      if (rewritten) {
-        // Compaction/rewrite is a new native baseline, never negative unread.
-        prior.cursor = current.cursor;
-      } else if (cursorChanged && row.runtimeStatus !== "busy" && (completed || settled)) {
-        const delta = newAssistantMessages(current, prior.cursor);
-        if (delta > 0) {
-          markAttention(row.key, completed ? "finished" : "unseen", row.preview, delta, prior.messages);
-        }
-        prior.cursor = current.cursor;
-      } else if (cursorChanged && row.runtimeStatus !== "busy" && settledAt !== null) {
-        scheduleAttentionSettlement(DEFAULT_ATTENTION_SETTLE_MS - (observedAt - settledAt));
-      }
-
-      if (prior.cursor !== null && observedCursors.get(row.key) !== prior.cursor) {
-        observedCursors.set(row.key, prior.cursor);
-        schedulePersistence();
-      }
-      observedUpdates.set(row.key, { cursor: prior.cursor, messages: row.messages, runtimeStatus: row.runtimeStatus });
+  ): ReturnType<typeof messengerState.observeAttention>["attention"] => {
+    const observation = messengerState.observeAttention({
+      sessions,
+      descriptors,
+      keyForDescriptor: (descriptor) => sessionKey(descriptor.locator),
+      controller: snapshot,
+      attachedKey: attached?.key ?? null,
+      panelVisible,
+      now: observedAt,
+      settleMs: DEFAULT_ATTENTION_SETTLE_MS,
+    });
+    if (observation.settleAfterMs !== null) {
+      scheduleAttentionSettlement(observation.settleAfterMs);
     }
-
-    const runtimeActive =
-      snapshot.turn.state !== "idle" || snapshot.requests.some((request) => request.status === "pending");
-    const runtimeKey = attached?.key || priorRuntimeKey;
-    if (priorRuntimeActive && !runtimeActive && priorRuntimeKey && !(panelVisible && attached?.key === priorRuntimeKey)) {
-      const lastAssistant = [...snapshot.conversation].reverse().find(
-        (entry) => entry.kind === "message" && entry.role === "assistant" && entry.text.trim() !== "",
-      );
-      const preview = lastAssistant?.kind === "message"
-        ? lastAssistant.text.replace(/\s+/g, " ").trim()
-        : undefined;
-      markAttention(priorRuntimeKey, snapshot.error ? "failed" : "finished", preview);
-    }
-    priorRuntimeActive = runtimeActive;
-    priorRuntimeKey = runtimeActive ? runtimeKey : null;
-
-    const visible = new Set(sessions.map((row) => row.key));
-    return [...attention.values()].filter((item) => visible.has(item.key));
+    return observation.attention;
   };
 
   const pushNow = (force = false, scope: "full" | "inventory" = "full"): Promise<void> => {
@@ -844,23 +762,16 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     // A branch starts before its new native session necessarily appears in global discovery. Once
     // it does, move the retained controller from its source-row key to the branch's real row key so
     // reopening that row returns to the same live runtime instead of spawning a duplicate mirror.
-    if (activeForeignKey !== null && snapshot.connection.mode === "control" && ref?.sessionId) {
-      const current = foreignControllers.get(activeForeignKey);
+    if (controllerPool.activeKey !== null && snapshot.connection.mode === "control" && ref?.sessionId) {
+      const current = controllerPool.activeEntry();
       const persisted = descriptors.find((descriptor) => matchesActive(descriptor, ref));
       const persistedKey = persisted ? sessionKey(persisted.locator) : null;
-      if (current && persistedKey && persistedKey !== activeForeignKey) {
-        const priorLimit = transcriptLimits.get(activeForeignKey);
-        foreignControllers.delete(activeForeignKey);
-        foreignControllers.set(persistedKey, current);
-        if (priorLimit !== undefined) {
-          transcriptLimits.delete(activeForeignKey);
-          transcriptLimits.set(persistedKey, priorLimit);
-        }
-        activeForeignKey = persistedKey;
+      if (current && persistedKey && persistedKey !== controllerPool.activeKey) {
+        controllerPool.rekeyActive(persistedKey);
       }
     }
-    const transcriptWindowKey = activeForeignKey ?? "@owned";
-    const transcriptLimit = transcriptLimits.get(transcriptWindowKey) ?? initialTranscriptLimit;
+    const activeForeignKey = controllerPool.activeKey;
+    const transcriptLimit = snapshot.history?.transcriptLimit ?? initialTranscriptLimit;
     const observedAt = now();
     const ownSnapshot = controller.getSnapshot();
     const ownRef = activeRef(ownSnapshot);
@@ -871,24 +782,34 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const ownedDescriptor = descriptors.find((descriptor) => matchesActive(descriptor, ownRef));
       if (ownedDescriptor) writableSessionKeys.add(sessionKey(ownedDescriptor.locator));
     }
-    for (const [key, slot] of foreignControllers) {
-      if (slot.controller.getSnapshot().availableActions.send) writableSessionKeys.add(key);
+    for (const entry of controllerPool.entries()) {
+      if (entry.controller.getSnapshot().availableActions.send) writableSessionKeys.add(entry.key);
     }
     const isWritable = (descriptor: SessionDescriptor): boolean =>
       writableSessionKeys.has(sessionKey(descriptor.locator));
     const sessions = projectSessions(descriptors, {
+      keyFor: (descriptor) => sessionKey(descriptor.locator),
       now: observedAt,
       home,
       active: ref,
       isWritable,
-      max: sessionLimit,
+      maxSessions: sessionLimit,
       preserveOrder: true,
     });
-    const inspector = subagentInspector ? {
-      ...subagentInspector,
+    const family = familyInspector.getSnapshot();
+    const parentRow = family.parent ? projectSessions([family.parent], {
+      keyFor: (descriptor) => sessionKey(descriptor.locator),
+      now: observedAt,
+      home,
+      maxSessions: 1,
+    })[0] : null;
+    const inspector: WidgetState["subagentInspector"] = family.status !== "idle" && family.parentKey ? {
+      parentKey: family.parentKey,
+      parentTitle: parentRow?.title ?? family.parent?.title ?? "Unavailable chat",
+      status: family.status,
       items: projectSubagentInventory(
-        subagentDescriptors.map((descriptor) => {
-          const activity = activityBySession.get(
+        family.children.map((descriptor) => {
+          const activity = catalogActivities.get(
             `${descriptor.locator.harness}\0${descriptor.locator.session_id}`,
           );
           return activity ? { ...descriptor, activity } : descriptor;
@@ -900,13 +821,21 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           maxSessions: 100,
         },
       ),
+      selectedKey: family.selectedKey,
+      transcript: family.selectedSession ? projectSubagentTranscript(family.selectedSession, {
+        prefix: family.selectedKey ?? family.parentKey,
+        maxEntries: options.projection?.maxEntries ?? DEFAULT_MAX_ENTRIES,
+        maxEntryChars: options.projection?.maxEntryChars ?? 16_000,
+      }) : [],
+      error: family.error,
     } : null;
     const ownRows = projectSessions(descriptors, {
+      keyFor: (descriptor) => sessionKey(descriptor.locator),
       now: observedAt,
       home,
       active: ownRef,
       isWritable,
-      max: sessionLimit,
+      maxSessions: sessionLimit,
       preserveOrder: true,
     });
     imageProjection = projectWithImages(snapshot, { ...options.projection, maxEntries: transcriptLimit });
@@ -967,6 +896,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     const activeMoveStatus = draftKey ? terminalMoves.get(draftKey) ?? null : null;
     const movableNativeSessionCount = movableNativeDescriptors().length;
     const state: WidgetState & {
+      authenticationTerminalSessionId?: string | null;
       canMoveToTerminal?: boolean;
       movableNativeSessionCount?: number;
       terminalHost?: TerminalServiceSnapshot;
@@ -985,6 +915,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       attached,
       owned: attachmentFor(ownRef, ownRows, ownSnapshot.workspace, home),
       attachError,
+      harnessAuthentication: normalizeUiState({
+        harnessAuthentication: authentication?.getSnapshot() ?? null,
+      }).harnessAuthentication,
+      authenticationTerminalSessionId,
       error: actionError ?? projected.error,
       // The shared UI's Retry control means "refresh controller state". Host intents such as
       // resume/send/export already retain their own action, so labelling a refresh as a retry is
@@ -1010,7 +944,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
                 : []),
             ]
           : [];
-        const preferred = preferredLaunchModes.get(item.id);
+        const preferred = messengerState.preferredLaunchMode(item.id);
         return {
           ...item,
           launchModes,
@@ -1038,12 +972,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         : null,
       exportReceipt,
       history: { sessionLimit, hasMoreSessions, transcriptLimit, hasEarlier },
-      savedDraft: draftKey ? drafts.get(draftKey) ?? "" : "",
+      savedDraft: draftKey ? messengerState.draft(draftKey) : "",
       attention: observeAttention(snapshot, sessions, attached, observedAt),
       ...(terminalView ? { terminalHost: terminalView } : {}),
     };
     lastPushed = state;
     const inventoryPatch: Partial<WidgetState> & {
+      authenticationTerminalSessionId?: string | null;
       canMoveToTerminal?: boolean;
       movableNativeSessionCount?: number;
       terminalMoveQueuedCount?: number;
@@ -1057,6 +992,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       attached: state.attached,
       owned: state.owned,
       attachError: state.attachError,
+      harnessAuthentication: state.harnessAuthentication,
+      authenticationTerminalSessionId: state.authenticationTerminalSessionId ?? null,
       attention: state.attention,
       history: state.history,
       error: state.error,
@@ -1108,6 +1045,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   };
 
   const unsubscribe = controller.subscribe(schedulePush);
+  const unsubscribeControllerPool = controllerPool.subscribe(schedulePush);
+  const unsubscribeFamilyInspector = familyInspector.subscribe(schedulePush);
+  const unsubscribeAuthentication = authentication?.subscribe(() => {
+    void pushNow();
+  }) ?? (() => undefined);
 
   void refreshNativeSessions()
     .then(() => pushNow(false, "inventory"))
@@ -1116,48 +1058,37 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const repushMs = options.repushIntervalMs ?? DEFAULT_REPUSH_INTERVAL_MS;
   const stopRepush = repushMs > 0 ? host.every(repushMs, () => pushNow()) : (): void => undefined;
 
-  /** Re-scan each native store, publishing completed inbox slices as they arrive. */
-  let refreshInFlight: Promise<void> | null = null;
+  // Supercode owns discovery, topic retention, index-gap recovery, lifecycle subscriptions, and
+  // pagination. Vibewaiting keeps only the messenger-specific rule that rows do not move under the
+  // pointer while the list is open.
   let initialInventorySettled = false;
-  const sessionsByHarness = new Map<HarnessId, SessionDescriptor[]>();
-  // Polling returns a bounded slice per harness. Remember every key that has crossed that boundary
-  // so an older off-screen row is not mistaken for a newly-created conversation on every refresh.
+  let catalog: SupercodeSessionCatalog | null = null;
   const knownDescriptorKeys = new Set<string>();
-  const topicCandidatesBySession = new Map<string, SessionDescriptor["preview_candidates"]>();
-  const topicAttemptedAtBySession = new Map<string, number>();
-  const retainTopic = (descriptor: SessionDescriptor): SessionDescriptor => {
-    const activity = (descriptor as SessionDescriptor & { activity?: SessionActivityObservation | null }).activity;
-    if (activity) activityBySession.set(`${activity.harness}\0${activity.session_id}`, activity);
-    const key = sessionKey(descriptor.locator);
-    if (descriptor.preview_candidates?.length) {
-      topicCandidatesBySession.set(key, descriptor.preview_candidates);
-      return descriptor;
+  const rebuildDescriptors = (
+    snapshot: SupercodeSessionCatalogSnapshot | null = catalog?.getSnapshot() ?? null,
+    preserveVisibleOrder = panelVisible && initialInventorySettled,
+  ): void => {
+    if (!snapshot) {
+      descriptors = [];
+      hasMoreSessions = false;
+      return;
     }
-    const retained = topicCandidatesBySession.get(key);
-    return retained?.length ? { ...descriptor, preview_candidates: retained } : descriptor;
-  };
-  const rebuildDescriptors = (preserveVisibleOrder = panelVisible && initialInventorySettled): void => {
-    const all = [...sessionsByHarness.values()].flat().map((descriptor) => {
-      const activity = activityBySession.get(
-        `${descriptor.locator.harness}\0${descriptor.locator.session_id}`,
-      );
-      return activity ? { ...descriptor, activity } : descriptor;
-    });
-    all.sort((left, right) =>
-      (conversationUpdatedAt(right) ?? Number.MIN_SAFE_INTEGER) - (conversationUpdatedAt(left) ?? Number.MIN_SAFE_INTEGER)
-      || left.locator.harness.localeCompare(right.locator.harness)
-      || left.locator.session_id.localeCompare(right.locator.session_id));
-    hasMoreSessions = all.length > sessionLimit
-      || [...sessionsByHarness.values()].some((sessions) => sessions.length > sessionLimit);
+    sessionLimit = snapshot.limit;
+    hasMoreSessions = snapshot.hasMore;
+    catalogActivities = new Map(snapshot.activities.map((activity) => [
+      `${activity.harness}\0${activity.session_id}`,
+      activity,
+    ]));
+    const all = [...snapshot.sessions];
     const unseen = all.filter((descriptor) => !knownDescriptorKeys.has(sessionKey(descriptor.locator)));
     for (const descriptor of all) knownDescriptorKeys.add(sessionKey(descriptor.locator));
     if (!preserveVisibleOrder || descriptors.length === 0) {
-      descriptors = all.slice(0, sessionLimit);
+      descriptors = all;
       return;
     }
     const updatedByKey = new Map(all.map((descriptor) => [sessionKey(descriptor.locator), descriptor]));
     const pinnedKeys = new Set([
-      ...(activeForeignKey ? [activeForeignKey] : []),
+      ...(controllerPool.activeKey ? [controllerPool.activeKey] : []),
       ...terminalMoves.keys(),
     ]);
     const stable = descriptors.flatMap((descriptor) => {
@@ -1167,9 +1098,6 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       updatedByKey.delete(key);
       return [updated];
     });
-    // New conversations append while the panel is open instead of reordering the row under the
-    // pointer. At a full page they replace only the oldest visible rows; appending after all 30 and
-    // then truncating used to make every newly-created conversation invisible until panel close.
     const additions = unseen.filter((descriptor) => updatedByKey.has(sessionKey(descriptor.locator)));
     const pinnedCount = stable.filter((descriptor) => pinnedKeys.has(sessionKey(descriptor.locator))).length;
     const selectedAdditions = additions.slice(0, Math.max(0, sessionLimit - pinnedCount));
@@ -1183,194 +1111,29 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     });
     descriptors = [...selectedStable, ...selectedAdditions].slice(0, sessionLimit);
   };
-  const activityCandidate = discovery as (SessionDiscoveryClient & Partial<SessionActivityEventSource>) | undefined;
-  const activityTransport = activityCandidate?.subscribeSessionActivity
-    && activityCandidate.unsubscribeSessionActivity
-    && activityCandidate.on
-    && activityCandidate.off
-    ? {
-        subscribe: activityCandidate.subscribeSessionActivity.bind(activityCandidate),
-        unsubscribe: activityCandidate.unsubscribeSessionActivity.bind(activityCandidate),
-        on: activityCandidate.on.bind(activityCandidate),
-        off: activityCandidate.off.bind(activityCandidate),
-      }
+  catalog = discovery
+    ? new SupercodeSessionCatalog({
+        client: discovery,
+        harnesses: DISCOVERY_HARNESSES,
+        limit: sessionLimit,
+        includeTopicCandidates: true,
+      })
     : null;
-  const indexCandidate = discovery as (SessionDiscoveryClient & Partial<SessionIndexEventSource>) | undefined;
-  const indexTransport = indexCandidate?.subscribeSessionIndex
-    && indexCandidate.unsubscribeSessionIndex
-    && indexCandidate.on
-    && indexCandidate.off
-    ? {
-        subscribe: indexCandidate.subscribeSessionIndex.bind(indexCandidate),
-        unsubscribe: indexCandidate.unsubscribeSessionIndex.bind(indexCandidate),
-        on: indexCandidate.on.bind(indexCandidate),
-        off: indexCandidate.off.bind(indexCandidate),
-      }
-    : null;
-  const applyActivities = (activities: readonly SessionActivityObservation[]): boolean => {
-    let changed = false;
-    for (const activity of activities) {
-      const key = `${activity.harness}\0${activity.session_id}`;
-      const previous = activityBySession.get(key);
-      const before = previous
-        ? `${previous.presence}:${previous.turn}:${previous.evidence.source}:${previous.evidence.native_state ?? ""}:${previous.evidence.harness_version ?? ""}`
-        : "";
-      const after = `${activity.presence}:${activity.turn}:${activity.evidence.source}:${activity.evidence.native_state ?? ""}:${activity.evidence.harness_version ?? ""}`;
-      activityBySession.set(key, activity);
-      if (before !== after) changed = true;
-    }
-    if (changed) rebuildDescriptors();
-    return changed;
-  };
-  const onSessionActivity = (event: SessionActivityEvent): void => {
-    if (stopped || event.subscription !== activitySubscription) return;
-    if (applyActivities(event.activities)) void pushNow(false, "inventory");
+  const unsubscribeCatalog = catalog?.subscribe((snapshot) => {
+    if (stopped) return;
+    rebuildDescriptors(snapshot);
+    void reconcileTerminalBindings();
+    void pushNow(false, "inventory");
     void processTerminalMove();
-  };
-  activityTransport?.on("sessionActivityEvent", onSessionActivity);
-
-  const syncActivitySubscription = async (): Promise<void> => {
-    if (!activityTransport || stopped) return;
-    const locators = [...descriptors, ...subagentDescriptors].map((descriptor) => descriptor.locator);
-    const fingerprint = locators.map(sessionKey).sort().join("\n");
-    if (fingerprint === activityLocatorFingerprint) return;
-    activityLocatorFingerprint = fingerprint;
-    const generation = ++activitySubscriptionGeneration;
-    if (locators.length === 0) return;
-    try {
-      const opened = await activityTransport.subscribe(locators);
-      if (stopped || generation !== activitySubscriptionGeneration) {
-        await activityTransport.unsubscribe(opened.subscription).catch(() => undefined);
-        return;
-      }
-      const previous = activitySubscription;
-      activitySubscription = opened.subscription;
-      if (applyActivities(opened.initial)) await pushNow(false, "inventory");
-      if (previous) await activityTransport.unsubscribe(previous).catch((error: unknown) => {
-        log(`old activity subscription cleanup failed (continuing): ${message(error)}`);
-      });
-    } catch (error) {
-      if (!stopped && generation === activitySubscriptionGeneration) {
-        activityLocatorFingerprint = "";
-        log(`session activity subscription failed (continuing): ${message(error)}`);
-      }
-    }
-  };
-  const syncIndexSubscription = async (): Promise<void> => {
-    if (!indexTransport || stopped) return;
-    const fingerprint = String(sessionLimit);
-    if (fingerprint === indexLimitFingerprint) return;
-    indexLimitFingerprint = fingerprint;
-    const generation = ++indexSubscriptionGeneration;
-    try {
-      const opened = await indexTransport.subscribe({
-        harnesses: ["claude-code", "codex"],
-        limit: sessionLimit + 1,
-        include_topic_candidates: true,
-      });
-      if (stopped || generation !== indexSubscriptionGeneration) {
-        await indexTransport.unsubscribe(opened.subscription).catch(() => undefined);
-        return;
-      }
-      const previous = indexSubscription;
-      indexSubscription = opened.subscription;
-      indexRevision = opened.revision;
-      for (const harness of ["claude-code", "codex"] as const) {
-        sessionsByHarness.set(
-          harness,
-          opened.initial.filter((descriptor) => descriptor.locator.harness === harness).map(retainTopic),
-        );
-      }
-      rebuildDescriptors();
-      await syncActivitySubscription();
+  }) ?? (() => undefined);
+  const refreshSessions = async (): Promise<void> => {
+    if (stopped || !catalog) return;
+    await catalog.refresh();
+    if (!initialInventorySettled) {
+      initialInventorySettled = true;
+      rebuildDescriptors(catalog.getSnapshot(), false);
       await pushNow(false, "inventory");
-      if (previous) await indexTransport.unsubscribe(previous).catch((error: unknown) => {
-        log(`old session index cleanup failed (continuing): ${message(error)}`);
-      });
-    } catch (error) {
-      if (!stopped && generation === indexSubscriptionGeneration) {
-        indexLimitFingerprint = "";
-        log(`session index subscription failed; retaining slow recovery scan: ${message(error)}`);
-      }
     }
-  };
-  const refreshSessions = (harnesses: readonly HarnessId[] = DISCOVERY_HARNESSES): Promise<void> => {
-    if (stopped || !discovery) return Promise.resolve();
-    // A slow native store must not let the recovery inventory tick pile up identical RPCs. Apart
-    // from wasting work, those queued calls used to extend one timeout into minutes of repeated
-    // "loading" failures.
-    if (refreshInFlight) return refreshInFlight;
-    const reportTimings = sessionsByHarness.size === 0;
-    refreshInFlight = Promise.all(harnesses.map(async (harness) => {
-      const startedAt = performance.now();
-      try {
-        const result = await discovery.discover({ harnesses: [harness], limit: sessionLimit + 1 });
-        if (stopped) return;
-        const sessions = result.sessions.map(retainTopic);
-        sessionsByHarness.set(harness, sessions);
-        rebuildDescriptors();
-        void bindPendingTerminalStarts();
-        if (reportTimings) {
-          log(`discovered ${sessions.length} ${harness} sessions in ${Math.round(performance.now() - startedAt)}ms`);
-        }
-        await pushNow(false, "inventory");
-      } catch (e) {
-        if (!stopped) {
-          log(`session discovery failed for ${harness} after ${Math.round(performance.now() - startedAt)}ms (continuing): ${message(e)}`);
-        }
-      }
-    })).then(async () => {
-      if (stopped) return;
-      await syncActivitySubscription();
-      await syncIndexSubscription();
-      // The index snapshot and every targeted replacement already carry
-      // topic candidates. Retrying a second full Claude/Codex scan would
-      // quietly reintroduce the hot path this subscription removes.
-      if (indexSubscription) return;
-      const now = performance.now();
-      const pendingTopicKeys = descriptors
-        .filter((descriptor) => descriptor.locator.harness === "claude-code" || descriptor.locator.harness === "codex")
-        .map((descriptor) => sessionKey(descriptor.locator))
-        .filter((key) => !topicCandidatesBySession.has(key)
-          && now - (topicAttemptedAtBySession.get(key) ?? Number.NEGATIVE_INFINITY) >= TOPIC_RETRY_MS);
-      if (pendingTopicKeys.length === 0) return;
-      for (const key of pendingTopicKeys) topicAttemptedAtBySession.set(key, now);
-      const startedAt = performance.now();
-      try {
-        const result = await discovery.discover({
-          harnesses: ["claude-code", "codex"],
-          limit: sessionLimit,
-          include_topic_candidates: true,
-        });
-        if (stopped) return;
-        for (const descriptor of result.sessions) retainTopic(descriptor);
-        for (const harness of ["claude-code", "codex"] as const) {
-          const sessions = sessionsByHarness.get(harness);
-          if (sessions) sessionsByHarness.set(harness, sessions.map(retainTopic));
-        }
-        rebuildDescriptors();
-        log(`discovered ${result.sessions.length} Claude Code/Codex topics in ${Math.round(performance.now() - startedAt)}ms`);
-        await pushNow(false, "inventory");
-      } catch (e) {
-        if (!stopped) {
-          log(`topic discovery failed after ${Math.round(performance.now() - startedAt)}ms (continuing): ${message(e)}`);
-        }
-      }
-    }).finally(async () => {
-      try {
-        // Progressive slices make the first rows useful quickly, but an early panel open must not
-        // freeze whichever native store happened to answer first. Normalize once after the initial
-        // inventory is complete; subsequent updates retain the row under the pointer until close.
-        if (!stopped && !initialInventorySettled) {
-          initialInventorySettled = true;
-          rebuildDescriptors(false);
-          await pushNow(false, "inventory");
-        }
-      } finally {
-        refreshInFlight = null;
-      }
-    });
-    return refreshInFlight;
   };
 
   async function processTerminalMove(): Promise<void> {
@@ -1475,314 +1238,96 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     await terminalMoveInFlight;
   }
 
-  const recoverSessionIndex = (): Promise<void> => {
-    if (indexRecoveryInFlight) return indexRecoveryInFlight;
-    indexLimitFingerprint = "";
-    indexRecoveryInFlight = syncIndexSubscription()
-      .finally(() => {
-        indexRecoveryInFlight = null;
-      });
-    return indexRecoveryInFlight;
-  };
-  const onSessionIndex = (event: SessionIndexEvent): void => {
-    if (stopped || event.subscription !== indexSubscription) return;
-    if (event.error) {
-      log(`session index reported a recoverable error: ${event.error.message}`);
-      return;
-    }
-    if (!Number.isSafeInteger(event.revision) || event.revision !== indexRevision + 1) {
-      log(`session index revision gap (${indexRevision} -> ${String(event.revision)}); resnapshotting`);
-      void recoverSessionIndex();
-      return;
-    }
-    indexRevision = event.revision;
-    for (const change of event.changes ?? []) {
-      if (change.kind === "removed") {
-        if (change.key.harness !== "claude-code" && change.key.harness !== "codex") continue;
-        const key = `${change.key.harness}\0${change.key.session_id}`;
-        const sessions = sessionsByHarness.get(change.key.harness);
-        const removed = sessions?.find((descriptor) =>
-          descriptor.locator.session_id === change.key.session_id);
-        if (sessions) {
-          sessionsByHarness.set(
-            change.key.harness,
-            sessions.filter((descriptor) =>
-              descriptor.locator.session_id !== change.key.session_id),
-          );
-        }
-        activityBySession.delete(key);
-        if (removed) {
-          const descriptorKey = sessionKey(removed.locator);
-          topicCandidatesBySession.delete(descriptorKey);
-          topicAttemptedAtBySession.delete(descriptorKey);
-        }
-        continue;
-      }
-      const descriptor = retainTopic(change.descriptor);
-      const harness = descriptor.locator.harness;
-      if (harness !== "claude-code" && harness !== "codex") continue;
-      const sessions = [...(sessionsByHarness.get(harness) ?? [])];
-      const existing = sessions.findIndex((candidate) =>
-        candidate.locator.session_id === descriptor.locator.session_id);
-      if (existing >= 0) sessions[existing] = descriptor;
-      else sessions.push(descriptor);
-      sessions.sort((left, right) =>
-        (right.updated_at_ms ?? Number.MIN_SAFE_INTEGER) - (left.updated_at_ms ?? Number.MIN_SAFE_INTEGER)
-        || left.locator.session_id.localeCompare(right.locator.session_id));
-      sessionsByHarness.set(harness, sessions.slice(0, sessionLimit + 1));
-    }
-    rebuildDescriptors();
-    void bindPendingTerminalStarts();
-    void syncActivitySubscription();
-    void pushNow(false, "inventory");
-  };
-  indexTransport?.on("sessionIndexEvent", onSessionIndex);
-
   const discoverMs = options.discoverIntervalMs ?? DEFAULT_DISCOVER_INTERVAL_MS;
   // Begin polling only after bootstrap. Registering it before a slow runtime start let discovery
   // ticks compete with startup on the same harness transport.
   let stopDiscovery = (): void => undefined;
   const startDiscoveryPolling = (): void => {
-    if (discoverMs > 0 && discovery) stopDiscovery = host.every(discoverMs, () => {
-      const harnesses = indexSubscription
-        ? DISCOVERY_HARNESSES.filter((harness) => harness !== "claude-code" && harness !== "codex")
-        : DISCOVERY_HARNESSES;
-      if (harnesses.length > 0) return refreshSessions(harnesses);
-    });
+    if (discoverMs > 0 && catalog) stopDiscovery = host.every(discoverMs, refreshSessions);
   };
 
-  const createController =
-    options.createController ??
-    ((opts: { workspace: string; descriptor: SessionDescriptor; harnesses: readonly FrontendHarness[]; tailMessages: number }): AgentController =>
-      // `ownsClient: false`: this daemon's ONE transport outlives every mirror that borrows it.
-      // Seed the locator and already-known harness inventory so initialization does not rediscover
-      // an entire workspace merely to mint the controller's local session key.
-      new SupercodeController({
-        client: requireClient(options),
-        workspace: opts.workspace,
-        ownsClient: false,
-        autoObserve: false,
-        initialInventory: {
-          harnesses: opts.harnesses,
-          sessions: [opts.descriptor],
-        },
-        // The daemon already owns the one machine-wide index and activity stream. A disposable
-        // one-session mirror only needs its bounded transcript follower; opening another native
-        // index here queues the requested chat behind an unrelated full inventory scan.
-        inventorySubscriptions: false,
-        mirrorView: { ...PASSIVE_MIRROR_VIEW, tailMessages: opts.tailMessages },
-        mirrorCache,
-        allowHarnessConfiguration: true,
-      }));
-
-  /**
-   * Leave the selected foreign conversation. A passive mirror is disposable; a resumed/branched
-   * controller is retained so switching chats never kills work the user explicitly continued.
-   */
-  const releaseForeignView = async (): Promise<void> => {
-    const key = activeForeignKey;
-    const previous = activeForeign();
-    activeForeignKey = null;
-    if (!previous || key === null) return;
-    if (previous.controller.getSnapshot().connection.mode === "control") return;
-    foreignControllers.delete(key);
-    previous.unsubscribe();
-    await previous.controller.close().catch((e: unknown) => log(`detach failed: ${message(e)}`));
-  };
-
-  // Attaches run independently and are generation-checked. A slow native transcript must never
-  // hold a newer selection behind it; whichever attempt is newest owns the panel, and every loser
-  // closes its candidate rather than leaving a follower behind.
-  let attachSeq = 0;
-  const attachTasks = new Set<Promise<void>>();
-  const attachTimeoutMs = options.attachTimeoutMs ?? DEFAULT_ATTACH_TIMEOUT_MS;
+  const releaseForeignView = (): Promise<void> => controllerPool.release();
+  let attachRequest = 0;
 
   /**
    * Record why an attach did not happen, and PUSH it — the panel's stuck "opening…" row is settled
    * by this state arriving, never by a timeout it invents. A superseded attempt (the user tapped
    * another row while this one was failing) records nothing: the newer attach owns the panel now.
    */
-  const failAttach = async (key: string, seq: number, reason: string, logLine = `attach failed: ${reason}`): Promise<void> => {
+  const failAttach = async (key: string, request: number, reason: string, logLine = `attach failed: ${reason}`): Promise<void> => {
     log(logLine);
-    if (stopped || seq !== attachSeq) return;
+    if (stopped || request !== attachRequest) return;
     attachError = toAttachError(key, reason);
     await pushNow();
   };
 
-  const runAttach = async (key: string, seq: number): Promise<void> => {
-    if (stopped || seq !== attachSeq) return;
+  const runAttach = async (key: string, request: number): Promise<void> => {
+    if (stopped || request !== attachRequest) return;
     const nativeRefresh = refreshNativeSessions();
-    // A new attempt supersedes the previous failure, whatever this one goes on to do.
     attachError = null;
-    if (activeForeignKey === key) {
-      await nativeRefresh;
-      await pushNow();
-      return;
-    }
-    const retained = foreignControllers.get(key);
-    if (retained) {
-      await releaseForeignView();
-      activeForeignKey = key;
-      log(`returning to locally controlled ${retained.controller.getSnapshot().activeHarness ?? "coding agent"} session`);
-      await nativeRefresh;
-      await pushNow();
-      return;
-    }
     const descriptor = descriptors.find((d) => sessionKey(d.locator) === key);
     if (!descriptor) {
       await failAttach(
         key,
-        seq,
+        request,
         "that session is no longer in the list",
         `attach: no discovered session with key ${key}`,
       );
       return;
     }
-    await releaseForeignView();
-    if (matchesActive(descriptor, activeRef(controller.getSnapshot()))) {
-      log(`following this daemon's own ${descriptor.locator.harness} session again`);
-      await pushNow();
-      return;
-    }
     const workspace = descriptor.cwd ?? options.workspace;
     const attachStartedAt = performance.now();
-    let initializedAt = attachStartedAt;
-    let candidate: AgentController;
     try {
-      candidate = createController({
-        workspace,
+      const selection = await controllerPool.select({
+        key,
         descriptor,
-        harnesses: controller.getSnapshot().harnesses,
-        tailMessages: transcriptLimits.get(key) ?? initialTranscriptLimit,
+        primary: matchesActive(descriptor, activeRef(controller.getSnapshot())),
       });
+      if (selection.status === "superseded") return;
+      if (stopped || request !== attachRequest) {
+        if (controllerPool.activeKey === key) await controllerPool.release();
+        return;
+      }
+      if (selection.status === "retained") {
+        log(`returning to locally controlled ${selection.controller.getSnapshot().activeHarness ?? "coding agent"} session`);
+      } else if (selection.status === "primary") {
+        log(`following this daemon's own ${descriptor.locator.harness} session again`);
+      } else {
+        log(
+          `following ${descriptor.locator.harness} in ${workspace} (read-only mirror; ` +
+          `${Math.round(performance.now() - attachStartedAt)}ms total)`,
+        );
+      }
     } catch (e) {
-      await failAttach(key, seq, message(e), `attach unavailable: ${message(e)}`);
+      await failAttach(key, request, message(e));
       return;
     }
-    const unpublishCandidate = (): void => {
-      const published = foreignControllers.get(key);
-      if (published?.controller !== candidate) return;
-      foreignControllers.delete(key);
-      if (activeForeignKey === key) activeForeignKey = null;
-      published.unsubscribe();
-    };
-    try {
-      const timeoutSeconds = Math.max(1, Math.ceil(attachTimeoutMs / 1000));
-      await withTimeout(
-        (async () => {
-          await candidate.initialize();
-          initializedAt = performance.now();
-          // The controller mints its own workspace-scoped keys; ours is a hash of the locator, so
-          // the two are matched on the pair every representation carries.
-          const target = candidate
-            .getSnapshot()
-            .sessions.find(
-              (s) => s.harness === descriptor.locator.harness && s.sessionId === descriptor.locator.session_id,
-            );
-          if (!target) throw new Error(`that session is not visible in ${workspace}`);
-          if (stopped || seq !== attachSeq) return;
-          // Publish the controller before observe resolves. A shared cached
-          // window commits synchronously at the start of observe, and this
-          // subscription is what lets that state reach the widget while the
-          // native refresh remains in flight.
-          let publishedTranscript = false;
-          const publishCandidateRevision = (): void => {
-            if (!publishedTranscript && candidate.getSnapshot().activeSession) {
-              publishedTranscript = true;
-              log(
-                `first ${descriptor.locator.harness} transcript state ready in ` +
-                `${Math.round(performance.now() - attachStartedAt)}ms`,
-              );
-              void pushNow();
-              return;
-            }
-            schedulePush();
-          };
-          const candidateSlot: ForeignControllerSlot = {
-            controller: candidate,
-            unsubscribe: candidate.subscribe(publishCandidateRevision),
-            sourceHarness: descriptor.locator.harness,
-          };
-          activeForeignKey = key;
-          foreignControllers.set(key, candidateSlot);
-          await candidate.dispatch({ type: "observe", sessionKey: target.key });
-        })(),
-        attachTimeoutMs,
-        `could not open this session within ${timeoutSeconds} ${timeoutSeconds === 1 ? "second" : "seconds"}`,
-      );
-    } catch (e) {
-      unpublishCandidate();
-      await candidate.close().catch(() => undefined);
-      await failAttach(key, seq, message(e));
-      return;
-    }
-    if (stopped || seq !== attachSeq) {
-      unpublishCandidate();
-      await candidate.close().catch(() => undefined);
-      return;
-    }
-    const attachedAt = performance.now();
-    log(
-      `following ${descriptor.locator.harness} in ${workspace} (read-only mirror; ` +
-      `${Math.round(attachedAt - attachStartedAt)}ms total = ${Math.round(initializedAt - attachStartedAt)}ms seeded init + ` +
-      `${Math.round(attachedAt - initializedAt)}ms transcript)`,
-    );
     await nativeRefresh;
-    await pushNow();
+    if (!stopped && request === attachRequest) await pushNow();
   };
 
   const attachSession = (key: string): Promise<void> => {
-    const seq = (attachSeq += 1);
-    const task = runAttach(key, seq);
-    attachTasks.add(task);
-    void task.then(
-      () => attachTasks.delete(task),
-      () => attachTasks.delete(task),
-    );
-    return task;
+    attachRequest += 1;
+    return runAttach(key, attachRequest);
   };
 
-  bindPendingTerminalStarts = (): Promise<void> => {
+  reconcileTerminalBindings = async (): Promise<void> => {
     const terminalService = options.terminalService;
-    if (stopped || terminalBindingInFlight || !terminalService || pendingTerminalStarts.size === 0)
-      return terminalBindingInFlight ?? Promise.resolve();
-    terminalBindingInFlight = (async () => {
-      for (const [terminalSessionId, pending] of pendingTerminalStarts) {
-        if (stopped) return;
-        if (now() - pending.startedAtMs > 10 * 60_000) {
-          pendingTerminalStarts.delete(terminalSessionId);
-          continue;
-        }
-        const prompt = pending.prompt.trim();
-        const matches = descriptors.filter((descriptor) => {
-          const key = sessionKey(descriptor.locator);
-          if (pending.knownSessionKeys.has(key) || descriptor.locator.harness !== pending.harness)
-            return false;
-          if (descriptor.cwd !== pending.cwd) return false;
-          return [
-            ...(descriptor.preview_candidates ?? []),
-            ...(descriptor.latest_message_candidates ?? []),
-          ].some((candidate) => candidate.role === "user" && candidate.content.trim() === prompt);
-        });
-        // Multiple exact candidates are uncommon but possible when identical prompts start
-        // concurrently. Fail closed instead of associating a terminal with the wrong transcript.
-        const [match] = matches;
-        if (matches.length !== 1 || !match) continue;
-        const conversationKey = sessionKey(match.locator);
-        terminalHost = await terminalService.bindContext(
-          terminalSessionId,
-          conversationKey,
-        );
-        pendingTerminalStarts.delete(terminalSessionId);
-        log(`bound new ${pending.harness} terminal to its persisted conversation`);
-        if (!activeForeignKey) await attachSession(conversationKey);
+    if (stopped || !terminalService) return;
+    try {
+      const result = await terminalService.reconcileConversationBindings(
+        descriptors,
+        (descriptor) => sessionKey(descriptor.locator),
+        { now: now() },
+      );
+      terminalHost = result.snapshot;
+      for (const binding of result.bindings) {
+        log("bound new terminal to its persisted conversation");
+        if (!controllerPool.activeKey) await attachSession(binding.conversationKey);
       }
-    })().catch((error: unknown) => {
+    } catch (error) {
       log(`new terminal binding failed (continuing): ${message(error)}`);
-    }).finally(() => {
-      terminalBindingInFlight = null;
-    });
-    return terminalBindingInFlight;
+    }
   };
 
   const stopIntentPump = bindIntentQueue(host, INTENT_QUEUE, async (intent) => {
@@ -1797,14 +1342,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     }
     if (uiIntent?.action === "mounted") {
       panelVisible = false;
-      rebuildDescriptors(false);
+      rebuildDescriptors(catalog?.getSnapshot() ?? null, false);
       await pushNow(true);
       return;
     }
     const panelVisibility = parsePanelVisibilityIntent(intent.payload);
     if (panelVisibility !== null) {
       panelVisible = panelVisibility;
-      if (!panelVisible) rebuildDescriptors(false);
+      if (!panelVisible) rebuildDescriptors(catalog?.getSnapshot() ?? null, false);
       if (panelVisible) {
         await pushNow(true);
         void refreshNativeSessions().then(() => pushNow(false, "inventory"));
@@ -1815,182 +1360,38 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const parent = descriptors.find(
         (descriptor) => sessionKey(descriptor.locator) === uiIntent.key,
       );
-      if (!parent) {
-        subagentInspector = {
-          parentKey: uiIntent.key,
-          parentTitle: "Unavailable chat",
-          status: "error",
-          items: [],
-          selectedKey: null,
-          transcript: [],
-          error: "This conversation is no longer available.",
-        };
-        await pushNow(false, "inventory");
-        return;
-      }
-      if (subagentInspector?.parentKey === uiIntent.key && subagentInspector.status === "ready") {
-        subagentInspector = {
-          ...subagentInspector,
-          status: "ready",
-          selectedKey: null,
-          transcript: [],
-          error: null,
-        };
-        await pushNow(false, "inventory");
-        return;
-      }
-      const generation = ++subagentLoadGeneration;
-      const [parentRow] = projectSessions([parent], { now: now(), home, max: 1 });
-      subagentDescriptors = [];
-      subagentInspector = {
-        parentKey: uiIntent.key,
-        parentTitle: parentRow?.title ?? parent.title ?? "Untitled chat",
-        status: "loading",
-        items: [],
-        selectedKey: null,
-        transcript: [],
-        error: null,
-      };
-      await pushNow(false, "inventory");
-      try {
-        if (!discovery) throw new Error("Session discovery is unavailable.");
-        const result = await discovery.discover({
-          harnesses: [parent.locator.harness],
-          include_child_sessions: true,
-          root_session_id: parent.locator.session_id,
-          include_topic_candidates: true,
-          limit: 101,
-        });
-        if (stopped || generation !== subagentLoadGeneration) return;
-        subagentDescriptors = result.sessions.filter(
-          (descriptor) => descriptor.parent_session_id != null,
-        ).slice(0, 100);
-        subagentInspector = {
-          ...subagentInspector,
-          status: "ready",
-          error: null,
-        };
-        await syncActivitySubscription();
-      } catch (error) {
-        if (stopped || generation !== subagentLoadGeneration) return;
-        subagentInspector = {
-          ...subagentInspector,
-          status: "error",
-          error: message(error),
-        };
-      }
+      const snapshot = await familyInspector.open(uiIntent.key, parent);
+      if (stopped) return;
+      await catalog?.setSupplementalActivityLocators(
+        snapshot.children.map((descriptor) => descriptor.locator),
+      );
       await pushNow(false, "inventory");
       return;
     }
     if (uiIntent?.action === "openSubagent") {
-      const child = subagentInspector?.parentKey === uiIntent.parentKey
-        ? subagentDescriptors.find(
-            (descriptor) => sessionKey(descriptor.locator) === uiIntent.key,
-          )
-        : undefined;
-      if (!child || !subagentInspector) {
-        if (subagentInspector) {
-          subagentInspector = { ...subagentInspector, status: "error", error: "This subagent is no longer available." };
-          await pushNow(false, "inventory");
-        }
-        return;
-      }
-      const generation = ++subagentLoadGeneration;
-      subagentInspector = {
-        ...subagentInspector,
-        status: "loading",
-        selectedKey: uiIntent.key,
-        transcript: [],
-        error: null,
-      };
-      await pushNow(false, "inventory");
-      try {
-        const session = await requireClient(options).session(child.locator).load({
-          view: PASSIVE_MIRROR_VIEW,
-        });
-        if (stopped || generation !== subagentLoadGeneration) return;
-        subagentInspector = {
-          ...subagentInspector,
-          status: "ready",
-          transcript: projectSubagentTranscript(session, {
-            prefix: uiIntent.key,
-            maxEntries: options.projection?.maxEntries ?? DEFAULT_MAX_ENTRIES,
-            maxEntryChars: options.projection?.maxEntryChars ?? 16_000,
-          }),
-          error: null,
-        };
-      } catch (error) {
-        if (stopped || generation !== subagentLoadGeneration) return;
-        subagentInspector = { ...subagentInspector, status: "error", error: message(error) };
-      }
+      await familyInspector.select(uiIntent.parentKey, uiIntent.key);
+      if (stopped) return;
       await pushNow(false, "inventory");
       return;
     }
     if (uiIntent?.action === "closeSubagents") {
-      subagentLoadGeneration += 1;
-      subagentDescriptors = [];
-      subagentInspector = null;
-      await syncActivitySubscription();
+      familyInspector.close();
+      await catalog?.setSupplementalActivityLocators([]);
       await pushNow(false, "inventory");
       return;
     }
     if (uiIntent?.action === "loadSessions") {
-      sessionLimit += MAX_SESSION_ROWS;
-      await refreshSessions();
+      await catalog?.loadMore(MAX_SESSION_ROWS);
       return;
     }
     if (uiIntent?.action === "loadEarlier") {
       actionError = null;
-      const key = activeForeignKey ?? "@owned";
-      const nextLimit = (transcriptLimits.get(key) ?? initialTranscriptLimit) + TRANSCRIPT_PAGE_SIZE;
-      transcriptLimits.set(key, nextLimit);
-      const slot = activeForeign();
-      const snapshot = slot?.controller.getSnapshot();
-      if (slot && snapshot?.connection.mode === "mirror" && activeForeignKey !== null) {
-        const foreignKey = activeForeignKey;
-        const descriptor = descriptors.find((candidate) => sessionKey(candidate.locator) === foreignKey);
-        let replacement: AgentController | null = null;
-        const seq = (attachSeq += 1);
-        try {
-          if (!descriptor) throw new Error("this conversation is no longer available to load earlier messages");
-          replacement = createController({
-            workspace: descriptor.cwd ?? options.workspace,
-            descriptor,
-            harnesses: controller.getSnapshot().harnesses,
-            tailMessages: nextLimit,
-          });
-          await withTimeout(
-            (async () => {
-              await replacement!.initialize();
-              const target = replacement!.getSnapshot().sessions.find(
-                (session) => session.harness === descriptor.locator.harness && session.sessionId === descriptor.locator.session_id,
-              );
-              if (!target) throw new Error("that session is no longer visible in its workspace");
-              await replacement!.dispatch({ type: "observe", sessionKey: target.key });
-            })(),
-            attachTimeoutMs,
-            "loading earlier messages timed out",
-          );
-          if (stopped || seq !== attachSeq) {
-            await replacement.close().catch(() => undefined);
-            return;
-          }
-          const previous = foreignControllers.get(foreignKey);
-          foreignControllers.set(foreignKey, {
-            controller: replacement,
-            unsubscribe: replacement.subscribe(schedulePush),
-            sourceHarness: previous?.sourceHarness ?? descriptor.locator.harness,
-          });
-          activeForeignKey = foreignKey;
-          previous?.unsubscribe();
-          await previous?.controller.close().catch((e: unknown) => log(`older-window replacement close failed: ${message(e)}`));
-          log(`expanded ${descriptor.locator.harness} transcript window to ${nextLimit} entries`);
-        } catch (e) {
-          await replacement?.close().catch(() => undefined);
-          transcriptLimits.set(key, nextLimit - TRANSCRIPT_PAGE_SIZE);
-          actionError = message(e);
-          log(`load earlier failed: ${actionError}`);
-        }
+      try {
+        await activeController().dispatch({ type: "loadEarlier" });
+        log(`expanded transcript window to ${activeController().getSnapshot().history?.transcriptLimit ?? "all"} messages`);
+      } catch (e) {
+        actionError = message(e);
+        log(`load earlier failed: ${actionError}`);
       }
       await pushNow();
       return;
@@ -2062,17 +1463,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const snapshot = activeController().getSnapshot();
       const ref = activeRef(snapshot);
       const descriptor = ref?.sessionId ? descriptors.find((candidate) => matchesActive(candidate, ref)) : undefined;
-      const key = activeForeignKey ?? (descriptor ? sessionKey(descriptor.locator) : null);
+      const key = controllerPool.activeKey ?? (descriptor ? sessionKey(descriptor.locator) : null);
       if (key) {
-        if (uiIntent.text === "") drafts.delete(key);
-        else drafts.set(key, uiIntent.text);
-        schedulePersistence();
+        messengerState.setDraft(key, uiIntent.text);
       }
       return;
     }
     if (uiIntent?.action === "ack") {
-      if (attention.delete(uiIntent.key)) {
-        schedulePersistence();
+      if (messengerState.acknowledge(uiIntent.key)) {
         await pushNow();
       }
       return;
@@ -2087,6 +1485,33 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         log(`refresh failed: ${actionError}`);
       }
       await pushNow();
+      return;
+    }
+    if (uiIntent?.action === "authenticateHarness") {
+      actionError = null;
+      try {
+        if (!authentication) {
+          throw new Error("This Supercode service does not support native harness sign-in.");
+        }
+        const flow = authentication.authenticate(uiIntent.harness, {
+          environment: intent.source === "remote" ? "headless" : "local_browser",
+          cwd: options.workspace,
+        });
+        void flow.then(async (snapshot) => {
+          if (snapshot.phase !== "authenticated" || stopped) return;
+          log(`verified ${uiIntent.harness} sign-in through its native CLI`);
+          await controller.dispatch({ type: "refresh", autoObserve: false, silent: true });
+          await refreshSessions();
+        }).catch(async (error: unknown) => {
+          actionError = message(error);
+          log(`harness sign-in failed: ${actionError}`);
+          await pushNow(true);
+        });
+      } catch (error) {
+        actionError = message(error);
+        log(`harness sign-in failed: ${actionError}`);
+      }
+      await pushNow(true);
       return;
     }
     if (uiIntent?.action === "configureHarness") {
@@ -2114,7 +1539,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         images: uiIntent.images ?? [],
       };
       actionError = null;
-      attachSeq += 1;
+      attachRequest += 1;
       try {
         if (newChat.mode === "terminal") {
           if (!options.terminalService || !terminalHost?.available) {
@@ -2130,38 +1555,35 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
             prompt: newChat.text,
             ...(options.policy ? { policy: options.policy } : {}),
           });
-          const knownSessionKeys = new Set(descriptors.map((descriptor) =>
-            sessionKey(descriptor.locator)));
+          const knownSessionKeys = descriptors.map((descriptor) => sessionKey(descriptor.locator));
           terminalHost = await options.terminalService.launchSession(
             newChat.harness,
             start.launch,
             null,
             start.initialInput,
+            {
+              conversationDiscovery: {
+                knownConversationKeys: knownSessionKeys,
+                prompt: newChat.text,
+                startedAtMs: now(),
+              },
+            },
           );
-          const terminalSessionId = terminalHost.attachment?.sessionId;
-          if (!terminalSessionId)
+          if (!terminalHost.attachment?.sessionId)
             throw new Error("the terminal host did not return an attachment for the new session");
-          pendingTerminalStarts.set(terminalSessionId, {
-            cwd: options.workspace,
-            harness: newChat.harness as "claude-code" | "codex",
-            knownSessionKeys,
-            prompt: newChat.text,
-            startedAtMs: now(),
-          });
           log(`started a new ${newChat.harness} session in an owned tmux terminal`);
         } else {
           await releaseForeignView();
           await controller.dispatch({ type: "start", harness: newChat.harness });
           await controller.dispatch({ type: "send", text: newChat.text, ...(newChat.context.length ? { context: newChat.context } : {}), ...(newChat.images.length ? { images: newChat.images } : {}) });
         }
-        preferredLaunchModes.set(newChat.harness, newChat.mode);
-        schedulePersistence();
+        messengerState.setPreferredLaunchMode(newChat.harness, newChat.mode);
       } catch (e) {
         actionError = message(e);
         log(`new chat failed: ${actionError}`);
       }
       await pushNow(newChat.mode === "terminal");
-      if (newChat.mode === "terminal") void refreshSessions([newChat.harness]);
+      if (newChat.mode === "terminal") void refreshSessions();
       return;
     }
     if (uiIntent?.action === "send") {
@@ -2197,6 +1619,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     }
     if (isMoveToTerminalIntent(intent.payload)) {
       actionError = null;
+      const activeForeignKey = controllerPool.activeKey;
       if (!options.terminalService || !activeForeignKey) {
         actionError = "open a live native-terminal conversation before moving it";
       } else if (terminalMoves.get(activeForeignKey) === "waiting") {
@@ -2234,6 +1657,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       const snapshot = foreign?.controller.getSnapshot();
       const key = snapshot?.activeSessionKey ?? null;
       const activeSession = snapshot?.sessions.find((session) => session.key === key);
+      const activeForeignKey = controllerPool.activeKey;
       const descriptor = activeForeignKey
         ? descriptors.find((candidate) => sessionKey(candidate.locator) === activeForeignKey)
         : undefined;
@@ -2542,37 +1966,23 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       attentionTimer = null;
       if (terminalMoveRetryTimer) clearTimeout(terminalMoveRetryTimer);
       terminalMoveRetryTimer = null;
+      unsubscribeAuthentication();
+      await authentication?.close().catch((error: unknown) => {
+        log(`native sign-in cleanup failed: ${message(error)}`);
+      });
       await flushPersistence();
       stopRepush();
       stopDiscovery();
-      activitySubscriptionGeneration += 1;
-      indexSubscriptionGeneration += 1;
-      activityTransport?.off("sessionActivityEvent", onSessionActivity);
-      indexTransport?.off("sessionIndexEvent", onSessionIndex);
-      if (activityTransport && activitySubscription) {
-        await activityTransport.unsubscribe(activitySubscription).catch((error: unknown) => {
-          log(`activity subscription cleanup failed (continuing): ${message(error)}`);
-        });
-        activitySubscription = null;
-      }
-      if (indexTransport && indexSubscription) {
-        await indexTransport.unsubscribe(indexSubscription).catch((error: unknown) => {
-          log(`session index cleanup failed (continuing): ${message(error)}`);
-        });
-        indexSubscription = null;
-      }
+      unsubscribeCatalog();
+      await catalog?.close().catch((error: unknown) => {
+        log(`session catalog cleanup failed (continuing): ${message(error)}`);
+      });
       stopIntentPump();
-      pendingTerminalStarts.clear();
-      await terminalBindingInFlight?.catch(() => undefined);
       unsubscribe();
-      await Promise.all([...attachTasks].map((task) => task.catch(() => undefined)));
-      activeForeignKey = null;
-      const foreign = [...foreignControllers.values()];
-      foreignControllers.clear();
-      for (const slot of foreign) slot.unsubscribe();
-      await Promise.all(
-        foreign.map((slot) => slot.controller.close().catch((e: unknown) => log(`detach failed: ${message(e)}`))),
-      );
+      unsubscribeControllerPool();
+      unsubscribeFamilyInspector();
+      familyInspector.dispose();
+      await controllerPool.close();
       await inFlight.catch(() => undefined);
       await host.remove().catch((e: unknown) => log(`widget removal failed: ${(e as Error)?.message ?? String(e)}`));
       // `ownsClient: true` (above) makes this close the harness transport too — the caller that
@@ -2585,19 +1995,6 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 /** One place that turns a thrown unknown into a line a human can read. */
 function message(e: unknown): string {
   return (e as Error)?.message ?? String(e);
-}
-
-async function withTimeout<T>(work: Promise<T>, timeoutMs: number, reason: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new Error(reason)), timeoutMs);
-    timer.unref?.();
-  });
-  try {
-    return await Promise.race([work, timeout]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
 }
 
 function requireClient(options: DaemonOptions): HarnessClientAdapter {

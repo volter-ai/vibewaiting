@@ -26,7 +26,7 @@ considered inappropriate in a professional setting.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be reported
-privately to `yueranyuan@gmail.com` with `[vibewaiting conduct]` in the subject.
+privately to `aaron@volter.ai` with `[vibewaiting conduct]` in the subject.
 All complaints will be reviewed and investigated promptly and fairly. Maintainers
 must respect the privacy and security of the reporter.
 

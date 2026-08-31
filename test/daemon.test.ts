@@ -11,16 +11,19 @@ import {
   type TerminalService,
   type WidgetBridge,
 } from "../src/daemon.js";
-import type { TerminalServiceSnapshot } from "../src/terminal-service.js";
+import type { SupercodeTerminalSnapshot as TerminalServiceSnapshot } from "@volter-ai-dev/supercode-terminal";
 import { DEFAULT_MAX_ENTRIES, DEFAULT_MAX_ENTRY_CHARS } from "../src/projection.js";
 import type { ExportReceipt, WidgetState } from "../src/projection.js";
 import type { MessengerPersistence, PersistedMessengerState } from "../src/persistence.js";
-import { sessionKey } from "../src/sessions.js";
+import { sessionReconnectIdentitySync as sessionKey } from "@volter-ai-dev/supercode-client/node";
 import { SupercodeController, type SupercodeClientSnapshot } from "@volter-ai-dev/supercode-client";
 import type { SessionArtifact } from "@volter-ai-dev/supercode-harness-sdk";
-import { FakeHarnessClient, FakeWidgetHost, descriptor, waitFor } from "./fakes.js";
+import { FakeHarnessClient, FakeWidgetHost, descriptor, localHarness, waitFor } from "./fakes.js";
 
 const running: Daemon[] = [];
+type TestWidgetState = WidgetState & {
+  authenticationTerminalSessionId?: string | null;
+};
 
 afterEach(async () => {
   while (running.length) await running.pop()?.stop();
@@ -30,7 +33,7 @@ interface Rig {
   daemon: Daemon;
   host: FakeWidgetHost;
   client: FakeHarnessClient;
-  lastPush: () => WidgetState;
+  lastPush: () => TestWidgetState;
 }
 
 async function rig(options: { client?: FakeHarnessClient; harness?: string } = {}): Promise<Rig> {
@@ -46,7 +49,7 @@ async function rig(options: { client?: FakeHarnessClient; harness?: string } = {
     attachHost: async () => host,
   });
   running.push(daemon);
-  return { daemon, host, client, lastPush: () => daemon.lastPushed() as WidgetState };
+  return { daemon, host, client, lastPush: () => daemon.lastPushed() as TestWidgetState };
 }
 
 const OWN = descriptor({ sessionId: "runtime-1", cwd: "/tmp/project", title: "This window" });
@@ -90,12 +93,13 @@ async function sessionRig(
     ...(terminalService ? { terminalService } : {}),
   });
   running.push(daemon);
-  return { daemon, host, client, lastPush: () => daemon.lastPushed() as WidgetState };
+  return { daemon, host, client, lastPush: () => daemon.lastPushed() as TestWidgetState };
 }
 
 class RecordingTerminalService implements TerminalService {
   readonly launched: Array<{
     conversationKey: string | null;
+    options?: Parameters<TerminalService["launchSession"]>[4];
     harness: string;
     initialInput?: string;
     launch: Parameters<TerminalService["launchSession"]>[1];
@@ -108,6 +112,7 @@ class RecordingTerminalService implements TerminalService {
   }> = [];
   nativeRefreshes = 0;
   nativeVisible = false;
+  readonly closed: string[] = [];
   state: TerminalServiceSnapshot = {
     available: true,
     bindings: [],
@@ -126,8 +131,15 @@ class RecordingTerminalService implements TerminalService {
     launch: Parameters<TerminalService["launchSession"]>[1],
     conversationKey: Parameters<TerminalService["launchSession"]>[2] = null,
     initialInput?: Parameters<TerminalService["launchSession"]>[3],
+    options?: Parameters<TerminalService["launchSession"]>[4],
   ): Promise<TerminalServiceSnapshot> {
-    this.launched.push({ conversationKey, harness, launch, ...(initialInput === undefined ? {} : { initialInput }) });
+    this.launched.push({
+      conversationKey,
+      harness,
+      launch,
+      ...(initialInput === undefined ? {} : { initialInput }),
+      ...(options === undefined ? {} : { options }),
+    });
     this.state = {
       ...this.state,
       attachment: {
@@ -141,20 +153,20 @@ class RecordingTerminalService implements TerminalService {
       bindings: conversationKey
         ? [{ conversationKey, sessionId: "opaque-session-id" }]
         : [],
+      sessions: [{
+        activeCommand: launch.program,
+        contextKey: conversationKey,
+        cwd: launch.cwd,
+        id: "opaque-session-id",
+        label: harness,
+        owned: true,
+        size: { columns: 80, rows: 24 },
+      }],
     };
     return this.state;
   }
-  async bindContext(sessionId: string, conversationKey: string): Promise<TerminalServiceSnapshot> {
-    this.state = {
-      ...this.state,
-      attachment: this.state.attachment?.sessionId === sessionId
-        ? { ...this.state.attachment, conversationKey }
-        : this.state.attachment,
-      bindings: [{ conversationKey, sessionId }],
-      sessions: this.state.sessions.map((session) =>
-        session.id === sessionId ? { ...session, contextKey: conversationKey } : session),
-    };
-    return this.state;
+  async reconcileConversationBindings(): Promise<Awaited<ReturnType<TerminalService["reconcileConversationBindings"]>>> {
+    return { bindings: [], snapshot: this.state };
   }
   async moveSession(
     harness: Parameters<TerminalService["moveSession"]>[0],
@@ -175,13 +187,22 @@ class RecordingTerminalService implements TerminalService {
     return proof ?? { observedAtMs: 2_000_001, source: "native_terminal_status", turn: "idle" };
   }
   async attach(): Promise<TerminalServiceSnapshot> { return this.state; }
-  async close(): Promise<TerminalServiceSnapshot> { return this.state; }
+  async close(sessionId: string): Promise<TerminalServiceSnapshot> {
+    this.closed.push(sessionId);
+    this.state = {
+      ...this.state,
+      attachment: this.state.attachment?.sessionId === sessionId ? null : this.state.attachment,
+      bindings: this.state.bindings.filter((binding) => binding.sessionId !== sessionId),
+      sessions: this.state.sessions.filter((session) => session.id !== sessionId),
+    };
+    return this.state;
+  }
   async openLocal(): Promise<TerminalServiceSnapshot> { return this.state; }
   async dismiss(): Promise<TerminalServiceSnapshot> { return this.state; }
 }
 
 class MemoryPersistence implements MessengerPersistence {
-  state: PersistedMessengerState = { attention: [], observedCursors: {}, drafts: {}, preferredLaunchModes: {} };
+  state: PersistedMessengerState = { version: 1, attention: [], observedCursors: {}, drafts: {}, preferredLaunchModes: {} };
 
   async load(): Promise<PersistedMessengerState> {
     return structuredClone(this.state);
@@ -227,7 +248,7 @@ async function failingAttachRig(): Promise<Rig> {
       : new SupercodeController({ client, workspace, ownsClient: false }) as unknown as AgentController,
   });
   running.push(daemon);
-  return { daemon, host, client, lastPush: () => daemon.lastPushed() as WidgetState };
+  return { daemon, host, client, lastPush: () => daemon.lastPushed() as TestWidgetState };
 }
 
 describe("bridge invariants", () => {
@@ -527,6 +548,76 @@ describe("messenger session state machine", () => {
     expect(lastPush().error).toContain("not writable");
   });
 
+  it("runs paired-browser sign-in through a device-code terminal and refreshes only after native verification", async () => {
+    const client = new FakeHarnessClient({
+      harnesses: [
+        localHarness("claude-code", { auth: "required" }),
+        localHarness("codex", { auth: "required" }),
+      ],
+    });
+    const terminalService = new RecordingTerminalService();
+    const { host, lastPush } = await sessionRig(
+      [],
+      client,
+      undefined,
+      undefined,
+      () => 2_000_000,
+      terminalService,
+    );
+
+    vi.useFakeTimers();
+    try {
+      await host.fireIntent(
+        INTENT_QUEUE,
+        { action: "authenticateHarness", harness: "codex" },
+        "remote",
+      );
+      expect(client.authenticationBegins).toEqual([{
+        harness: "codex",
+        environment: "headless",
+        cwd: "/tmp/project",
+      }]);
+      expect(terminalService.launched).toEqual([{
+        conversationKey: null,
+        harness: "codex",
+        launch: {
+          program: "codex",
+          arguments: ["login", "--device-auth"],
+          cwd: "/tmp/project",
+          env: {},
+        },
+      }]);
+      expect(client.authenticationVerifications).toEqual([]);
+      expect(lastPush().authenticationTerminalSessionId).toBe("opaque-session-id");
+      expect(lastPush().harnessAuthentication).toMatchObject({
+        phase: "awaiting_user",
+        harness: "codex",
+        plan: { method: "device_code", interaction: "device_code", headless: true },
+      });
+      expect(JSON.stringify(lastPush().harnessAuthentication)).not.toContain("launch");
+
+      terminalService.state = {
+        ...terminalService.state,
+        sessions: terminalService.state.sessions.map((session) => ({
+          ...session,
+          activeCommand: null,
+        })),
+      };
+      await vi.advanceTimersByTimeAsync(1_000);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    await waitFor(() => client.authenticationVerifications.length === 1);
+    expect(client.authenticationVerifications).toEqual(["codex"]);
+    expect(terminalService.closed).toEqual(["opaque-session-id"]);
+    expect(lastPush().authenticationTerminalSessionId).toBeNull();
+    expect(lastPush().harnessAuthentication?.phase).toBe("authenticated");
+    expect(JSON.stringify(lastPush().harnessAuthentication)).not.toContain("/usr/local/bin");
+    expect(lastPush().harnesses.find((item) => item.id === "codex")?.startable).toBe(true);
+    expect(lastPush().error).toBeNull();
+  });
+
   it("never resumes a process-proven active session when the controller has only legacy persisted state", async () => {
     const active = {
       ...ATLAS,
@@ -813,6 +904,15 @@ describe("messenger session state machine", () => {
         ],
         cwd: "/tmp/project",
         env: {},
+      },
+      options: {
+        conversationDiscovery: {
+          knownConversationKeys: expect.arrayContaining(
+            [OWN, ATLAS, BRIDGE].map((descriptor) => sessionKey(descriptor.locator)),
+          ),
+          prompt: "inspect the current build",
+          startedAtMs: 2_000_000,
+        },
       },
     }]);
     expect(lastPush().harnesses.find((item) => item.id === "codex")?.preferredLaunchMode)

@@ -8,15 +8,18 @@ the agent processes it controls.
 
 - The native messenger and terminal services bind to loopback. Do not expose their
   local ports directly.
-- Browser content scripts receive only a bounded launcher projection. Full messenger
-  state lives in an extension-owned iframe; native locators, tmux handles, credentials,
-  and execution policy stay in the native host.
-- Page context is collected only after an explicit attach action. Credential-like URL
-  parameters and tracking parameters are removed before the payload crosses the tab
-  boundary.
+- Browser content scripts receive only a bounded launcher projection and redacted
+  remote-access status. Full messenger and pairing state live in an extension-owned
+  iframe; native locators, tmux handles, agent credentials, and execution policy stay
+  in the native host.
+- Before an explicit attach action, the content script remembers only the latest
+  pointed or focused element reference in page memory. It reads and bounds page text
+  only when the user chooses Attach. Credential-like URL parameters and tracking
+  parameters are removed before the resulting payload crosses the tab boundary.
 - Remote access terminates at the authenticated messenger server. Pairing grants are
   short-lived and single-use, cookies are HTTP-only, login is rate-limited, and terminal
-  grants remain opaque and short-lived.
+  grants remain opaque and short-lived. Public chat and terminal transport uses
+  HTTPS/WSS; an insecure configured stable-relay URL is rejected.
 - A temporary tunnel is browser-only. Install metadata is served only to the exact
   configured stable public host.
 
@@ -26,7 +29,7 @@ boundaries.
 ## Supported versions
 
 Until the first stable release, security fixes target the latest commit on `main` and
-the newest published prerelease. Older prereleases may not receive backports.
+the newest published `0.x` release. Older alpha releases may not receive backports.
 
 ## Reporting a vulnerability
 
@@ -34,7 +37,7 @@ Do **not** open a public issue or paste secrets, session data, terminal output, 
 reproduction containing credentials into an issue.
 
 Use GitHub's private vulnerability reporting from the repository's Security tab. If
-that surface is unavailable, email `yueranyuan@gmail.com` with
+that surface is unavailable, email `aaron@volter.ai` with
 `[vibewaiting security]` in the subject. Include the affected version, impact, and the
 smallest safe reproduction. Reports are acknowledged on a best-effort basis, normally
 within five business days. Confirmed fixes credit the reporter unless anonymity is

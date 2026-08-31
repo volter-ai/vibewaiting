@@ -17,8 +17,8 @@ type PageTarget =
       evidence: string;
     };
 
-let pointerTarget: PageTarget | null = null;
-let focusedTarget: PageTarget | null = null;
+let pointerElement: Element | null = null;
+let focusedElement: Element | null = null;
 
 const OMITTED_TAGS = new Set([
   "script",
@@ -52,7 +52,7 @@ function selectedText(): string {
   const active = document.activeElement;
   if (
     active instanceof HTMLTextAreaElement ||
-    active instanceof HTMLInputElement && active.type !== "password"
+    (active instanceof HTMLInputElement && active.type !== "password")
   ) {
     const start = active.selectionStart;
     const end = active.selectionEnd;
@@ -149,7 +149,8 @@ function targetAt(target: EventTarget | null): PageTarget | null {
     "pre, code, blockquote, figure, button, [role='button'], h1, h2, h3, h4, h5, h6",
   );
   if (!meaningful) return null;
-  const role = meaningful.getAttribute("role") || meaningful.tagName.toLowerCase();
+  const role =
+    meaningful.getAttribute("role") || meaningful.tagName.toLowerCase();
   const label =
     meaningful.getAttribute("aria-label")?.trim() ||
     boundedVisibleText(meaningful, 300) ||
@@ -172,7 +173,7 @@ document.addEventListener(
   (event) => {
     const element = event.target instanceof Element ? event.target : null;
     if (element && isWidgetElement(element)) return;
-    pointerTarget = targetAt(event.target);
+    pointerElement = element;
   },
   { capture: true },
 );
@@ -182,7 +183,7 @@ document.addEventListener(
   (event) => {
     const element = event.target instanceof Element ? event.target : null;
     if (element && isWidgetElement(element)) return;
-    focusedTarget = targetAt(event.target);
+    focusedElement = element;
   },
   { capture: true },
 );
@@ -231,17 +232,22 @@ function smartAttachments(): BrowserContextAttachment[] {
   );
   if (selected) return [selected];
   const activeTarget = targetAt(document.activeElement);
-  const target = activeTarget ?? focusedTarget ?? pointerTarget;
+  const target =
+    activeTarget ??
+    (focusedElement?.isConnected ? targetAt(focusedElement) : null) ??
+    (pointerElement?.isConnected ? targetAt(pointerElement) : null);
   if (target) return attachmentsFor(target);
   const visibleText = document.body
     ? boundedVisibleText(document.body, 16_000)
     : "";
-  return [browserWebReferenceAttachment(
-    source("page", location.href),
-    location.href,
-    visibleText,
-    document.title,
-  )];
+  return [
+    browserWebReferenceAttachment(
+      source("page", location.href),
+      location.href,
+      visibleText,
+      document.title,
+    ),
+  ];
 }
 
 export function captureBrowserContext(): BrowserContextAttachment[] {
@@ -255,7 +261,11 @@ export function captureShortcutAttachments(): BrowserContextAttachment[] {
 export function captureLinkAttachment(
   targetUrl: string,
 ): BrowserContextAttachment {
-  const candidates = [targetAt(document.activeElement), focusedTarget, pointerTarget];
+  const candidates = [
+    targetAt(document.activeElement),
+    focusedElement?.isConnected ? targetAt(focusedElement) : null,
+    pointerElement?.isConnected ? targetAt(pointerElement) : null,
+  ];
   const remembered = candidates.find(
     (candidate): candidate is Extract<PageTarget, { kind: "link" }> =>
       candidate?.kind === "link" && candidate.url === targetUrl,
