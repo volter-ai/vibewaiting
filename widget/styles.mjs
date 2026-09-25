@@ -81,7 +81,7 @@ body { background:transparent }
 .vw-approval-head small { font-weight:600; font-size:10.5px; line-height:1.2; letter-spacing:.02em; text-transform:uppercase }
 .vw-approval strong { font-weight:650; font-size:13.5px; line-height:1.3; overflow-wrap:anywhere }
 .vw-approval p { margin:0; color:var(--vw-approval-muted); font-weight:400; font-size:11.5px; line-height:1.4 }
-.vw-approval pre { max-height:120px; margin:0; overflow:auto; padding:7px 8px; border-radius:6px; background:var(--vw-approval-fill);
+.vw-approval pre { max-height:220px; margin:0; overflow:auto; padding:7px 8px; border-radius:6px; background:var(--vw-approval-fill);
   font:11px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; white-space:pre-wrap; overflow-wrap:anywhere }
 .vw-approval-actions { display:flex; justify-content:flex-end; gap:6px; margin-top:4px }
 .vw-approval-actions button { padding:7px 12px; border:1px solid var(--vw-approval-border); border-radius:7px; font-weight:650; font-size:11.5px; line-height:1; cursor:pointer }

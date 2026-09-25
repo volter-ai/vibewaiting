@@ -46,6 +46,8 @@ const pendingAgentBrowserRequests = new Map<
     tabId: number;
     operation: BrowserOperationCall["operation"];
     timer: ReturnType<typeof setTimeout>;
+    /** The caller keeps the call open while the person decides (Supercode `pending` lines). */
+    acceptsPending: boolean;
   }
 >();
 /**
@@ -59,6 +61,8 @@ interface PendingApproval {
   tabId: number;
   call: BrowserOperationCall;
   key: string;
+  /** Single-use: the offscreen document honours the grant only with it. */
+  nonce: string;
   summary: string;
   reason: string;
   detail?: string;
@@ -444,7 +448,19 @@ function handleNativeMessage(raw: unknown): void {
   if (message.type === "browser-operation-request") {
     const call = parseBrowserOperationCall(message.call);
     if (typeof message.id === "string" && call)
-      void routeBrowserOperation(message.id, call);
+      void routeBrowserOperation(message.id, call, message.acceptsPending === true);
+    return;
+  }
+  if (message.type === "browser-operation-cancelled") {
+    // The agent's call ended (its socket closed or the companion gave up):
+    // an approval it was waiting on can no longer run anything.
+    for (const approval of [...pendingApprovals.values()])
+      if (approval.requestId === message.id) settleApproval(approval.id, "abandoned");
+    const pending = pendingAgentBrowserRequests.get(message.id);
+    if (pending) {
+      clearTimeout(pending.timer);
+      pendingAgentBrowserRequests.delete(message.id);
+    }
     return;
   }
   if (message.type === "patch") {
@@ -509,6 +525,7 @@ function unavailableBrowserResult(
 async function routeBrowserOperation(
   id: string,
   call: BrowserOperationCall,
+  acceptsPending: boolean,
 ): Promise<void> {
   const offscreen = chrome.offscreen;
   if (!offscreen) {
@@ -550,7 +567,20 @@ async function routeBrowserOperation(
     );
     return;
   }
-  await runBrowserOperation(id, tabId, call, null);
+  // Nothing else runs on a tab while the person decides about an action on it.
+  const deciding = [...pendingApprovals.values()].find((approval) => approval.tabId === tabId);
+  if (deciding) {
+    sendAgentBrowserResponse(id, {
+      ok: false,
+      operation: call.operation,
+      error: {
+        code: "APPROVAL_REQUIRED",
+        message: `Waiting for the person's decision on “${deciding.summary}” in Vibewaiting; no other browser operation runs on this tab until they answer.`,
+      },
+    });
+    return;
+  }
+  await runBrowserOperation(id, tabId, call, null, acceptsPending);
 }
 
 /**
@@ -563,6 +593,7 @@ async function runBrowserOperation(
   tabId: number,
   call: BrowserOperationCall,
   grant: string | null,
+  acceptsPending: boolean,
 ): Promise<void> {
   const offscreen = chrome.offscreen!;
   const existing = pendingAgentBrowserRequests.get(id);
@@ -575,7 +606,7 @@ async function runBrowserOperation(
       error: { code: "TIMED_OUT", message: "The active page did not answer in 10 seconds." },
     });
   }, 10_000);
-  pendingAgentBrowserRequests.set(id, { tabId, operation: call.operation, timer });
+  pendingAgentBrowserRequests.set(id, { tabId, operation: call.operation, timer, acceptsPending });
   let raw: unknown;
   debuggerBusy(tabId);
   try {
@@ -604,11 +635,22 @@ async function runBrowserOperation(
   }
   const approval = grant === null ? approvalRequest(raw) : null;
   const pending = pendingAgentBrowserRequests.get(id);
-  if (approval && pending?.tabId === tabId) {
+  if (approval && pending?.tabId === tabId && pending.acceptsPending) {
     pendingAgentBrowserRequests.delete(id);
     clearTimeout(pending.timer);
     askPerson(id, tabId, call, approval);
     return;
+  }
+  if (approval && pending?.tabId === tabId) {
+    // A caller that cannot keep the call open is refused at once, not asked for.
+    raw = {
+      ok: false,
+      operation: call.operation,
+      error: {
+        code: "APPROVAL_REQUIRED",
+        message: `${approval.reason} This caller cannot wait for the person's approval, so they were not asked.`,
+      },
+    };
   }
   finishAgentBrowserRequest(id, tabId, raw);
 }
@@ -644,15 +686,18 @@ function askPerson(
   approval: { key: string; summary: string; reason: string; detail?: string },
 ): void {
   const id = crypto.randomUUID();
+  const nonce = Array.from(crypto.getRandomValues(new Uint8Array(32)), (byte) => byte.toString(16).padStart(2, "0")).join("");
   const pending: PendingApproval = {
     id,
     requestId,
     tabId,
     call,
+    nonce,
     ...approval,
     timer: setTimeout(() => settleApproval(id, "expired"), APPROVAL_WINDOW_MS),
   };
   pendingApprovals.set(id, pending);
+  void chrome.runtime.sendMessage({ type: "vibewaiting:grant-offer", nonce, key: approval.key, tabId }).catch(() => undefined);
   // The tab stays on its driver while the person decides.
   debuggerBusy(tabId);
   nativePort?.postMessage({
@@ -670,7 +715,7 @@ function askPerson(
 /** The person's answer (or its absence): Approve re-runs the one operation; anything else refuses it. */
 function settleApproval(
   id: string,
-  decision: "approve" | "deny" | "expired" | "closed",
+  decision: "approve" | "deny" | "expired" | "closed" | "abandoned",
 ): void {
   const approval = pendingApprovals.get(id);
   if (!approval) return;
@@ -681,9 +726,12 @@ function settleApproval(
     if (guest.tabId === approval.tabId)
       post(port, { type: "browser-approval-settled", id, decision });
   if (decision === "approve") {
-    void runBrowserOperation(approval.requestId, approval.tabId, approval.call, approval.key);
+    void runBrowserOperation(approval.requestId, approval.tabId, approval.call, approval.nonce, true);
     return;
   }
+  void chrome.runtime.sendMessage({ type: "vibewaiting:grant-revoke", nonce: approval.nonce }).catch(() => undefined);
+  // The agent stopped waiting: there is no one to answer.
+  if (decision === "abandoned") return;
   sendAgentBrowserResponse(approval.requestId, {
     ok: false,
     operation: approval.call.operation,
@@ -749,6 +797,14 @@ interface DebuggerRelay {
   targetInfo: Record<string, unknown> | null;
   attach: Promise<void> | null;
   children: Set<string>;
+  /**
+   * Further sessions Playwright opened on the tab itself (`newCDPSession`,
+   * which Supercode's guard uses): commands go to the tab's debugger; events
+   * reach only the first session.
+   */
+  aliases: Set<string>;
+  /** Browser-level sessions Playwright opened (`Target.attachToBrowserTarget`). */
+  browserSessions: Set<string>;
 }
 const debuggerRelays = new Map<number, DebuggerRelay>();
 
@@ -774,6 +830,8 @@ function attachRelay(relay: DebuggerRelay): Promise<void> {
 
 async function relayCommand(relay: DebuggerRelay, method: string, params: unknown, sessionId: string | undefined): Promise<unknown> {
   const tab = { tabId: relay.tabId };
+  // A browser-level session Playwright opened is the relay's own browser level.
+  if (sessionId !== undefined && relay.browserSessions.has(sessionId)) sessionId = undefined;
   if (sessionId === undefined) {
     if (method === "Browser.getVersion") {
       const version = /Chrome\/([\d.]+)/.exec(navigator.userAgent)?.[1] ?? "0";
@@ -785,12 +843,31 @@ async function relayCommand(relay: DebuggerRelay, method: string, params: unknow
       return {};
     }
     if (method === "Target.getTargetInfo") return { targetInfo: relay.targetInfo };
+    if (method === "Target.attachToBrowserTarget") {
+      const browserSession = `${relay.sessionId}-browser-${crypto.randomUUID()}`;
+      relay.browserSessions.add(browserSession);
+      return { sessionId: browserSession };
+    }
+    if (method === "Target.attachToTarget") {
+      await attachRelay(relay);
+      if ((params as { targetId?: unknown } | undefined)?.targetId !== relay.targetInfo?.targetId)
+        throw new Error("Vibewaiting drives only the tab the person shares.");
+      const alias = `${relay.sessionId}-${crypto.randomUUID()}`;
+      relay.aliases.add(alias);
+      return { sessionId: alias };
+    }
+    if (method === "Target.detachFromTarget") {
+      const detached = String((params as { sessionId?: unknown } | undefined)?.sessionId);
+      relay.aliases.delete(detached);
+      relay.browserSessions.delete(detached);
+      return {};
+    }
     if (method === "Target.createTarget" || method === "Target.closeTarget" || method === "Target.createBrowserContext")
       throw new Error("Vibewaiting drives only the tab the person shares.");
     await attachRelay(relay);
     return await chrome.debugger.sendCommand(tab, method, params);
   }
-  if (sessionId === relay.sessionId) return await chrome.debugger.sendCommand(tab, method, params);
+  if (sessionId === relay.sessionId || relay.aliases.has(sessionId)) return await chrome.debugger.sendCommand(tab, method, params);
   if (relay.children.has(sessionId)) return await chrome.debugger.sendCommand({ ...tab, sessionId }, method, params);
   throw new Error(`No session ${sessionId} in this tab.`);
 }
@@ -871,7 +948,7 @@ function acceptDebuggerPort(port: ExtensionPort): void {
         port.disconnect();
         return;
       }
-      relay = { tabId, port, sessionId: `vibewaiting-tab-${tabId}`, targetInfo: null, attach: null, children: new Set() };
+      relay = { tabId, port, sessionId: `vibewaiting-tab-${tabId}`, targetInfo: null, attach: null, children: new Set(), aliases: new Set(), browserSessions: new Set() };
       debuggerRelays.set(tabId, relay);
       return;
     }

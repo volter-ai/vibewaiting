@@ -44,7 +44,7 @@ interface Running { grant: Grant | null; approval: BrowserApproval | null }
 const running = new WeakMap<Page, Running>();
 
 async function guard(page: Page, request: PlaywrightAction): Promise<void> {
-  const approval = await approvalFor(request, page.url());
+  const approval = approvalFor(request, page.url());
   if (!approval) return;
   const call = running.get(page);
   if (call?.grant && !call.grant.used && call.grant.key === approval.key) {

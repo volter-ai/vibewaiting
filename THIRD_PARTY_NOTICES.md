@@ -30,7 +30,7 @@ CLI tarball.
 | Package | Version | License |
 | --- | --- | --- |
 | `@termfleet/terminal` | 0.1.9 | Apache-2.0 |
-| `@volter-ai-dev/supercode-browser-playwright` | 0.1.1 | MIT OR Apache-2.0 |
+| `@volter-ai-dev/supercode-browser-playwright` | 0.2.0 | MIT OR Apache-2.0 |
 | `@volter-ai-dev/supercode-client` | 0.3.42 | MIT OR Apache-2.0 |
 | `@volter-ai-dev/supercode-harness-sdk` | 0.3.18 | MIT OR Apache-2.0 |
 | `@volter-ai-dev/supercode-remote-access` | 0.2.0 | MIT OR Apache-2.0 |

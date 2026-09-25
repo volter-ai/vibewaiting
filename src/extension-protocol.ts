@@ -95,6 +95,14 @@ export type NativeHostEvent =
       type: "browser-operation-request";
       id: string;
       call: BrowserOperationCall;
+      /** The caller keeps the call open while the person decides. */
+      acceptsPending: boolean;
+    }
+  | {
+      /** The agent's call ended before an answer: an approval it waits on is void. */
+      protocol: typeof VIBEWAITING_EXTENSION_PROTOCOL;
+      type: "browser-operation-cancelled";
+      id: string;
     }
   | {
       protocol: typeof VIBEWAITING_EXTENSION_PROTOCOL;

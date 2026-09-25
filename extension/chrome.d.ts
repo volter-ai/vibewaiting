@@ -16,6 +16,13 @@ interface ExtensionPort {
   onDisconnect: ExtensionEvent<() => void>;
 }
 
+interface MessageSender {
+  id?: string;
+  url?: string;
+  tab?: { id?: number };
+  frameId?: number;
+}
+
 interface DebuggerTarget {
   tabId?: number;
   sessionId?: string;
@@ -33,7 +40,7 @@ declare const chrome: {
     onConnect: ExtensionEvent<(port: ExtensionPort) => void>;
     onMessage: ExtensionEvent<(
       message: unknown,
-      sender: { tab?: { id?: number }; frameId?: number },
+      sender: MessageSender,
       sendResponse: (response: unknown) => void,
     ) => unknown>;
     onInstalled: ExtensionEvent<(details: { reason: "install" | "update" | "chrome_update" | "shared_module_update" }) => void>;

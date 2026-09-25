@@ -18,6 +18,14 @@ export interface BrowserApprovals {
   settle(id: string, decision: string): void;
 }
 
+/** Approve stays disabled until the card has been continuously visible this long. */
+const VISIBLE_BEFORE_APPROVE_MS = 1_000;
+
+interface VisibilityEntry extends IntersectionObserverEntry {
+  /** Intersection Observer v2: true only when nothing covers, fades or distorts the element. */
+  readonly isVisible?: boolean;
+}
+
 const SHIELD_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>`;
 
 export function parseBrowserApprovalCard(value: unknown): BrowserApprovalCard | null {
@@ -34,7 +42,7 @@ export function createBrowserApprovals(
   node.className = "vw-approvals";
   node.setAttribute("role", "region");
   node.setAttribute("aria-label", "Browser actions waiting for your approval");
-  const cards = new Map<string, HTMLElement>();
+  const cards = new Map<string, { element: HTMLElement; stop(): void }>();
 
   const show = (card: BrowserApprovalCard): void => {
     if (cards.has(card.id)) return;
@@ -68,7 +76,27 @@ export function createBrowserApprovals(
     approve.type = "button";
     approve.className = "vw-approval-approve";
     approve.textContent = "Approve once";
+    // Clickjacking: Approve works only after the card has been fully visible
+    // on screen (not covered, faded or transformed, as the browser itself
+    // judges it) for a continuous second; hiding it starts the count again.
+    approve.disabled = true;
+    let visibleTimer: ReturnType<typeof setTimeout> | undefined;
+    let answered = false;
+    const observer = new IntersectionObserver((entries) => {
+      const entry = entries[entries.length - 1] as VisibilityEntry | undefined;
+      clearTimeout(visibleTimer);
+      if (answered) return;
+      approve.disabled = true;
+      if (entry?.isIntersecting && entry.isVisible === true)
+        visibleTimer = setTimeout(() => { if (!answered) approve.disabled = false; }, VISIBLE_BEFORE_APPROVE_MS);
+    }, { threshold: [1], trackVisibility: true, delay: 100 } as IntersectionObserverInit);
+    const stop = (): void => {
+      clearTimeout(visibleTimer);
+      observer.disconnect();
+    };
     const answer = (decision: "approve" | "deny"): void => {
+      answered = true;
+      stop();
       deny.disabled = true;
       approve.disabled = true;
       (decision === "approve" ? approve : deny).textContent = decision === "approve" ? "Approving…" : "Denying…";
@@ -78,15 +106,19 @@ export function createBrowserApprovals(
     approve.addEventListener("click", () => answer("approve"));
     actions.append(deny, approve);
     element.append(actions);
-    cards.set(card.id, element);
+    cards.set(card.id, { element, stop });
     // No focus move: a keystroke meant for the page never answers the card.
     node.append(element);
+    observer.observe(element);
   };
 
   const settle = (id: string, decision: string): void => {
-    const element = cards.get(id);
-    if (!element) return;
+    const card = cards.get(id);
+    if (!card) return;
     cards.delete(id);
+    card.stop();
+    const { element } = card;
+    for (const button of Array.from(element.querySelectorAll("button"))) button.disabled = true;
     // The outcome narrates itself before the card leaves.
     const status = document.createElement("p");
     status.className = "vw-approval-status";
@@ -95,8 +127,22 @@ export function createBrowserApprovals(
       decision === "approve" ? "Approved once. The agent's action is running."
         : decision === "deny" ? "Denied. The agent was told."
           : decision === "expired" ? "No answer in time. Nothing ran."
-            : "The tab closed. Nothing ran.";
+            : decision === "abandoned" ? "The agent stopped waiting. Nothing ran."
+              : "The tab closed. Nothing ran.";
     element.querySelector(".vw-approval-actions")?.replaceWith(status);
+    // A card the agent walked away from stays until the person has read it.
+    if (decision === "abandoned") {
+      const dismiss = document.createElement("button");
+      dismiss.type = "button";
+      dismiss.className = "vw-approval-deny";
+      dismiss.textContent = "Dismiss";
+      dismiss.addEventListener("click", () => element.remove());
+      const actions = document.createElement("div");
+      actions.className = "vw-approval-actions";
+      actions.append(dismiss);
+      status.after(actions);
+      return;
+    }
     setTimeout(() => element.remove(), 2_500);
   };
 

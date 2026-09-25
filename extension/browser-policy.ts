@@ -1,13 +1,15 @@
 /**
  * Vibewaiting's policy for an agent's actions in the person's own tab:
- * password and file fields, and controls likely to submit, purchase, publish,
- * send, transfer or delete, need the person's approval. So does every
- * `browser.script`: a script is Playwright with the whole page, its own locator
- * calls unguarded. Asked by the Playwright host before each locator action and
- * each script; the host asks the person (playwright.ts, background.ts) and
- * lets the one approved action through.
+ * filling password and file fields, activating controls likely to submit,
+ * purchase, publish, send, transfer or delete, and every `browser.script` (a
+ * script is Playwright with the whole page, its own locator calls unguarded)
+ * need the person's approval. Asked by the Playwright host before each element
+ * action, coordinate action and script, with the target described from the
+ * browser side by Supercode's executor; the host asks the person
+ * (playwright.ts, background.ts) and lets the one approved action through.
  */
-import type { PlaywrightAction } from "@volter-ai-dev/supercode-browser-playwright/executor";
+import { BrowserActionRefusal } from "@volter-ai-dev/supercode-browser-playwright/protocol";
+import type { GuardedNode, PlaywrightAction } from "@volter-ai-dev/supercode-browser-playwright/executor";
 
 /** An action that needs the person's approval, named as the person sees it. */
 export interface BrowserApproval {
@@ -17,9 +19,12 @@ export interface BrowserApproval {
   summary: string;
   /** Why it needs approval: the agent's refusal message. */
   reason: string;
-  /** What will run, when the summary cannot say it (a script's source). */
+  /** What will run, when the summary cannot say it (a script's full source and arguments). */
   detail?: string;
 }
+
+/** Longer scripts are refused outright: a person cannot review them in a card. */
+export const MAX_SCRIPT_LENGTH = 20_000;
 
 const CONSEQUENTIAL_BROWSER_ACTION =
   /\b(buy|checkout|confirm|delete|log\s*out|pay|place\s+order|post|publish|purchase|remove|send|sign\s*out|submit|transfer)\b/i;
@@ -30,28 +35,10 @@ const VERBS: Record<string, string> = {
   uncheck: "Uncheck",
   select: "Select an option in",
   press: "Press",
+  mousedown: "Press the mouse on",
+  mouseup: "Release the mouse on",
+  drag: "Drag to",
 };
-
-/** Self-contained: Playwright serializes it into the page. */
-function describe(element: Element): { tag: string; type: string; name: string; path: string } {
-  const path: string[] = [];
-  for (let node: Element | null = element; node && path.length < 12; node = node.parentElement) {
-    const parent: Element | null = node.parentElement;
-    path.unshift(`${node.tagName.toLowerCase()}:${parent ? Array.prototype.indexOf.call(parent.children, node) : 0}`);
-  }
-  return {
-    tag: element.tagName.toLowerCase(),
-    type: (element.getAttribute("type") ?? "").toLowerCase(),
-    name: (
-      element.getAttribute("aria-label") ||
-      element.getAttribute("title") ||
-      element.getAttribute("placeholder") ||
-      element.textContent ||
-      element.tagName.toLowerCase()
-    ).replace(/\s+/g, " ").trim(),
-    path: path.join(">"),
-  };
-}
 
 /** "github.com/login": the page as the person reads it in the address bar. */
 export function pagePlace(url: string): string {
@@ -68,34 +55,55 @@ function quoted(name: string): string {
   return `“${name.length > 60 ? `${name.slice(0, 59)}…` : name}”`;
 }
 
+/** Every name the browser gives a node: its accessible name and the attributes that label it. */
+function namesOf(node: GuardedNode): string[] {
+  const { attributes } = node;
+  return [node.name, attributes["aria-label"], attributes.title, attributes.value, attributes.alt]
+    .filter((value): value is string => typeof value === "string" && value.trim() !== "");
+}
+
 /** The approval this action needs, or null when the agent may act. */
-export async function approvalFor(request: PlaywrightAction, pageUrl: string): Promise<BrowserApproval | null> {
-  const place = pagePlace(pageUrl);
-  if (request.action === "script")
+export function approvalFor(request: PlaywrightAction, pageUrl: string): BrowserApproval | null {
+  if (request.action === "script") {
+    if (request.source.length > MAX_SCRIPT_LENGTH)
+      throw new BrowserActionRefusal(
+        "INVALID_INPUT",
+        `Scripts longer than ${MAX_SCRIPT_LENGTH.toLocaleString("en-US")} characters are refused: the person could not review them.`,
+      );
+    const args = JSON.stringify(request.args ?? {}, null, 2);
     return {
-      key: JSON.stringify(["script", pageUrl, request.source]),
-      summary: `Run script on ${place}`,
+      key: JSON.stringify(["script", pageUrl, request.source, args]),
+      summary: `Run script on ${pagePlace(pageUrl)}`,
       reason: "Running a Playwright script in the page requires the person's approval.",
-      detail: request.source.length > 1200 ? `${request.source.slice(0, 1199)}…` : request.source,
+      detail: `${request.source}\n\n// args\n${args}`,
     };
-  const { action, locator, value } = request;
-  const element = await locator.evaluate(describe);
-  const key = JSON.stringify([action, pageUrl, element.path, element.tag, element.type, element.name]);
-  if (action === "fill" && element.tag === "input" && (element.type === "password" || element.type === "file"))
+  }
+  const { action, target, value } = request;
+  const place = pagePlace(target.url);
+  const identity = target.nodes.map((node) => node.backendNodeId).sort((a, b) => a - b);
+  const key = JSON.stringify([action, target.url, identity, target.point ?? null]);
+  const fields = target.nodes.filter((node) =>
+    node.tag === "input" && ["password", "file"].includes((node.attributes.type ?? "").toLowerCase()));
+  if ((action === "fill" || action === "press") && fields.length) {
+    const kind = (fields[0]!.attributes.type ?? "").toLowerCase();
     return {
       key,
-      summary: `Fill ${element.type} field on ${place}`,
-      reason: `Filling ${element.type} inputs requires the person's approval.`,
+      summary: `${action === "fill" ? "Fill" : `Press ${String(value)} in`} ${kind} field on ${place}`,
+      reason: `Typing into ${kind} inputs requires the person's approval.`,
     };
-  const activating = action === "click" || action === "check" || action === "uncheck" ||
-    action === "select" || (action === "press" && ["Enter", "Space", " "].includes(String(value)));
-  if (activating && CONSEQUENTIAL_BROWSER_ACTION.test(element.name))
-    return {
-      key,
-      summary: action === "press"
-        ? `Press ${String(value) === " " ? "Space" : String(value)} on ${quoted(element.name)} on ${place}`
-        : `${VERBS[action] ?? action} ${quoted(element.name)} on ${place}`,
-      reason: `${action} on ${JSON.stringify(element.name)} may perform a consequential action and requires the person's approval.`,
-    };
-  return null;
+  }
+  const activating = action === "click" || action === "check" || action === "uncheck" || action === "select" ||
+    action === "mousedown" || action === "mouseup" || action === "drag" ||
+    (action === "press" && ["Enter", "Space", " "].includes(String(value)));
+  if (!activating) return null;
+  // The element and the controls it sits in: a click on a label inside a Delete button deletes.
+  const named = [...target.nodes, ...target.ancestors].flatMap(namesOf);
+  const consequential = named.find((name) => CONSEQUENTIAL_BROWSER_ACTION.test(name));
+  if (!consequential) return null;
+  const verb = action === "press" ? `Press ${String(value) === " " ? "Space" : String(value)} on` : VERBS[action] ?? action;
+  return {
+    key,
+    summary: `${verb} ${quoted(consequential.replace(/\s+/g, " ").trim())} on ${place}`,
+    reason: `${action} on ${JSON.stringify(consequential)} may perform a consequential action and requires the person's approval.`,
+  };
 }

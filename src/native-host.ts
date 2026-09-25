@@ -349,10 +349,16 @@ export async function runNativeHost(
     {
       operation: BrowserOperationCall["operation"];
       resolve: (result: BrowserOperationResult) => void;
-      pending: (message: string) => void;
+      pending: ((message: string) => void) | null;
       timer: ReturnType<typeof setTimeout>;
     }
   >();
+  /** Tells the extension an agent's call ended unanswered: an approval it waits on is void. */
+  const cancelBrowserOperation = (id: string): void => {
+    void writer
+      .write({ protocol: VIBEWAITING_EXTENSION_PROTOCOL, type: "browser-operation-cancelled", id })
+      .catch(() => undefined);
+  };
   const browserTimeout = (
     id: string,
     operation: BrowserOperationCall["operation"],
@@ -363,9 +369,10 @@ export async function runNativeHost(
       const pending = pendingBrowserOperations.get(id);
       if (!pending) return;
       pendingBrowserOperations.delete(id);
+      cancelBrowserOperation(id);
       pending.resolve({ ok: false, operation, error: { code: "TIMED_OUT", message } });
     }, milliseconds);
-  const browserBroker = new BrowserProviderBroker(async (id, call, pending) => {
+  const browserBroker = new BrowserProviderBroker(async (id, call, { pending, signal }) => {
     if (pendingBrowserOperations.has(id))
       throw new Error(`Duplicate browser operation id: ${id}`);
     return await new Promise<BrowserOperationResult>((resolve) => {
@@ -376,12 +383,25 @@ export async function runNativeHost(
         "The Vibewaiting extension did not answer in 10 seconds.",
       );
       pendingBrowserOperations.set(id, { operation: call.operation, resolve, pending, timer });
+      signal.addEventListener("abort", () => {
+        const current = pendingBrowserOperations.get(id);
+        if (!current) return;
+        pendingBrowserOperations.delete(id);
+        clearTimeout(current.timer);
+        cancelBrowserOperation(id);
+        current.resolve({
+          ok: false,
+          operation: call.operation,
+          error: { code: "NOT_AVAILABLE", message: "The caller stopped waiting." },
+        });
+      }, { once: true });
       void writer
         .write({
           protocol: VIBEWAITING_EXTENSION_PROTOCOL,
           type: "browser-operation-request",
           id,
           call,
+          acceptsPending: pending !== null,
         })
         .catch((error: unknown) => {
           const pending = pendingBrowserOperations.get(id);
@@ -563,7 +583,7 @@ export async function runNativeHost(
         110_000,
         "The Vibewaiting extension did not answer after asking the person.",
       );
-      pending.pending(command.message);
+      pending.pending?.(command.message);
       return;
     }
     if (command.type === "browser-operation-response") {

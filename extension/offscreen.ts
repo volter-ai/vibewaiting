@@ -90,10 +90,47 @@ function debuggerTarget(host: Window, tabId: number): string {
   return target;
 }
 
-chrome.runtime.onMessage.addListener((raw, _sender, respond) => {
+/**
+ * The person's approvals the background has offered, by single-use nonce:
+ * the approved action's key and its tab. A grant is honoured once, only with
+ * its nonce, only for its tab.
+ */
+const grantOffers = new Map<string, { key: string; tabId: number }>();
+
+/** Only the background (an extension context without a tab) drives the Playwright host. */
+function fromBackground(sender: MessageSender): boolean {
+  return sender.id === chrome.runtime.id && !sender.tab && sender.url === chrome.runtime.getURL("background.js");
+}
+
+chrome.runtime.onMessage.addListener((raw, sender, respond) => {
   const message = typeof raw === "object" && raw !== null ? raw as Record<string, unknown> : null;
+  if (!fromBackground(sender)) return false;
+  if (message?.type === "vibewaiting:grant-offer" && typeof message.nonce === "string" &&
+    typeof message.key === "string" && typeof message.tabId === "number") {
+    grantOffers.set(message.nonce, { key: message.key, tabId: message.tabId });
+    return false;
+  }
+  if (message?.type === "vibewaiting:grant-revoke" && typeof message.nonce === "string") {
+    grantOffers.delete(message.nonce);
+    return false;
+  }
   if (message?.type !== "vibewaiting:browser-operation" || typeof message.tabId !== "number") return false;
   const tabId = message.tabId;
+  let grant: string | undefined;
+  if (message.grant !== undefined) {
+    const offer = typeof message.grant === "string" ? grantOffers.get(message.grant) : undefined;
+    if (typeof message.grant === "string") grantOffers.delete(message.grant);
+    if (!offer || offer.tabId !== tabId) {
+      respond({
+        ok: false,
+        operation: typeof (message.call as { operation?: unknown } | null)?.operation === "string"
+          ? (message.call as { operation: string }).operation : "browser.status",
+        error: { code: "APPROVAL_REQUIRED", message: "The approval is no longer valid, so nothing ran." },
+      });
+      return false;
+    }
+    grant = offer.key;
+  }
   const reply = new MessageChannel();
   reply.port1.onmessage = (event) => {
     respond(event.data as BrowserOperationResult);
@@ -101,8 +138,6 @@ chrome.runtime.onMessage.addListener((raw, _sender, respond) => {
   };
   void ready.then((host) => {
     const target = message.via === "debugger" ? debuggerTarget(host, tabId) : surfaceOf(tabId).id;
-    // A grant is the person's one-time approval for this operation (background.ts).
-    const grant = typeof message.grant === "string" ? message.grant : undefined;
     host.postMessage({ type: "operation", target, call: message.call, grant }, "*", [reply.port2]);
   });
   return true;

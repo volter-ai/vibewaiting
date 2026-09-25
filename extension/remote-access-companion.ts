@@ -149,7 +149,7 @@ export function createRemoteAccessCompanion(options: {
   const style = document.createElement("style");
   style.textContent = `
     .vw-remote-access { position: relative; font: 14px/1.4 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color-scheme: light dark; }
-    .vw-remote-access[data-embedded="true"] { position:fixed; z-index:1000; inset:0; pointer-events:none; }
+    .vw-remote-access[data-embedded="true"] { position:fixed; z-index:1000; top:0; left:0; width:0; height:0; pointer-events:none; }
     .vw-remote-access[data-embedded="true"] .vw-remote-trigger { display:none; }
     .vw-remote-access[data-embedded="true"] .vw-remote-panel { position:fixed; right:16px; bottom:16px; pointer-events:auto; }
     .vw-remote-trigger { position: relative; display:grid; width:48px; height:48px; padding:0; place-items:center; border:1px solid rgba(20,20,28,.15); border-radius:14px; color:#24242a; background:color-mix(in srgb,#fff 90%,transparent); box-shadow:0 5px 18px rgba(16,18,30,.13); cursor:pointer; }

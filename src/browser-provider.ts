@@ -20,6 +20,7 @@ interface BrowserProviderRequest {
   id: string;
   token: string;
   call: BrowserOperationCall;
+  acceptsPending: boolean;
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -55,8 +56,15 @@ export class BrowserProviderBroker {
     private readonly dispatch: (
       id: string,
       call: BrowserOperationCall,
-      /** The operation waits for the person: Supercode keeps the call open. */
-      pending: (message: string) => void,
+      caller: {
+        /**
+         * The operation waits for the person: Supercode keeps the call open.
+         * Null when the request did not declare `accepts: ["pending"]`.
+         */
+        pending: ((message: string) => void) | null;
+        /** Aborted when the caller's connection closes before the answer. */
+        signal: AbortSignal;
+      },
     ) => Promise<BrowserOperationResult>,
   ) {}
 
@@ -148,6 +156,7 @@ export class BrowserProviderBroker {
             id: candidate.id,
             token,
             call,
+            acceptsPending: Array.isArray(candidate.accepts) && candidate.accepts.includes("pending"),
           };
         }
       } catch {
@@ -157,6 +166,9 @@ export class BrowserProviderBroker {
         writeSocket(socket, { ok: false, error: "Invalid browser provider request" });
         return;
       }
+      const closed = new AbortController();
+      let answered = false;
+      socket.once("close", () => { if (!answered) closed.abort(); });
       const pending = (message: string): void => {
         if (socket.destroyed) return;
         socket.setTimeout(PERSON_TIMEOUT_MS);
@@ -166,13 +178,16 @@ export class BrowserProviderBroker {
           pending: { reason: "approval", message },
         })}\n`);
       };
-      void this.dispatch(request.id, request.call, pending)
-        .then((result) => writeSocket(socket, {
+      void this.dispatch(request.id, request.call, {
+        pending: request.acceptsPending ? pending : null,
+        signal: closed.signal,
+      })
+        .then((result) => { answered = true; writeSocket(socket, {
           protocol: SUPERCODE_BROWSER_PROVIDER_PROTOCOL,
           id: request!.id,
           result,
-        }))
-        .catch((error: unknown) => writeSocket(socket, {
+        }); })
+        .catch((error: unknown) => { answered = true; writeSocket(socket, {
           protocol: SUPERCODE_BROWSER_PROVIDER_PROTOCOL,
           id: request!.id,
           result: {
@@ -183,7 +198,7 @@ export class BrowserProviderBroker {
               message: error instanceof Error ? error.message : String(error),
             },
           },
-        }));
+        }); });
     });
   }
 }

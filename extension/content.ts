@@ -73,7 +73,8 @@ function mountVibewaitingContent(): void {
       }),
       // The frame loads from the per-session dynamic URL, but its document's
       // origin is the extension's own: the overlay's handshake must address
-      // that origin, or the messenger never becomes ready.
+      // that origin, or the messenger never becomes ready (fixed in
+      // widget-shell 0.5.2, which Vibewaiting does not use yet).
       allowedOrigin: `chrome-extension://${chrome.runtime.id}`,
     },
     presentations: VIBEWAITING_PRESENTATIONS,
@@ -215,5 +216,29 @@ function mountVibewaitingContent(): void {
   });
 
   overlay.mount();
+  keepShellChromeOffTheFrame();
   window.addEventListener("pagehide", destroy, { once: true });
+}
+
+/**
+ * Widget Shell 0.4.1 draws its drag and resize handles over the messenger
+ * frame's edges. Chrome then reports everything in the frame as occluded to
+ * IntersectionObserver v2, and the approval card, which enables Approve only
+ * once the browser confirms the card is visible, could never be approved.
+ * The shell's window is lifted above its handles, whose grab areas stay
+ * outside it (fixed in widget-shell 0.5.2).
+ */
+function keepShellChromeOffTheFrame(): void {
+  const root = document.querySelector('[data-widget-shell-id="vibewaiting"]')?.shadowRoot;
+  if (!root) return;
+  const sheet = new CSSStyleSheet();
+  sheet.replaceSync(`
+    .ws-window { z-index: 5; }
+    .ws-drag-handle { top: -14px; }
+    .ws-resize-handle[data-corner^="n"] { top: -12px; }
+    .ws-resize-handle[data-corner^="s"] { bottom: -12px; }
+    .ws-resize-handle[data-corner$="w"] { left: -12px; }
+    .ws-resize-handle[data-corner$="e"] { right: -12px; }
+  `);
+  root.adoptedStyleSheets = [...root.adoptedStyleSheets, sheet];
 }
