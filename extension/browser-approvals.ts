@@ -236,8 +236,9 @@ export function createBrowserApprovals(
     // and still for a second, and the pointer has rested on this button for
     // half a second.
     const pressedArmed = new Map<HTMLButtonElement, boolean>();
+    // The hint's line is always there, so showing it moves nothing.
     const hint = document.createElement("p");
-    hint.className = "vw-approval-status";
+    hint.className = "vw-approval-hint";
     hint.setAttribute("role", "status");
     for (const allow of allows) {
       allow.addEventListener("pointerdown", (event) => {
@@ -251,8 +252,7 @@ export function createBrowserApprovals(
         const armed = pressedArmed.get(allow) === true || (event.isTrusted && event.detail === 0 && still);
         pressedArmed.delete(allow);
         if (!armed) {
-          hint.textContent = "Hold the pointer still on the button for half a second, then click.";
-          if (!hint.isConnected) actions.before(hint);
+          hint.textContent = "Hold still on the button for half a second, then click.";
           allow.textContent = "Hold still to allow";
           return;
         }
@@ -260,7 +260,7 @@ export function createBrowserApprovals(
       });
     }
     actions.append(deny, ...allows);
-    element.append(actions);
+    element.append(hint, actions);
     render();
     cards.set(card.id, { element, stop, restart });
     // No focus move: a keystroke meant for the page never answers the card.
