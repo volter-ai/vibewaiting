@@ -35,8 +35,12 @@ interface Driven {
   endpoint: SocketEndpoint | null;
   browser: Promise<Browser> | null;
   backend: Promise<PlaywrightMcpBackend> | null;
-  /** A debugger tab's relay port: closing it detaches Chrome's debugger. */
-  relay: MessagePort | null;
+  /**
+   * Cuts Playwright's connection to the tab: a surface tab's client port, or a
+   * debugger tab's relay (which detaches Chrome's debugger). Playwright sends
+   * nothing more on it, and the next call connects again.
+   */
+  cut: (() => void) | null;
 }
 const surfaceTabs = new Map<number, Driven>();
 const debuggerTabs = new Map<number, Driven>();
@@ -68,11 +72,18 @@ const awaiting = new Map<number, string>();
 const cancelled = new Set<string>();
 const running = new Map<string, () => void>();
 
-const INPUT_GATE = Symbol.for("vibewaiting.input-gate");
-function setGate(page: Page, open: boolean): Promise<void> {
-  return page.evaluate(([gate, value]) => {
-    (window as unknown as Record<symbol, unknown>)[Symbol.for(gate)] = value;
-  }, [INPUT_GATE.description!, open] as const);
+/** Playwright as a client of a surface tab's endpoint, over a port this host can cut. */
+function connectSurfaceTab(driven: Driven): Promise<Browser> {
+  const channel = new MessageChannel();
+  driven.endpoint!.attachClient(new MessagePortTransport(channel.port1));
+  driven.cut = () => {
+    driven.cut = null;
+    // Each end hears the other close: Playwright sends nothing more, and AlmostCDP drops its session.
+    channel.port1.postMessage({ type: "close", code: 1000, reason: "The agent stopped waiting" });
+    channel.port2.postMessage({ type: "close", code: 1000, reason: "The agent stopped waiting" });
+    channel.port1.close();
+  };
+  return connectPlaywright(channel.port2);
 }
 /** Calls from queueing until they answer. */
 const inFlight = new Set<string>();
@@ -195,7 +206,7 @@ async function execute(
   let page: Page;
   let backend: PlaywrightMcpBackend;
   try {
-    const browser = await browserOf(driven, () => connectPlaywright(driven.endpoint!));
+    const browser = await browserOf(driven, () => connectSurfaceTab(driven));
     page = await pageFor(browser, via === "debugger" ? undefined : target);
     watchDialogs(page);
     backend = await backendOf(driven, browser);
@@ -204,8 +215,7 @@ async function execute(
   }
   let approval: BrowserApproval | null;
   try {
-    if (key !== null) await restoreFocus(page, key);
-    approval = await approvalFor(call, page, dialogs.get(page) ?? null);
+    approval = await approvalFor(call, page, dialogs.get(page) ?? null, key);
   } catch (error) {
     if (error instanceof BrowserRefusal) return { result: browserToolError(error.message) };
     return { result: browserToolError(`The page could not describe what this call acts on, so nothing ran: ${error instanceof Error ? error.message : String(error)}`) };
@@ -229,17 +239,17 @@ async function execute(
   const controller = new AbortController();
   running.set(id, () => {
     controller.abort();
-    if (via === "surface") void setGate(page, false).catch(() => undefined);
-    else driven.relay?.postMessage({ type: "close", code: 1000, reason: "The agent stopped waiting" });
+    driven.cut?.();
   });
   const dialogBefore = dialogs.get(page) ?? null;
   let result: BrowserToolResult;
   try {
-    if (via === "surface") await setGate(page, true);
+    if (key !== null) await restoreFocus(page, key);
     result = await backend.callTool(call.tool, call.arguments, controller.signal);
+  } catch (error) {
+    result = browserToolError(error instanceof Error ? error.message : String(error));
   } finally {
     running.delete(id);
-    if (via === "surface") await setGate(page, false).catch(() => undefined);
   }
   // Only the dialog this call answered is gone; one it opened stays.
   if (call.tool === "browser_handle_dialog" && !result.isError && dialogs.get(page) === dialogBefore) dialogs.set(page, null);
@@ -295,14 +305,14 @@ window.addEventListener("message", (event) => {
     }
     let driven = surfaceTabs.get(tabId);
     if (!driven) {
-      driven = { endpoint: createSocketEndpoint({ address: "vibewaiting.extension", requireExpect: true }), browser: null, backend: null, relay: null };
+      driven = { endpoint: createSocketEndpoint({ address: "vibewaiting.extension", requireExpect: true }), browser: null, backend: null, cut: null };
       surfaceTabs.set(tabId, driven);
     }
     driven.endpoint!.attachSurface(new MessagePortTransport(port), { id: message.id });
     return;
   }
   if (message.type === "debugger") {
-    const driven: Driven = { endpoint: null, browser: null, backend: null, relay: port };
+    const driven: Driven = { endpoint: null, browser: null, backend: null, cut: () => port.postMessage({ type: "close", code: 1000, reason: "The agent stopped waiting" }) };
     debuggerTabs.set(tabId, driven);
     void browserOf(driven, () => connectPlaywright(messagePortTransport(port))).then((browser) => {
       browser.on("disconnected", () => { if (debuggerTabs.get(tabId) === driven) debuggerTabs.delete(tabId); });

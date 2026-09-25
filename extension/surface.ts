@@ -12,7 +12,6 @@ import { connectDomSurface, preloadSuccession } from "@volter/almostcdp/dom";
 import { MessagePortTransport } from "@volter/almostcdp/message-port";
 
 const SURFACE_MESSAGE = "vibewaiting:almostcdp-surface";
-const INPUT_GATE = Symbol.for("vibewaiting.input-gate");
 
 interface SurfaceGlobal {
   __vibewaitingSurface?: boolean;
@@ -49,14 +48,6 @@ if (!surfaceGlobal.__vibewaitingSurface) {
       url: location.href,
       // The person's own tab: navigator.webdriver stays as the browser has it.
       automation: false,
-      // Input and navigation reach the page only while the Playwright host has
-      // opened the gate for the call it is running (playwright.ts), so a call
-      // the agent stopped waiting for sends nothing more. The page could open
-      // the gate itself; that lets an agent's call act on the page, which the
-      // page can already do.
-      inputPolicy: () => (window as unknown as Record<symbol, unknown>)[INPUT_GATE] === true
-        ? undefined
-        : "The agent's call ended, so Vibewaiting sent nothing to the page.",
     });
   };
   window.addEventListener("message", accept);

@@ -133,7 +133,8 @@ function debuggerTarget(host: Window, tabId: number): string {
   return target;
 }
 
-/** Calls the agent stopped waiting for, by id (the background's cancellation). */
+/** Calls waiting here for their tab's document, and those of them the agent stopped waiting for. */
+const routingCalls = new Set<string>();
 const cancelledCalls = new Set<string>();
 
 /** Only the background (an extension context without a tab) drives the Playwright host. */
@@ -172,8 +173,7 @@ chrome.runtime.onMessage.addListener((raw, sender, respond) => {
   if (message?.type === "vibewaiting:operation-cancel" && typeof message.id === "string") {
     const id = message.id;
     // A call still waiting here for its tab's document never reaches the host.
-    cancelledCalls.add(id);
-    setTimeout(() => cancelledCalls.delete(id), 60_000);
+    if (routingCalls.has(id)) cancelledCalls.add(id);
     void ready.then((host) => host.postMessage({ type: "cancel", id }, "*"));
     return false;
   }
@@ -196,17 +196,23 @@ chrome.runtime.onMessage.addListener((raw, sender, respond) => {
     respond(event.data);
     reply.port1.close();
   };
+  const id = message.id;
+  routingCalls.add(id);
   void ready.then(async (host) => {
     // A tab with no connected document has no target: never another page.
     const target = message.via === "debugger" ? debuggerTarget(host, tabId) : await surfaceOf(tabId) ?? `none:${tabId}`;
-    if (cancelledCalls.has(message.id as string)) {
+    // From here the host has the call, and hears its cancellation itself.
+    const stopped = cancelledCalls.has(id);
+    routingCalls.delete(id);
+    cancelledCalls.delete(id);
+    if (stopped) {
       reply.port1.close();
       respond({ result: { content: [{ type: "text", text: "### Error\nThe agent stopped waiting for this call, so it did not run." }], isError: true } });
       return;
     }
     // The origins the person allowed for this call's task on this tab (background.ts).
     const allowed = Array.isArray(message.allowed) ? message.allowed.filter((origin) => typeof origin === "string") : [];
-    host.postMessage({ type: "operation", id: message.id, target, tabId, via: message.via === "debugger" ? "debugger" : "surface", call: message.call, grant, allowed }, "*", [reply.port2]);
+    host.postMessage({ type: "operation", id, target, tabId, via: message.via === "debugger" ? "debugger" : "surface", call: message.call, grant, allowed }, "*", [reply.port2]);
   });
   return true;
 });

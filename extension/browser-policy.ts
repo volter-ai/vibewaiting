@@ -200,12 +200,8 @@ async function describeTarget(page: Page, target: unknown): Promise<Described & 
 }
 
 /** The element keys go to, described by the page; keys for a frame or Vibewaiting's own overlay are refused. */
-async function describeFocused(page: Page): Promise<Described | null> {
-  const focused = await page.evaluateHandle(() => {
-    let active = document.activeElement;
-    while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
-    return active && active !== document.body ? active : null;
-  });
+async function describeFocused(page: Page, approvedId: string | null): Promise<Described | null> {
+  const focused = await page.evaluateHandle(findFocusTarget, approvedId);
   const element = focused.asElement();
   const described = element ? await element.evaluate(describeInPage) : null;
   await focused.dispose();
@@ -215,33 +211,52 @@ async function describeFocused(page: Page): Promise<Described | null> {
 }
 
 /**
- * After the person pressed Allow in the messenger, focus is on the messenger:
- * an approved key press goes back to the element it was approved for, found
- * by its identity on this document. Focus the page moved elsewhere stays.
+ * Runs in the page: the element keys would go to. After the person pressed
+ * Allow in the messenger, focus is on the messenger, and an approved key press
+ * is for the element it was approved for (`approvedId`, its identity on this
+ * document); focus the page moved elsewhere stays where it is.
  */
-export async function restoreFocus(page: Page, approvedKey: string): Promise<void> {
-  const [tool, , , , identity] = JSON.parse(approvedKey) as [string, string, string, unknown, { id?: unknown } | null];
-  if (tool !== "browser_press_key" || typeof identity?.id !== "string") return;
-  await page.evaluate((id) => {
+function findFocusTarget(approvedId: string | null): Element | null {
+  let active = document.activeElement;
+  while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+  let overlay = false;
+  for (let node: Element | null = active; node && !overlay; ) {
+    overlay = node.closest('[data-widget-shell-id="vibewaiting"]') !== null;
+    node = (node.getRootNode() as Partial<ShadowRoot>).host ?? null;
+  }
+  if (overlay && approvedId !== null) {
     const identityKey = Symbol.for("vibewaiting.element");
-    let active = document.activeElement;
-    while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
-    let overlay = false;
-    for (let node: Element | null = active; node && !overlay; ) {
-      overlay = node.closest('[data-widget-shell-id="vibewaiting"]') !== null;
-      node = (node.getRootNode() as Partial<ShadowRoot>).host ?? null;
-    }
-    if (!overlay) return;
-    const visit = (root: Document | ShadowRoot): HTMLElement | null => {
+    const visit = (root: Document | ShadowRoot): Element | null => {
       for (const element of Array.from(root.querySelectorAll("*"))) {
-        if ((element as Element & { [key: symbol]: unknown })[identityKey] === id) return element as HTMLElement;
+        if ((element as Element & { [key: symbol]: unknown })[identityKey] === approvedId) return element;
         const inner = element.shadowRoot ? visit(element.shadowRoot) : null;
         if (inner) return inner;
       }
       return null;
     };
-    visit(document)?.focus();
-  }, identity.id);
+    return visit(document) ?? active;
+  }
+  return active && active !== document.body ? active : null;
+}
+
+/** The element an approved key press was approved for, from its key. */
+function approvedFocus(approvedKey: string | null): string | null {
+  if (approvedKey === null) return null;
+  const [tool, , , , identity] = JSON.parse(approvedKey) as [string, string, string, unknown, { id?: unknown } | null];
+  return tool === "browser_press_key" && typeof identity?.id === "string" ? identity.id : null;
+}
+
+/**
+ * Just before an approved key press runs (after its approval was checked
+ * again), focus goes back to the element it was approved for.
+ */
+export async function restoreFocus(page: Page, approvedKey: string): Promise<void> {
+  const id = approvedFocus(approvedKey);
+  if (id === null) return;
+  const target = await page.evaluateHandle(findFocusTarget, id);
+  const element = target.asElement();
+  if (element) await element.evaluate((node) => (node as HTMLElement).focus());
+  await target.dispose();
 }
 
 /** The document the page shows now: an approval holds only for the document it was asked on. */
@@ -256,7 +271,12 @@ function documentOf(page: Page): Promise<string> {
  * The approval this call asks for, or null when it never asks (reading).
  * Describes the elements it would act on by asking the page.
  */
-export async function approvalFor(call: BrowserToolCall, page: Page, dialog: OpenDialog | null): Promise<BrowserApproval | null> {
+export async function approvalFor(
+  call: BrowserToolCall,
+  page: Page,
+  dialog: OpenDialog | null,
+  approvedKey: string | null,
+): Promise<BrowserApproval | null> {
   const args = call.arguments;
   if (READING.has(call.tool)) {
     // A reading call still names only the page's own elements, never the overlay's.
@@ -317,7 +337,10 @@ export async function approvalFor(call: BrowserToolCall, page: Page, dialog: Ope
       break;
     }
     case "browser_press_key": {
-      const focused = await describeFocused(page);
+      // Shift, Control or Meta with Enter or Space opens a link in another tab or window.
+      if (/(^|\+)(Shift|Control|Meta|ControlOrMeta)\+/.test(String(args.key ?? "")) && /\+(Enter|NumpadEnter| |Space)$/.test(String(args.key ?? "")))
+        throw new BrowserRefusal("Enter or Space held with Shift, Control or Meta can open another tab or window; Vibewaiting drives only this tab.");
+      const focused = await describeFocused(page, approvedFocus(approvedKey));
       if (focused) elements.push(focused);
       const key = String(args.key ?? "");
       const where = focused ? `in ${focused.sensitive ? `${focused.sensitive} field ` : ""}${nameOf(focused)}` : "on the page";

@@ -507,21 +507,21 @@ function handleNativeMessage(raw: unknown): void {
   }
 }
 
-/**
- * Calls the agent stopped waiting for before they reached the Playwright host,
- * by id: kept long enough to outlast a call's own routing.
- */
+/** Calls being routed here, from the companion's request until the host answers. */
+const routingCalls = new Set<string>();
+/** Of those, the ones the agent stopped waiting for: kept until their routing ends. */
 const cancelledCalls = new Set<string>();
 function cancelled(id: string): boolean {
   return cancelledCalls.has(id);
 }
+function routingEnded(id: string): void {
+  routingCalls.delete(id);
+  cancelledCalls.delete(id);
+}
 
-/** A call the agent no longer waits for never starts, and one running sends no more input (playwright.ts). */
+/** A call the agent no longer waits for never starts, and one running is cut off (playwright.ts). */
 function cancelInHost(id: string): void {
-  if (!cancelledCalls.has(id)) {
-    cancelledCalls.add(id);
-    setTimeout(() => cancelledCalls.delete(id), CALL_TIMEOUT_MS * 2);
-  }
+  if (routingCalls.has(id)) cancelledCalls.add(id);
   void chrome.runtime.sendMessage({ type: "vibewaiting:operation-cancel", id }).catch(() => undefined);
 }
 
@@ -538,6 +538,20 @@ function sendAgentBrowserResponse(id: string, result: BrowserToolResult): void {
 const CALL_TIMEOUT_MS = 30_000;
 
 async function routeBrowserOperation(
+  id: string,
+  call: BrowserToolCall,
+  acceptsPending: boolean,
+  task: string | null,
+): Promise<void> {
+  routingCalls.add(id);
+  try {
+    await routeToTab(id, call, acceptsPending, task);
+  } finally {
+    routingEnded(id);
+  }
+}
+
+async function routeToTab(
   id: string,
   call: BrowserToolCall,
   acceptsPending: boolean,
@@ -581,6 +595,22 @@ async function routeBrowserOperation(
  * call and the person is asked in the messenger.
  */
 async function runBrowserOperation(
+  id: string,
+  tabId: number,
+  call: BrowserToolCall,
+  grant: string | null,
+  acceptsPending: boolean,
+  task: string | null,
+): Promise<void> {
+  routingCalls.add(id);
+  try {
+    await runOnTab(id, tabId, call, grant, acceptsPending, task);
+  } finally {
+    routingEnded(id);
+  }
+}
+
+async function runOnTab(
   id: string,
   tabId: number,
   call: BrowserToolCall,

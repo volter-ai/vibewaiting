@@ -135,12 +135,14 @@ its kind and message.
 
 A call the agent stopped waiting for (its call was cancelled, or the extension told it
 the page did not answer in 30 seconds) never starts if it was still being routed or
-queued. A running one sends nothing more: on the in-page path the surface takes input
-and navigation only while the Playwright host has opened its gate for the running call,
-and on the debugger path the debugger detaches.
+queued. A running one is cut off: the Playwright host closes Playwright's connection to
+the tab (on the debugger path the debugger detaches), so Playwright sends it nothing more,
+and the next call connects again. What was already sent has happened: a navigation that
+had started keeps loading.
 
-A middle click, or a click holding Shift, Control or Meta, can open another tab or window
-and is refused. Pressing a card's Allow button moves focus into the messenger; an approved
+A middle click, a click holding Shift, Control or Meta, and Enter or Space held with one
+of those can open another tab or window, and are refused. A link that opens its own tab
+still can; acting there asks again. Pressing a card's Allow button moves focus into the messenger; an approved
 key press goes back to the element it was approved for before it runs.
 
 The Playwright host takes messages only from the offscreen document that holds it
