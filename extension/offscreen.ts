@@ -101,7 +101,9 @@ chrome.runtime.onMessage.addListener((raw, _sender, respond) => {
   };
   void ready.then((host) => {
     const target = message.via === "debugger" ? debuggerTarget(host, tabId) : surfaceOf(tabId).id;
-    host.postMessage({ type: "operation", target, call: message.call }, "*", [reply.port2]);
+    // A grant is the person's one-time approval for this operation (background.ts).
+    const grant = typeof message.grant === "string" ? message.grant : undefined;
+    host.postMessage({ type: "operation", target, call: message.call, grant }, "*", [reply.port2]);
   });
   return true;
 });

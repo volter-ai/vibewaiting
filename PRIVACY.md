@@ -25,15 +25,18 @@ the tunnel provider you choose to a paired device.
 | Native messaging | Chrome cannot read local coding-agent transcripts, process state, or terminals. This connects the extension-owned messenger to the on-device Vibewaiting companion that can bridge those existing Claude Code and Codex sessions. |
 | Storage | Remember the selected workspace and local UI preferences. |
 | Offscreen document | Keep the extension's Playwright host running while an invoked browser tool drives a tab across its navigations. It has no page access of its own. |
-| Debugger | Operate a page whose Content-Security-Policy forbids the in-page executor (GitHub, for example) when an invoked browser tool drives it. Only that tab is attached, and Chrome shows its debugging bar there until you cancel it, close the tab, or revoke website access. |
+| Debugger | Used only on a page whose Content-Security-Policy forbids the in-page executor (GitHub, for example), and only while an invoked browser tool drives that tab. Only that tab is attached; Chrome shows its debugging bar there. It detaches 60 seconds after the tool's last operation, or earlier when you cancel the bar, close the tab, or revoke website access. Vibewaiting does not use it on other pages, on other tabs, or when no browser tool is running. |
 | Context menus | Offer a precise fallback for attaching a link. |
 
 The page-facing content script receives only enough coding-agent state to render the
 launcher plus a redacted remote-access status. Full session state, pairing URLs,
 passcodes, and device details render inside an extension-origin iframe. Website access
 is requested only after an in-product disclosure names the page data and pointer/focus
-activity described above. Password/file fields and consequential browser controls fail
-closed in browser tools. Page text, selections, links, and images do not cross into the
+activity described above. When a browser tool tries to fill a password or file field,
+activate a consequential control (submit, purchase, publish, send, transfer, delete), or
+run a script in the page, the messenger asks you first, naming the exact action and page.
+**Approve once** runs only that one action; **Deny**, or no answer within 90 seconds,
+refuses it, and nothing is approved for later. Page text, selections, links, and images do not cross into the
 local companion unless you use **Attach** or invoke a browser snapshot/query operation. URLs are
 normalized to remove credentials, credential-like parameters, and tracking parameters.
 Disabling website access unregisters the page script and removes the overlay from open

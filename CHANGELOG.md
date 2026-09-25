@@ -5,6 +5,8 @@ the complete generated notes and downloadable artifacts for each version.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-25
+
 ### Added
 
 - Vibewaiting can publish its active extension tab as a Supercode browser provider.
@@ -13,16 +15,33 @@ the complete generated notes and downloadable artifacts for each version.
   sandboxed extension page against an AlmostCDP surface in the tab, including
   `browser.script`, and keeps the tab across navigations. A page whose
   Content-Security-Policy forbids eval (GitHub) is driven through Chrome's debugger
-  instead, with Chrome's debugging bar shown on that tab only. Snapshots leave out
-  Vibewaiting's own messenger and launcher. In Firefox the operations report that
-  they are unavailable.
+  instead: Chrome's debugging bar shows on that tab only, and the debugger detaches
+  60 seconds after the last browser operation and re-attaches on the next. Snapshots
+  leave out Vibewaiting's own messenger and launcher. Firefox remains unsupported: it
+  does not install the extension.
+- Browser approvals in the messenger. Before an agent fills a password or file field,
+  activates a consequential control, or runs a script, the messenger opens with a card
+  naming the exact action and page. Approve once re-runs that one operation with a
+  one-time grant bound to its operation id, tab and target; Deny, no answer within 90
+  seconds, or closing the tab refuses it with the reason. The agent's call stays open
+  while the person decides (Supercode `pending` lines, which need a Supercode CLI
+  with `BROWSER_PERSON_TIMEOUT`).
+
+### Fixed
+
+- The messenger becomes ready again: the overlay's handshake addresses the extension's
+  own origin, which the frame keeps when it loads from Chrome's dynamic
+  web-accessible-resource URL.
 
 ### Security
 
 - Supercode provider discovery is loopback-only with random-token, owner-only
-  discovery. Password/file fields, consequential controls and every `browser.script`
-  fail closed with `APPROVAL_REQUIRED`, and revoking website access removes the
-  executor and detaches the debugger.
+  discovery. Nothing an agent does in the tab is approved standing, the approval card
+  never takes keyboard focus, and revoking website access removes the executor and
+  detaches the debugger.
+- The store listing and privacy policy explain the `debugger` permission: used only on
+  pages that block the in-page executor, only on the tab an agent drives, and only
+  while it drives it.
 
 ## [0.1.2] - 2026-08-26
 

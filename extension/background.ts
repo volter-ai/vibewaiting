@@ -48,6 +48,27 @@ const pendingAgentBrowserRequests = new Map<
     timer: ReturnType<typeof setTimeout>;
   }
 >();
+/**
+ * Operations waiting for the person's decision, by approval id. Each is bound
+ * to its operation id, its tab and the exact action the refusal named (`key`);
+ * Approve re-runs that one operation with a one-time grant for that key.
+ */
+interface PendingApproval {
+  id: string;
+  requestId: string;
+  tabId: number;
+  call: BrowserOperationCall;
+  key: string;
+  summary: string;
+  reason: string;
+  detail?: string;
+  timer: ReturnType<typeof setTimeout>;
+}
+const pendingApprovals = new Map<string, PendingApproval>();
+/** How long the approval card waits for the person; Supercode keeps the agent's call open meanwhile. */
+const APPROVAL_WINDOW_MS = 90_000;
+/** A tab on the debugger path detaches after this long without a browser operation. */
+const DEBUGGER_IDLE_MS = 60_000;
 /** Tabs an agent has driven: each new document's surface reconnects to the Playwright host. */
 const drivenTabs = new Set<number>();
 const pendingHostEvents = new Map<number, unknown[]>();
@@ -529,6 +550,21 @@ async function routeBrowserOperation(
     );
     return;
   }
+  await runBrowserOperation(id, tabId, call, null);
+}
+
+/**
+ * Runs one operation on the tab. `grant` is the key of the action the person
+ * approved for this operation; without one, an action needing approval stops
+ * the operation and the person is asked in the messenger.
+ */
+async function runBrowserOperation(
+  id: string,
+  tabId: number,
+  call: BrowserOperationCall,
+  grant: string | null,
+): Promise<void> {
+  const offscreen = chrome.offscreen!;
   const existing = pendingAgentBrowserRequests.get(id);
   if (existing) clearTimeout(existing.timer);
   const timer = setTimeout(() => {
@@ -541,22 +577,126 @@ async function routeBrowserOperation(
   }, 10_000);
   pendingAgentBrowserRequests.set(id, { tabId, operation: call.operation, timer });
   let raw: unknown;
+  debuggerBusy(tabId);
   try {
     await ensurePlaywrightHost(offscreen);
     const via = await driverFor(tabId);
     if (via === "surface") {
       drivenTabs.add(tabId);
-      post(content, { type: "surface-connect" });
+      const content = contentPortsByTab.get(tabId);
+      if (content) post(content, { type: "surface-connect" });
     }
-    raw = await chrome.runtime.sendMessage({ type: "vibewaiting:browser-operation", tabId, via, call });
+    raw = await chrome.runtime.sendMessage({
+      type: "vibewaiting:browser-operation",
+      tabId,
+      via,
+      call,
+      ...(grant === null ? {} : { grant }),
+    });
   } catch (error) {
     raw = {
       ok: false,
       operation: call.operation,
       error: { code: "NOT_AVAILABLE", message: `The Playwright host is not available: ${error instanceof Error ? error.message : String(error)}` },
     };
+  } finally {
+    debuggerIdle(tabId);
+  }
+  const approval = grant === null ? approvalRequest(raw) : null;
+  const pending = pendingAgentBrowserRequests.get(id);
+  if (approval && pending?.tabId === tabId) {
+    pendingAgentBrowserRequests.delete(id);
+    clearTimeout(pending.timer);
+    askPerson(id, tabId, call, approval);
+    return;
   }
   finishAgentBrowserRequest(id, tabId, raw);
+}
+
+/** The approval a refused operation asks for (playwright.ts attaches it to an `APPROVAL_REQUIRED` result). */
+function approvalRequest(raw: unknown): { key: string; summary: string; reason: string; detail?: string } | null {
+  const result = record(raw);
+  const error = record(result?.error);
+  const approval = record(result?.approval);
+  if (result?.ok !== false || error?.code !== "APPROVAL_REQUIRED" || !approval) return null;
+  const { key, summary, reason, detail } = approval;
+  if (typeof key !== "string" || typeof summary !== "string" || typeof reason !== "string") return null;
+  return { key, summary, reason, ...(typeof detail === "string" ? { detail } : {}) };
+}
+
+function approvalCard(approval: PendingApproval): unknown {
+  return {
+    type: "browser-approval",
+    approval: {
+      id: approval.id,
+      summary: approval.summary,
+      reason: approval.reason,
+      ...(approval.detail ? { detail: approval.detail } : {}),
+    },
+  };
+}
+
+/** Shows the approval card in the tab's messenger and keeps the agent's call open for the decision. */
+function askPerson(
+  requestId: string,
+  tabId: number,
+  call: BrowserOperationCall,
+  approval: { key: string; summary: string; reason: string; detail?: string },
+): void {
+  const id = crypto.randomUUID();
+  const pending: PendingApproval = {
+    id,
+    requestId,
+    tabId,
+    call,
+    ...approval,
+    timer: setTimeout(() => settleApproval(id, "expired"), APPROVAL_WINDOW_MS),
+  };
+  pendingApprovals.set(id, pending);
+  // The tab stays on its driver while the person decides.
+  debuggerBusy(tabId);
+  nativePort?.postMessage({
+    protocol: VIBEWAITING_EXTENSION_PROTOCOL,
+    type: "browser-operation-pending",
+    id: requestId,
+    message: `Waiting for the person to approve in Vibewaiting: ${approval.summary}`,
+  });
+  const content = contentPortsByTab.get(tabId);
+  if (content) post(content, { type: "browser-approval-open" });
+  for (const [port, guest] of guestPorts)
+    if (guest.tabId === tabId) post(port, approvalCard(pending));
+}
+
+/** The person's answer (or its absence): Approve re-runs the one operation; anything else refuses it. */
+function settleApproval(
+  id: string,
+  decision: "approve" | "deny" | "expired" | "closed",
+): void {
+  const approval = pendingApprovals.get(id);
+  if (!approval) return;
+  pendingApprovals.delete(id);
+  clearTimeout(approval.timer);
+  debuggerIdle(approval.tabId);
+  for (const [port, guest] of guestPorts)
+    if (guest.tabId === approval.tabId)
+      post(port, { type: "browser-approval-settled", id, decision });
+  if (decision === "approve") {
+    void runBrowserOperation(approval.requestId, approval.tabId, approval.call, approval.key);
+    return;
+  }
+  sendAgentBrowserResponse(approval.requestId, {
+    ok: false,
+    operation: approval.call.operation,
+    error: {
+      code: "APPROVAL_REQUIRED",
+      message:
+        decision === "deny"
+          ? `The person denied this in Vibewaiting: ${approval.summary}. Nothing ran.`
+          : decision === "expired"
+            ? `The person did not answer in ${APPROVAL_WINDOW_MS / 1000} seconds: ${approval.summary}. Nothing ran.`
+            : `The tab closed before the person answered: ${approval.summary}. Nothing ran.`,
+    },
+  });
 }
 
 let playwrightHost: Promise<void> | null = null;
@@ -655,9 +795,40 @@ async function relayCommand(relay: DebuggerRelay, method: string, params: unknow
   throw new Error(`No session ${sessionId} in this tab.`);
 }
 
+/**
+ * Chrome shows its debugging bar while the debugger is attached, so a tab on
+ * the debugger path is attached only while an agent is driving it: it detaches
+ * DEBUGGER_IDLE_MS after its last operation, and the next operation attaches
+ * again.
+ */
+const debuggerIdleTimers = new Map<number, ReturnType<typeof setTimeout>>();
+const operationsInFlight = new Map<number, number>();
+function debuggerBusy(tabId: number): void {
+  operationsInFlight.set(tabId, (operationsInFlight.get(tabId) ?? 0) + 1);
+  clearTimeout(debuggerIdleTimers.get(tabId));
+  debuggerIdleTimers.delete(tabId);
+}
+function debuggerIdle(tabId: number): void {
+  const remaining = (operationsInFlight.get(tabId) ?? 1) - 1;
+  if (remaining > 0) {
+    operationsInFlight.set(tabId, remaining);
+    return;
+  }
+  operationsInFlight.delete(tabId);
+  if (!debuggerRelays.has(tabId)) return;
+  clearTimeout(debuggerIdleTimers.get(tabId));
+  debuggerIdleTimers.set(tabId, setTimeout(() => {
+    debuggerIdleTimers.delete(tabId);
+    const relay = debuggerRelays.get(tabId);
+    if (relay && !operationsInFlight.has(tabId)) closeRelay(relay, true);
+  }, DEBUGGER_IDLE_MS));
+}
+
 function closeRelay(relay: DebuggerRelay, detach: boolean): void {
   if (debuggerRelays.get(relay.tabId) !== relay) return;
   debuggerRelays.delete(relay.tabId);
+  clearTimeout(debuggerIdleTimers.get(relay.tabId));
+  debuggerIdleTimers.delete(relay.tabId);
   if (detach && relay.attach) void chrome.debugger.detach({ tabId: relay.tabId }).catch(() => undefined);
   try {
     relay.port.postMessage({ type: "close", code: 1000, reason: "The tab's debugger detached" });
@@ -1071,10 +1242,22 @@ chrome.runtime.onConnect.addListener((port) => {
     for (const event of pendingHostEvents.get(guest.tabId) ?? [])
       post(port, { type: "host-event", event });
     pendingHostEvents.delete(guest.tabId);
+    for (const approval of pendingApprovals.values())
+      if (approval.tabId === guest.tabId) post(port, approvalCard(approval));
   }
   port.onMessage.addListener((raw) => {
     const message = record(raw);
     if (message && handleBrowserRequest(port, guest, message)) return;
+    if (
+      message?.type === "browser-approval-decision" &&
+      typeof message.id === "string" &&
+      (message.decision === "approve" || message.decision === "deny")
+    ) {
+      // Only the messenger in the approval's own tab can answer it.
+      if (pendingApprovals.get(message.id)?.tabId === guest.tabId)
+        settleApproval(message.id, message.decision);
+      return;
+    }
     if (message?.type === "remote-access-configure") {
       void configureRemoteAccess(message.configuration);
       return;
@@ -1130,7 +1313,11 @@ chrome.runtime.onMessage.addListener((raw) => {
     );
 });
 
-chrome.tabs.onRemoved.addListener((tabId) => { drivenTabs.delete(tabId); });
+chrome.tabs.onRemoved.addListener((tabId) => {
+  drivenTabs.delete(tabId);
+  for (const approval of [...pendingApprovals.values()])
+    if (approval.tabId === tabId) settleApproval(approval.id, "closed");
+});
 
 chrome.action.onClicked.addListener(
   () => void chrome.runtime.openOptionsPage(),

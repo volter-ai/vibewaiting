@@ -12,6 +12,8 @@ import {
 
 const MAX_WIRE_BYTES = 1_000_000;
 const DEFAULT_TIMEOUT_MS = 12_000;
+/** Supercode's wait after a `pending` line (BROWSER_PERSON_TIMEOUT), plus margin. */
+const PERSON_TIMEOUT_MS = 125_000;
 
 interface BrowserProviderRequest {
   protocol: typeof SUPERCODE_BROWSER_PROVIDER_PROTOCOL;
@@ -53,6 +55,8 @@ export class BrowserProviderBroker {
     private readonly dispatch: (
       id: string,
       call: BrowserOperationCall,
+      /** The operation waits for the person: Supercode keeps the call open. */
+      pending: (message: string) => void,
     ) => Promise<BrowserOperationResult>,
   ) {}
 
@@ -153,7 +157,16 @@ export class BrowserProviderBroker {
         writeSocket(socket, { ok: false, error: "Invalid browser provider request" });
         return;
       }
-      void this.dispatch(request.id, request.call)
+      const pending = (message: string): void => {
+        if (socket.destroyed) return;
+        socket.setTimeout(PERSON_TIMEOUT_MS);
+        socket.write(`${JSON.stringify({
+          protocol: SUPERCODE_BROWSER_PROVIDER_PROTOCOL,
+          id: request!.id,
+          pending: { reason: "approval", message },
+        })}\n`);
+      };
+      void this.dispatch(request.id, request.call, pending)
         .then((result) => writeSocket(socket, {
           protocol: SUPERCODE_BROWSER_PROVIDER_PROTOCOL,
           id: request!.id,

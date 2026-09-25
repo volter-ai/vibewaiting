@@ -349,25 +349,33 @@ export async function runNativeHost(
     {
       operation: BrowserOperationCall["operation"];
       resolve: (result: BrowserOperationResult) => void;
+      pending: (message: string) => void;
       timer: ReturnType<typeof setTimeout>;
     }
   >();
-  const browserBroker = new BrowserProviderBroker(async (id, call) => {
+  const browserTimeout = (
+    id: string,
+    operation: BrowserOperationCall["operation"],
+    milliseconds: number,
+    message: string,
+  ): ReturnType<typeof setTimeout> =>
+    setTimeout(() => {
+      const pending = pendingBrowserOperations.get(id);
+      if (!pending) return;
+      pendingBrowserOperations.delete(id);
+      pending.resolve({ ok: false, operation, error: { code: "TIMED_OUT", message } });
+    }, milliseconds);
+  const browserBroker = new BrowserProviderBroker(async (id, call, pending) => {
     if (pendingBrowserOperations.has(id))
       throw new Error(`Duplicate browser operation id: ${id}`);
     return await new Promise<BrowserOperationResult>((resolve) => {
-      const timer = setTimeout(() => {
-        pendingBrowserOperations.delete(id);
-        resolve({
-          ok: false,
-          operation: call.operation,
-          error: {
-            code: "TIMED_OUT",
-            message: "The Vibewaiting extension did not answer in 10 seconds.",
-          },
-        });
-      }, 10_000);
-      pendingBrowserOperations.set(id, { operation: call.operation, resolve, timer });
+      const timer = browserTimeout(
+        id,
+        call.operation,
+        10_000,
+        "The Vibewaiting extension did not answer in 10 seconds.",
+      );
+      pendingBrowserOperations.set(id, { operation: call.operation, resolve, pending, timer });
       void writer
         .write({
           protocol: VIBEWAITING_EXTENSION_PROTOCOL,
@@ -541,6 +549,21 @@ export async function runNativeHost(
         remoteAccessSnapshot,
         remoteAccessSnapshot.status === "connected",
       );
+      return;
+    }
+    if (command.type === "browser-operation-pending") {
+      // The extension asked the person to approve this operation; it answers
+      // within its 90 s decision window.
+      const pending = pendingBrowserOperations.get(command.id);
+      if (!pending) return;
+      clearTimeout(pending.timer);
+      pending.timer = browserTimeout(
+        command.id,
+        pending.operation,
+        110_000,
+        "The Vibewaiting extension did not answer after asking the person.",
+      );
+      pending.pending(command.message);
       return;
     }
     if (command.type === "browser-operation-response") {

@@ -37,6 +37,14 @@ and switch the same conversation into a terminal.
 > are excluded. Nothing enters a coding-agent session or paired device until you choose
 > Attach, and you can revoke website access at any time.
 >
+> With website access, local agents can also operate the active tab through Supercode's
+> browser tools. Before an agent fills a password or file field, submits, buys, sends or
+> deletes, or runs a script in the page, the messenger asks you and names the exact
+> action; Approve once runs only that action. On pages whose security policy blocks the
+> in-page tools (GitHub, for example), Vibewaiting uses Chrome's debugger permission for
+> that one tab while the agent drives it: Chrome shows its debugging bar, and the
+> debugger detaches a minute after the agent's last action.
+>
 > Optional remote access is off by default. When enabled, selected chat and terminal
 > traffic travels over HTTPS/WSS through Cloudflare, your configured ngrok account, or
 > a stable HTTPS relay to an authenticated device you pair. Insecure relay URLs are
@@ -50,7 +58,7 @@ and switch the same conversation into a terminal.
 **Reviewer instructions (500-character dashboard limit):**
 
 > Requires macOS/Linux, Node 22.12+ or 24+, and a signed-in Claude Code or Codex CLI; no
-> Vibewaiting account. Run `npm i -g https://github.com/volter-ai/vibewaiting/releases/download/v0.1.2/vibewaiting-0.1.2.tgz`
+> Vibewaiting account. Run `npm i -g https://github.com/volter-ai/vibewaiting/releases/download/v0.2.0/vibewaiting-0.2.0.tgz`
 > and `vibewaiting native install --browser chrome`. Open Options, save an existing
 > folder, read/allow optional website access, and keep one agent session running. On an
 > HTTP(S) page press Alt+Shift+V; open it, reply, Attach a selection, switch Terminal.
@@ -63,10 +71,10 @@ lanes are verified.
 
 | Permission | Dashboard justification |
 | --- | --- |
-| Optional HTTP/HTTPS host access | Granted from Vibewaiting onboarding after a prominent disclosure. It places the messenger on ordinary pages, supports explicit context attachment, and enables invoked local agent tools to inspect or operate the active tab through a fixed, bounded operation set. Password/file fields, consequential controls and Playwright scripts fail closed. No extension code runs on websites before consent. |
+| Optional HTTP/HTTPS host access | Granted from Vibewaiting onboarding after a prominent disclosure. It places the messenger on ordinary pages, supports explicit context attachment, and enables invoked local agent tools to inspect or operate the active tab through a fixed, bounded operation set. Password/file fields, consequential controls and Playwright scripts run only after the person approves that one action in the messenger. No extension code runs on websites before consent. |
 | Native messaging | Chrome's sandbox cannot read the local transcripts, process state, or terminals created by Claude Code and Codex. This permission connects the extension-owned messenger to the on-device Vibewaiting companion that bridges those existing sessions. |
 | Scripting | Registers the content script only after optional website access is granted and unregisters it when access is revoked. |
-| Debugger | Lets an invoked local agent tool operate a page whose Content-Security-Policy forbids the in-page executor's evaluation (GitHub, for example). It attaches only to the tab that tool drives, only after website access is granted; Chrome shows its debugging bar on that tab, and cancelling the bar or revoking website access detaches it. |
+| Debugger | Used only on pages whose Content-Security-Policy forbids the in-page executor's evaluation (GitHub, for example), so an invoked local agent tool can operate that page. It attaches only to the tab that tool drives, only after website access is granted, and never to other pages or tabs. Chrome shows its debugging bar on that tab; the debugger detaches 60 seconds after the tool's last operation, and cancelling the bar, closing the tab or revoking website access detaches it at once. |
 | Storage | Keeps workspace selection, browser-local UI preferences, and overlay geometry. |
 | Context menus | Provides a user-invoked fallback for attaching a selected link. |
 

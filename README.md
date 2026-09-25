@@ -29,7 +29,9 @@ switch the same conversation into a familiar terminal.
 - **Let Supercode agents use the tab you are already in.** Vibewaiting hosts
   Playwright itself, running inside the extension against the page—without a
   second automation browser. A page that forbids eval, such as GitHub, is driven
-  through Chrome's debugger, and Chrome shows its debugging bar on that tab.
+  through Chrome's debugger while the agent drives it, and Chrome shows its
+  debugging bar on that tab. Before an agent types a password, submits, deletes or
+  runs a script, the messenger asks you and names the exact action.
 
 ## Try the alpha
 
@@ -85,7 +87,8 @@ credentials, tmux handles, and execution policy never enter page content.
 Remote access is off until you enable it.
 
 When you invoke a local browser operation, its bounded result crosses the companion to
-that local caller. Password/file fields and consequential controls fail closed. See
+that local caller. Password/file fields, consequential controls and scripts wait for
+your one-time approval in the messenger. See
 [Browser operations](docs/browser-operations.md) for the exact operations and trust boundary.
 
 Read the plain-language [privacy policy](PRIVACY.md), [security model](SECURITY.md),

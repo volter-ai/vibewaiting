@@ -17,7 +17,9 @@ import {
   type BrowserOperationName,
   type BrowserOperationResult,
 } from "@volter-ai-dev/supercode-browser-playwright/protocol";
-import { guardBrowserAction } from "./browser-policy.js";
+import { BrowserActionRefusal } from "@volter-ai-dev/supercode-browser-playwright/protocol";
+import type { PlaywrightAction } from "@volter-ai-dev/supercode-browser-playwright/executor";
+import { approvalFor, type BrowserApproval } from "./browser-policy.js";
 
 /** Vibewaiting's own overlay in the page, which snapshots leave out. */
 const OWN_OVERLAY = '[data-widget-shell-id="vibewaiting"]';
@@ -29,6 +31,34 @@ const debuggerBrowsers = new Map<string, Promise<Browser>>();
 const executors = new WeakMap<Page, PlaywrightOperationExecutor>();
 // Operations on one page never interleave.
 const queues = new Map<string, Promise<unknown>>();
+
+/**
+ * The person's one-time approval for the operation now running: the approved
+ * action's key, from the refusal that asked for it. It lets exactly one
+ * matching action through, only during the re-run of that operation on that
+ * tab (the background binds it to the operation id and tab); nothing is
+ * approved standing.
+ */
+interface Grant { key: string; used: boolean }
+interface Running { grant: Grant | null; approval: BrowserApproval | null }
+const running = new WeakMap<Page, Running>();
+
+async function guard(page: Page, request: PlaywrightAction): Promise<void> {
+  const approval = await approvalFor(request, page.url());
+  if (!approval) return;
+  const call = running.get(page);
+  if (call?.grant && !call.grant.used && call.grant.key === approval.key) {
+    call.grant.used = true;
+    return;
+  }
+  if (call) call.approval ??= approval;
+  throw new BrowserActionRefusal(
+    "APPROVAL_REQUIRED",
+    call?.grant
+      ? `${approval.summary} was not the action the person approved (the page changed), so it did not run.`
+      : approval.reason,
+  );
+}
 
 function connected(): Promise<Browser> {
   browser ??= connectPlaywright(endpoint).then((connection) => {
@@ -46,7 +76,11 @@ function operationOf(call: unknown): BrowserOperationName {
   return (BROWSER_OPERATION_NAMES as readonly unknown[]).includes(name) ? name as BrowserOperationName : "browser.status";
 }
 
-async function execute(target: string, call: unknown): Promise<BrowserOperationResult> {
+async function execute(
+  target: string,
+  call: unknown,
+  grant: string | null,
+): Promise<BrowserOperationResult & { approval?: BrowserApproval }> {
   let page: Page;
   let connection: Browser;
   const viaDebugger = debuggerBrowsers.get(target);
@@ -65,17 +99,27 @@ async function execute(target: string, call: unknown): Promise<BrowserOperationR
     executor = new PlaywrightOperationExecutor(page, {
       syntheticEvents: !viaDebugger,
       endpoint: viaDebugger ? `Chrome ${connection.version()} (chrome.debugger)` : connection.version(),
-      actionGuard: guardBrowserAction,
+      actionGuard: (request) => guard(page, request),
       snapshotExclude: OWN_OVERLAY,
     });
     executors.set(page, executor);
   }
-  return await executor.execute(call);
+  const state: Running = { grant: grant === null ? null : { key: grant, used: false }, approval: null };
+  running.set(page, state);
+  try {
+    const result = await executor.execute(call);
+    // A refusal on an approved re-run is final: the person is not asked twice for one call.
+    return !result.ok && result.error.code === "APPROVAL_REQUIRED" && state.approval && !state.grant
+      ? { ...result, approval: state.approval }
+      : result;
+  } finally {
+    if (running.get(page) === state) running.delete(page);
+  }
 }
 
 window.addEventListener("message", (event) => {
   if (event.source !== window.parent) return;
-  const message = event.data as { type?: unknown; target?: unknown; call?: unknown } | null;
+  const message = event.data as { type?: unknown; target?: unknown; call?: unknown; grant?: unknown } | null;
   const port = event.ports[0];
   if (!port) return;
   if (message?.type === "surface") {
@@ -94,7 +138,8 @@ window.addEventListener("message", (event) => {
   }
   if (message?.type === "operation" && typeof message.target === "string") {
     const target = message.target;
-    const run = (queues.get(target) ?? Promise.resolve()).then(() => execute(target, message.call));
+    const grant = typeof message.grant === "string" ? message.grant : null;
+    const run = (queues.get(target) ?? Promise.resolve()).then(() => execute(target, message.call, grant));
     const settled = run.catch(() => undefined);
     queues.set(target, settled);
     void settled.then(() => { if (queues.get(target) === settled) queues.delete(target); });

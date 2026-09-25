@@ -14,9 +14,11 @@ the agent processes it controls.
   in the native host.
 - The content script remembers the latest pointed or focused element reference for
   Attach. It also executes Supercode's closed, structured browser-operation protocol
-  when the workspace-scoped provider receives a call. There is no
-  arbitrary JavaScript/evaluate operation. Snapshots and query results are bounded;
-  password/file fields and consequential controls fail closed. Credential-like URL
+  when the workspace-scoped provider receives a call. Snapshots and query results are
+  bounded. Filling password/file fields, consequential controls and every
+  `browser.script` (Playwright with the page, including `page.evaluate`) run only after
+  the person approves that one action in the messenger; denial, no answer in 90 s, or a
+  changed page refuses it. Credential-like URL
   parameters and tracking parameters are removed from Attach payloads.
 - Browser-provider discovery files are owner-only under Supercode's configuration
   directory; every native-host process binds a random-token-protected server to loopback

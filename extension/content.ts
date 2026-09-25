@@ -67,9 +67,15 @@ function mountVibewaitingContent(): void {
 
   const overlay = createOverlay({
     id: "vibewaiting",
-    content: createExtensionIframeContent(chrome.runtime, "app.html", {
-      title: "Vibewaiting agent chats",
-    }),
+    content: {
+      ...createExtensionIframeContent(chrome.runtime, "app.html", {
+        title: "Vibewaiting agent chats",
+      }),
+      // The frame loads from the per-session dynamic URL, but its document's
+      // origin is the extension's own: the overlay's handshake must address
+      // that origin, or the messenger never becomes ready.
+      allowedOrigin: `chrome-extension://${chrome.runtime.id}`,
+    },
     presentations: VIBEWAITING_PRESENTATIONS,
     initialPresentation: VIBEWAITING_PRESENTATION.messenger,
     launcher: {
@@ -98,6 +104,11 @@ function mountVibewaitingContent(): void {
     const message = raw as Record<string, unknown>;
     if (message.type === "site-access-revoked") {
       destroy();
+      return;
+    }
+    if (message.type === "browser-approval-open") {
+      // An agent's action waits for the person: the messenger shows the approval card.
+      overlay.open();
       return;
     }
     if (message.type === "surface-connect") {

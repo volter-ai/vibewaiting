@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Vibewaiting",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Follow and continue local Claude Code and Codex sessions from any browser tab.",
   "icons": {
     "16": "icon-16.png",

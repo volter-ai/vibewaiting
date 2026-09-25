@@ -61,6 +61,13 @@ export type NativeHostCommand =
       type: "browser-operation-response";
       id: string;
       result: BrowserOperationResult;
+    }
+  | {
+      /** The operation waits for the person's approval, named by `message`. */
+      protocol: typeof VIBEWAITING_EXTENSION_PROTOCOL;
+      type: "browser-operation-pending";
+      id: string;
+      message: string;
     };
 
 export type NativeHostEvent =
@@ -145,6 +152,16 @@ export function parseNativeHostCommand(
           type: "browser-operation-response",
           id: candidate.id,
           result,
+        }
+      : null;
+  }
+  if (candidate.type === "browser-operation-pending") {
+    return typeof candidate.id === "string" && typeof candidate.message === "string"
+      ? {
+          protocol: VIBEWAITING_EXTENSION_PROTOCOL,
+          type: "browser-operation-pending",
+          id: candidate.id,
+          message: candidate.message.slice(0, 500),
         }
       : null;
   }

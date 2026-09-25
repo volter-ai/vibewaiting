@@ -13,6 +13,7 @@ import type {
   MessengerTransport,
 } from "../widget/transport.js";
 import { createRemoteAccessCompanion } from "./remote-access-companion.js";
+import { createBrowserApprovals, parseBrowserApprovalCard } from "./browser-approvals.js";
 
 function LocalTerminalPanel({ state, send }: TerminalPanelProps): JSX.Element {
   if (!state.attachment)
@@ -50,6 +51,10 @@ const remoteAccess = createRemoteAccessCompanion({
   },
 });
 document.body.append(remoteAccess.node);
+const approvals = createBrowserApprovals((id, decision) =>
+  port.postMessage({ type: "browser-approval-decision", id, decision }),
+);
+document.body.append(approvals.node);
 const unsubscribeRemoteVisibility = shell.onVisibility((visible) => {
   if (!visible) remoteAccess.close();
 });
@@ -77,6 +82,19 @@ port.onMessage.addListener((raw) => {
       message.pairing,
       message.devices,
     );
+    return;
+  }
+  if (message.type === "browser-approval") {
+    const card = parseBrowserApprovalCard(message.approval);
+    if (card) approvals.show(card);
+    return;
+  }
+  if (
+    message.type === "browser-approval-settled" &&
+    typeof message.id === "string" &&
+    typeof message.decision === "string"
+  ) {
+    approvals.settle(message.id, message.decision);
     return;
   }
   if (message.type === "remote-access-open") {
