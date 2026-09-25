@@ -10,7 +10,6 @@
  */
 import { connectDomSurface, preloadSuccession } from "@volter/almostcdp/dom";
 import { MessagePortTransport } from "@volter/almostcdp/message-port";
-import { createDomAccessibility } from "@volter/almostcdp/accessibility";
 
 const SURFACE_MESSAGE = "vibewaiting:almostcdp-surface";
 
@@ -47,8 +46,6 @@ if (!surfaceGlobal.__vibewaitingSurface) {
       succession: { token: message.token },
       title: document.title,
       url: location.href,
-      // Supercode's guard reads each target's role and name over CDP.
-      accessibility: createDomAccessibility(),
       // The person's own tab: navigator.webdriver stays as the browser has it.
       automation: false,
     });

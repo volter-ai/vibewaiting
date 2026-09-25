@@ -38,6 +38,8 @@ Usage
   vibewaiting [options]
   vibewaiting native install [--browser brave|chrome|chromium|firefox] [--extension-id <id>]
   vibewaiting native uninstall [--browser brave|chrome|chromium|firefox] [--purge-state]
+  vibewaiting mcp     stdio MCP server: the browser tools on the tab you share, for an
+                      agent's harness (claude mcp add vibewaiting -- vibewaiting mcp)
 
 Options
   --workspace <dir>   project directory the coding agent runs in (default: cwd)
@@ -230,6 +232,11 @@ async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   if (argv[0] === "native-host") {
     await runNativeHost(argv[1]);
+    return;
+  }
+  if (argv[0] === "mcp") {
+    const { serveMcp } = await import("./mcp-server.js");
+    await serveMcp();
     return;
   }
   if (argv[0] === "native" && argv[1] === "install") {

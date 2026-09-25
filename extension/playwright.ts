@@ -1,105 +1,69 @@
 /**
  * The extension's Playwright host, in a sandboxed extension page (Manifest V3
- * allows eval only there, and Playwright serializes its page functions). It
- * serves one AlmostCDP endpoint that each driven tab's main-world surface
- * attaches to, connects unmodified Playwright to it, and answers the agent's
- * `browser.*` operations with Supercode's Playwright executor. A tab whose
- * page forbids eval is instead its own Playwright connection over Chrome's
- * DevTools protocol, relayed from `chrome.debugger` by the background. The
- * offscreen document (offscreen.ts) is its only caller.
+ * allows eval only there, and Playwright serializes its page functions). Each
+ * driven tab is one browser to Playwright: an AlmostCDP endpoint that tab's
+ * main-world surfaces attach to (one per document), or, for a page that
+ * forbids eval, Chrome's own DevTools protocol relayed from `chrome.debugger`
+ * by the background. The agent's tool calls are answered by Playwright's own
+ * MCP tool backend over that browser, after the policy (browser-policy.ts) has
+ * asked the person where it must. The offscreen document (offscreen.ts) is its
+ * only caller.
  *
- * No agent code runs in this realm: `browser.script` is answered by running
- * its source as JavaScript in the page (the page's own power), and the
- * executor's Playwright-script path is refused by the policy.
+ * No agent code runs here or in the page: the tools that run code are not
+ * served (SERVED_BROWSER_TOOLS).
  */
-import { createSocketEndpoint } from "@volter/almostcdp/socket";
+import { createSocketEndpoint, type SocketEndpoint } from "@volter/almostcdp/socket";
 import { MessagePortTransport } from "@volter/almostcdp/message-port";
-import { connectPlaywright, messagePortTransport, pageFor, type Browser, type Page } from "@volter/almostcdp/playwright";
-import { PlaywrightOperationExecutor, type PlaywrightAction } from "@volter-ai-dev/supercode-browser-playwright/executor";
 import {
-  BROWSER_OPERATION_NAMES,
-  BrowserActionRefusal,
-  parseBrowserOperationCall,
-  type BrowserOperationName,
-  type BrowserOperationResult,
-} from "@volter-ai-dev/supercode-browser-playwright/protocol";
-import { approvalFor, pageScriptApproval, sensitiveNodeIds, type BrowserApproval } from "./browser-policy.js";
+  connectPlaywright,
+  createPlaywrightMcpBackend,
+  messagePortTransport,
+  pageFor,
+  playwrightMcpTools,
+  type Browser,
+  type Page,
+  type PlaywrightMcpBackend,
+} from "@volter/almostcdp/playwright";
+import { browserToolError, parseBrowserToolCall, servedBrowserTool, type BrowserToolResult } from "../src/browser-tools.js";
+import { approvalFor, BrowserRefusal, type BrowserApproval } from "./browser-policy.js";
 
-/** Vibewaiting's own overlay in the page, which snapshots leave out. */
-const OWN_OVERLAY = '[data-widget-shell-id="vibewaiting"]';
-/** JavaScript run in the page must answer within this. */
-const PAGE_SCRIPT_TIMEOUT_MS = 9_000;
+const tools = playwrightMcpTools().filter((tool) => servedBrowserTool(tool.schema.name));
 
-// Every tab's surface must be one the offscreen document named for it.
-const endpoint = createSocketEndpoint({ address: "vibewaiting.extension", requireExpect: true });
-let browser: Promise<Browser> | undefined;
-/** Tabs driven over Chrome's debugger, by `debugger:<tabId>`: one browser each, holding that one page. */
-const debuggerBrowsers = new Map<string, Promise<Browser>>();
-const executors = new WeakMap<Page, PlaywrightOperationExecutor>();
-// Operations on one page never interleave.
-const queues = new Map<string, Promise<unknown>>();
+/** One driven tab: its browser to Playwright, and the tool backend over it. */
+interface Driven {
+  /** The tab's AlmostCDP endpoint; its documents' surfaces attach to it. None for a debugger tab. */
+  endpoint: SocketEndpoint | null;
+  browser: Promise<Browser> | null;
+  backend: Promise<PlaywrightMcpBackend> | null;
+}
+const surfaceTabs = new Map<number, Driven>();
+const debuggerTabs = new Map<number, Driven>();
+// Calls on one tab never interleave.
+const queues = new Map<number, Promise<unknown>>();
 
 /**
  * The person's approvals the background has offered, by single-use nonce
- * (relayed by the offscreen document): the approved action's key and its
- * tab. An operation names a nonce; the key never travels with it.
+ * (relayed by the offscreen document): the approved call's key and its tab.
+ * A call names a nonce; the key never travels with it.
  */
 const offers = new Map<string, { key: string; tabId: number }>();
 
 /**
- * The person's one-time approval for the operation now running: it lets
- * exactly one matching action through, only during that operation.
- */
-interface Grant { key: string; used: boolean }
-interface Running {
-  grant: Grant | null;
-  approval: BrowserApproval | null;
-  /** The origins the person allowed for this call's task on its tab. */
-  allowed: readonly string[];
-  /** The allowed origin an action of this call ran under, which the background marks as used. */
-  allowanceUsed: string | null;
-  tabId: number;
-  inPage: boolean;
-}
-const running = new WeakMap<Page, Running>();
-
-/** Nodes seen as sensitive fields on each page: they stay sensitive on their document. */
-const sensitive = new WeakMap<Page, Set<number>>();
-
-/**
  * Tabs with an approval the person has not answered, by tab id: the refused
- * action's summary. A call that starts on such a tab without the grant is
+ * call's summary. A call that starts on such a tab without the grant is
  * refused, even one queued before the card appeared; the background clears the
  * mark when the card is answered (`settled`), and the approved re-run clears
  * it as it starts.
  */
 const awaiting = new Map<number, string>();
 
-function decide(page: Page, call: Running | undefined, approval: BrowserApproval | null): void {
-  if (!approval) return;
-  if (call && !approval.onceOnly && call.allowed.includes(approval.origin)) {
-    call.allowanceUsed = approval.origin;
-    return;
-  }
-  if (call?.grant && !call.grant.used && call.grant.key === approval.key) {
-    call.grant.used = true;
-    return;
-  }
-  if (call) call.approval ??= approval;
-  throw new BrowserActionRefusal(
-    "APPROVAL_REQUIRED",
-    call?.grant
-      ? `${approval.summary} was not the action the person approved (the page changed), so it did not run.`
-      : approval.reason,
-  );
-}
-
-async function guard(page: Page, request: PlaywrightAction, inPage: boolean): Promise<void> {
-  const call = running.get(page);
-  let known = sensitive.get(page);
-  if (!known) sensitive.set(page, known = new Set());
-  if ("target" in request) for (const id of sensitiveNodeIds(request.target)) known.add(id);
-  decide(page, call, approvalFor(request, page.url(), inPage, known));
+/** A call's answer to the background: the tool's result, and what the policy decided. */
+interface Answer {
+  result: BrowserToolResult;
+  /** The approval a refused call asks for, which the background shows as a card. */
+  approval?: BrowserApproval;
+  /** The allowed origin this call ran under, which the background marks as used. */
+  allowanceUsed?: string;
 }
 
 /** Without a fragment: a same-document change is not a different page. */
@@ -130,150 +94,98 @@ function tabState(tabId: number): Promise<{ url?: string; pendingUrl?: string } 
 }
 
 /**
- * The last check before input reaches the tab: the browser's own view of the
- * tab must show no navigation in flight and the origin the action was checked
- * on; on the in-page path the page's reported URL must be the tab's.
+ * The last check before a call that acts reaches the tab: the browser's own
+ * view of the tab must show no navigation in flight and the origin the call was
+ * checked on; on the in-page path the page's reported URL must be the tab's.
  */
-async function beforeInput(page: Page, tabId: number, inPage: boolean, checked: string): Promise<void> {
+async function stale(page: Page, tabId: number, inPage: boolean, checked: string): Promise<string | null> {
   const tab = await tabState(tabId);
-  if (!tab?.url) throw new BrowserActionRefusal("STALE_PAGE", "The tab could not be confirmed, so nothing was sent; ask again.");
-  if (tab.pendingUrl)
-    throw new BrowserActionRefusal("STALE_PAGE", "The tab is navigating, so nothing was sent; ask again once it has loaded.");
+  if (!tab?.url) return "The tab could not be confirmed, so nothing was sent; ask again.";
+  if (tab.pendingUrl) return "The tab is navigating, so nothing was sent; ask again once it has loaded.";
   if (originOf(tab.url) !== originOf(checked))
-    throw new BrowserActionRefusal("STALE_PAGE", "The tab is on another site than the one the action was checked on, so nothing was sent; ask again.");
+    return "The tab is on another site than the one the call was checked on, so nothing was sent; ask again.";
   if (inPage && withoutHash(tab.url) !== withoutHash(page.url()))
-    throw new BrowserActionRefusal("STALE_PAGE", "The page reports a different address than the tab shows, so nothing was sent.");
+    return "The page reports a different address than the tab shows, so nothing was sent.";
+  return null;
 }
 
-function connected(): Promise<Browser> {
-  browser ??= connectPlaywright(endpoint).then((connection) => {
-    connection.on("disconnected", () => { browser = undefined; });
-    return connection;
+function browserOf(driven: Driven, connect: () => Promise<Browser>): Promise<Browser> {
+  driven.browser ??= connect().then((browser) => {
+    browser.on("disconnected", () => { driven.browser = null; driven.backend = null; });
+    return browser;
   }, (error: unknown) => {
-    browser = undefined;
+    driven.browser = null;
     throw error;
   });
-  return browser;
+  return driven.browser;
 }
 
-function operationOf(call: unknown): BrowserOperationName {
-  const name = typeof call === "object" && call !== null ? (call as { operation?: unknown }).operation : undefined;
-  return (BROWSER_OPERATION_NAMES as readonly unknown[]).includes(name) ? name as BrowserOperationName : "browser.status";
-}
-
-/**
- * `browser.script`, answered as JavaScript in the page: the source is the
- * body of an async function of `args`, evaluated by the page itself. It asks
- * every time and can be allowed once only.
- */
-async function pageScript(page: Page, call: unknown, state: Running): Promise<BrowserOperationResult> {
-  const parsed = parseBrowserOperationCall(call);
-  const source = typeof parsed?.input.source === "string" ? parsed.input.source : "";
-  const args = (parsed?.input.args as Record<string, unknown> | undefined) ?? {};
-  const target = async () => ({
-    url: page.url(),
-    title: await page.title().catch(() => ""),
-    revision: 0,
+function backendOf(driven: Driven, browser: Browser): Promise<PlaywrightMcpBackend> {
+  const context = browser.contexts()[0];
+  if (!context) return Promise.reject(new Error("The tab's browser has no page."));
+  driven.backend ??= createPlaywrightMcpBackend(context, tools).catch((error: unknown) => {
+    driven.backend = null;
+    throw error;
   });
-  try {
-    decide(page, state, pageScriptApproval(source, args, page.url(), state.inPage));
-    await beforeInput(page, state.tabId, state.inPage, page.url());
-    const expression = `(async (args) => {\n${source}\n})(${JSON.stringify(args)})`;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const value = await Promise.race([
-      page.evaluate(expression),
-      new Promise((_resolve, reject) => {
-        timer = setTimeout(() => reject(new BrowserActionRefusal("TIMED_OUT", `The page's JavaScript did not finish in ${PAGE_SCRIPT_TIMEOUT_MS} ms.`)), PAGE_SCRIPT_TIMEOUT_MS);
-      }),
-    ]).finally(() => clearTimeout(timer));
-    return { ok: true, operation: "browser.script", target: await target(), value: { value } };
-  } catch (error) {
-    const code = error instanceof BrowserActionRefusal ? error.code : "FAILED";
-    return {
-      ok: false,
-      operation: "browser.script",
-      error: { code, message: error instanceof Error ? error.message : String(error) },
-      target: await target(),
-    };
-  }
+  return driven.backend;
 }
 
 async function execute(
   target: string,
   tabId: number,
-  call: unknown,
+  via: "surface" | "debugger",
+  rawCall: unknown,
   grant: string | null,
   allowed: readonly string[],
-): Promise<BrowserOperationResult & { approval?: BrowserApproval; allowanceUsed?: string }> {
+): Promise<Answer> {
+  const call = parseBrowserToolCall(rawCall);
+  if (!call) return { result: browserToolError("Vibewaiting does not serve that tool.") };
   // A grant is a nonce the background issued for this tab; its key stays here.
   let key: string | null = null;
   if (grant !== null) {
     const offer = offers.get(grant);
     offers.delete(grant);
-    if (!offer || offer.tabId !== tabId)
-      return {
-        ok: false,
-        operation: operationOf(call),
-        error: { code: "APPROVAL_REQUIRED", message: "The approval is no longer valid, so nothing ran." },
-      };
+    if (!offer || offer.tabId !== tabId) return { result: browserToolError("The approval is no longer valid, so nothing ran.") };
     key = offer.key;
     awaiting.delete(tabId);
   }
   const deciding = awaiting.get(tabId);
   if (deciding !== undefined)
     return {
-      ok: false,
-      operation: operationOf(call),
-      error: {
-        code: "APPROVAL_REQUIRED",
-        message: `Waiting for the person's decision on “${deciding}” in Vibewaiting; no other browser operation runs on this tab until they answer (this call was already queued when the card appeared).`,
-      },
+      result: browserToolError(`Waiting for the person's decision on “${deciding}” in Vibewaiting; no other browser call runs on this tab until they answer (this call was already queued when the card appeared).`),
     };
+  const driven = via === "debugger" ? debuggerTabs.get(tabId) : surfaceTabs.get(tabId);
+  if (!driven) return { result: browserToolError("The page is not reachable: the tab has no connected document.") };
   let page: Page;
-  let connection: Browser;
-  const viaDebugger = debuggerBrowsers.get(target);
-  const inPage = !viaDebugger;
+  let backend: PlaywrightMcpBackend;
   try {
-    connection = await (viaDebugger ?? connected());
-    page = await pageFor(connection, viaDebugger ? undefined : target);
+    const browser = await browserOf(driven, () => connectPlaywright(driven.endpoint!));
+    page = await pageFor(browser, via === "debugger" ? undefined : target);
+    backend = await backendOf(driven, browser);
   } catch (error) {
-    return {
-      ok: false,
-      operation: operationOf(call),
-      error: { code: "NOT_AVAILABLE", message: `The page is not reachable: ${error instanceof Error ? error.message : String(error)}` },
-    };
+    return { result: browserToolError(`The page is not reachable: ${error instanceof Error ? error.message : String(error)}`) };
   }
-  let executor = executors.get(page);
-  if (!executor) {
-    executor = new PlaywrightOperationExecutor(page, {
-      syntheticEvents: inPage,
-      endpoint: viaDebugger ? `Chrome ${connection.version()} (chrome.debugger)` : connection.version(),
-      actionGuard: (request) => guard(page, request, inPage),
-      beforeInput: ({ url }) => beforeInput(page, tabId, inPage, url),
-      snapshotExclude: OWN_OVERLAY,
-    });
-    executors.set(page, executor);
-  }
-  const state: Running = {
-    grant: key === null ? null : { key, used: false },
-    approval: null,
-    allowed,
-    allowanceUsed: null,
-    tabId,
-    inPage,
-  };
-  running.set(page, state);
+  let approval: BrowserApproval | null;
   try {
-    const result = operationOf(call) === "browser.script" ? await pageScript(page, call, state) : await executor.execute(call);
-    // A refusal on an approved re-run is final: the person is not asked twice for one call.
-    if (!result.ok && result.error.code === "APPROVAL_REQUIRED" && state.approval && !state.grant) {
-      awaiting.set(tabId, state.approval.summary);
-      return { ...result, approval: state.approval };
-    }
-    return state.allowanceUsed ? { ...result, allowanceUsed: state.allowanceUsed } : result;
-  } finally {
-    if (running.get(page) === state) running.delete(page);
+    approval = await approvalFor(call, page);
+  } catch (error) {
+    if (error instanceof BrowserRefusal) return { result: browserToolError(error.message) };
+    return { result: browserToolError(`The page could not describe what this call acts on, so nothing ran: ${error instanceof Error ? error.message : String(error)}`) };
   }
+  let allowanceUsed: string | undefined;
+  if (approval) {
+    if (!approval.onceOnly && allowed.includes(approval.origin)) allowanceUsed = approval.origin;
+    else if (key === null) {
+      awaiting.set(tabId, approval.summary);
+      return { result: browserToolError(approval.reason), approval };
+    } else if (key !== approval.key) {
+      return { result: browserToolError(`${approval.summary} was not the action the person approved (the page changed), so it did not run.`) };
+    }
+    const why = await stale(page, tabId, via === "surface", page.url());
+    if (why) return { result: browserToolError(why) };
+  }
+  const result = await backend.callTool(call.tool, call.arguments);
+  return allowanceUsed ? { result, allowanceUsed } : { result };
 }
 
 window.addEventListener("message", (event) => {
@@ -281,7 +193,7 @@ window.addEventListener("message", (event) => {
   if (!event.isTrusted || event.source !== window.parent) return;
   const message = event.data as {
     type?: unknown; target?: unknown; call?: unknown; grant?: unknown; tabId?: unknown; allowed?: unknown;
-    nonce?: unknown; key?: unknown; id?: unknown;
+    nonce?: unknown; key?: unknown; id?: unknown; via?: unknown;
   } | null;
   if (message?.type === "settled" && typeof message.tabId === "number") {
     awaiting.delete(message.tabId);
@@ -296,42 +208,55 @@ window.addEventListener("message", (event) => {
     offers.delete(message.nonce);
     return;
   }
+  if (message?.type === "tab-closed" && typeof message.tabId === "number") {
+    for (const tabs of [surfaceTabs, debuggerTabs]) {
+      const driven = tabs.get(message.tabId);
+      tabs.delete(message.tabId);
+      void driven?.backend?.then((backend) => backend.dispose()).catch(() => undefined);
+      void driven?.browser?.then((browser) => browser.close()).catch(() => undefined);
+      void driven?.endpoint?.close();
+    }
+    awaiting.delete(message.tabId);
+    return;
+  }
   const port = event.ports[0];
-  if (!port) return;
-  if (message?.type === "surface") {
+  if (!port || typeof message?.tabId !== "number") return;
+  const tabId = message.tabId;
+  if (message.type === "surface") {
     // The offscreen document names the target this transport belongs to, from
     // Chrome's own sender: the surface is refused unless it is that target.
     if (typeof message.id !== "string") {
       port.close();
       return;
     }
-    endpoint.attachSurface(new MessagePortTransport(port), { id: message.id });
+    let driven = surfaceTabs.get(tabId);
+    if (!driven) {
+      driven = { endpoint: createSocketEndpoint({ address: "vibewaiting.extension", requireExpect: true }), browser: null, backend: null };
+      surfaceTabs.set(tabId, driven);
+    }
+    driven.endpoint!.attachSurface(new MessagePortTransport(port), { id: message.id });
     return;
   }
-  if (message?.type === "debugger" && typeof message.target === "string") {
-    const target = message.target;
-    const connection = connectPlaywright(messagePortTransport(port)).then((opened) => {
-      opened.on("disconnected", () => { if (debuggerBrowsers.get(target) === connection) debuggerBrowsers.delete(target); });
-      return opened;
-    });
-    debuggerBrowsers.set(target, connection);
-    connection.catch(() => { if (debuggerBrowsers.get(target) === connection) debuggerBrowsers.delete(target); });
+  if (message.type === "debugger") {
+    const driven: Driven = { endpoint: null, browser: null, backend: null };
+    debuggerTabs.set(tabId, driven);
+    void browserOf(driven, () => connectPlaywright(messagePortTransport(port))).then((browser) => {
+      browser.on("disconnected", () => { if (debuggerTabs.get(tabId) === driven) debuggerTabs.delete(tabId); });
+    }, () => { if (debuggerTabs.get(tabId) === driven) debuggerTabs.delete(tabId); });
     return;
   }
-  if (message?.type === "operation" && typeof message.target === "string" && typeof message.tabId === "number") {
+  if (message.type === "operation" && typeof message.target === "string") {
     const target = message.target;
-    const tabId = message.tabId;
+    const via = message.via === "debugger" ? "debugger" : "surface";
     const grant = typeof message.grant === "string" ? message.grant : null;
     const allowed = Array.isArray(message.allowed) ? message.allowed.filter((origin): origin is string => typeof origin === "string") : [];
-    const run = (queues.get(target) ?? Promise.resolve()).then(() => execute(target, tabId, message.call, grant, allowed));
+    const run = (queues.get(tabId) ?? Promise.resolve()).then(() => execute(target, tabId, via, message.call, grant, allowed));
     const settled = run.catch(() => undefined);
-    queues.set(target, settled);
-    void settled.then(() => { if (queues.get(target) === settled) queues.delete(target); });
-    void run.then((result) => port.postMessage(result), (error: unknown) => port.postMessage({
-      ok: false,
-      operation: operationOf(message.call),
-      error: { code: "FAILED", message: error instanceof Error ? error.message : String(error) },
-    } satisfies BrowserOperationResult));
+    queues.set(tabId, settled);
+    void settled.then(() => { if (queues.get(tabId) === settled) queues.delete(tabId); });
+    void run.then((answer) => port.postMessage(answer), (error: unknown) => port.postMessage({
+      result: browserToolError(error instanceof Error ? error.message : String(error)),
+    } satisfies Answer));
   }
 });
 window.parent.postMessage({ type: "ready" }, "*");

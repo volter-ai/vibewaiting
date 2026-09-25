@@ -13,37 +13,34 @@ the agent processes it controls.
   iframe; native locators, tmux handles, agent credentials, and execution policy stay
   in the native host.
 - The content script remembers the latest pointed or focused element reference for
-  Attach. It also executes Supercode's closed, structured browser-operation protocol
-  when the workspace-scoped provider receives a call. Snapshots and query results are
-  bounded. Every action that can change a page or send it input (click, fill, press,
-  focus, check, select, scroll, back, forward, reload, raw mouse presses, wheel, drag,
-  and `browser.script`, which runs its source as JavaScript in the page, as the page)
-  runs only after the person allows it in the messenger, once or for the tab's current
-  origin for the agent's task (ended by the task, the tab closing, or 15 minutes without
-  use); reading never asks, though hovering scrolls its element into view. Scripts,
-  typing into password, one-time-code, card or file fields (or fields that were one on
-  this document), raw input whose target cannot be identified, and pages without a
-  real origin are allowed once each, even on an allowed origin. No agent code runs in
-  the extension; input is sent only to the document that was checked, and a navigation
-  in flight refuses it (except a back/forward-cache restore on the debugger path that
-  completes between the last check and the dispatch). Each tab's in-page connection is
+  Attach. An agent reaches the tab only through `vibewaiting mcp`, which serves
+  Playwright's own browser tools less those that run code (`browser_evaluate`,
+  `browser_run_code_unsafe`), touch files, or reach other tabs and the window; no CDP
+  endpoint is exposed to local processes, and no agent code runs in the page or the
+  extension. Every acting call (click, drag, select, type, fill a form, press a key,
+  navigate, go back, answer a dialog) runs only after the person allows it in the
+  messenger, once or for the tab's current origin for the agent's task (ended by the
+  task, the tab closing, or 15 minutes without use); reading never asks, though
+  hovering scrolls its element into view. Typing into password, one-time-code, card or
+  file fields (or fields that were one on this document) and pages without a real
+  origin are allowed once each, even on an allowed origin. A navigation in flight or a
+  changed origin refuses a call before it runs; the page can still change between that
+  check and the input. Each tab's in-page connection is
   bound to the tab Chrome names for its port, so a page cannot claim another tab's
   connection. Allowances end after 15 minutes unused, when the tab closes, or when the
   agent's MCP session ends.
   Denial, no answer in 90 s, or a changed page refuses the action.
 - Whether to ask never depends on what an element is called; those words only shape
-  the card. What the cards say comes from the browser on the debugger path; on the
-  in-page (AlmostCDP) path the page describes its own elements, so a hostile page can
-  mislabel them, and cards there say "(as described by the page)". The cards protect
-  against an agent's mistakes on pages that describe themselves honestly. Nothing an
-  agent types is secret from the page it types into. A locator in another frame, a
-  press whose focus lands elsewhere or inside a frame or closed shadow root, and a
-  mouse press whose position is unknown are refused. Credential-like URL
+  the card. The page describes its own elements, so a hostile page can mislabel them,
+  and cards say "(as described by the page)". The cards protect against an agent's
+  mistakes on pages that describe themselves honestly. Nothing an agent types is secret
+  from the page it types into. A call naming a selector or an element inside a frame,
+  and any call on Vibewaiting's own launcher or messenger, is refused. Credential-like URL
   parameters and tracking parameters are removed from Attach payloads.
-- Browser-provider discovery files are owner-only under Supercode's configuration
-  directory; every native-host process binds a random-token-protected server to loopback
-  and removes its own record on shutdown. Requests start on the current active tab and
-  may continue only through the opaque page handle Vibewaiting returned for that tab.
+- The browser broker's discovery files are owner-only under `~/.vibewaiting/browser`;
+  every native-host process binds a random-token-protected server to loopback and
+  removes its own record on shutdown. Calls go to the active tab of the last-focused
+  window.
 - Remote access terminates at the authenticated messenger server. Pairing grants are
   short-lived and single-use, cookies are HTTP-only, login is rate-limited, and terminal
   grants remain opaque and short-lived. Public chat and terminal transport uses

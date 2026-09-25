@@ -1,27 +1,35 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { chmod, mkdir, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { randomBytes, randomUUID } from "node:crypto";
+import { chmod, mkdir, readdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server, type Socket } from "node:net";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
-import {
-  parseBrowserOperationCall,
-  SUPERCODE_BROWSER_PROVIDER_PROTOCOL,
-  type BrowserOperationCall,
-  type BrowserOperationResult,
-} from "@volter-ai-dev/supercode-browser-playwright/protocol";
+import { join, resolve, sep } from "node:path";
+import { browserToolError, parseBrowserToolCall, type BrowserToolCall, type BrowserToolResult } from "./browser-tools.js";
+
+/** The wire between `vibewaiting mcp` and the native host: one JSON line each way, then `pending` lines. */
+export const BROWSER_BROKER_PROTOCOL = "vibewaiting/browser-broker-v1" as const;
 
 const MAX_WIRE_BYTES = 1_000_000;
-const DEFAULT_TIMEOUT_MS = 12_000;
-/** Supercode's wait after a `pending` line (BROWSER_PERSON_TIMEOUT), plus margin. */
+/** A call runs up to 30 s in the extension (a navigation waits for its load); the socket outlives it. */
+const DEFAULT_TIMEOUT_MS = 40_000;
+/** How long the caller's socket stays open after a `pending` line: the person's decision window, plus margin. */
 const PERSON_TIMEOUT_MS = 125_000;
 
-interface BrowserProviderRequest {
-  protocol: typeof SUPERCODE_BROWSER_PROVIDER_PROTOCOL;
+interface BrowserBrokerRequest {
   id: string;
-  token: string;
-  call: BrowserOperationCall;
+  call: BrowserToolCall;
   acceptsPending: boolean;
   task: string | null;
+}
+
+/** Where a running native host publishes its broker: one file per host, readable only by this user. */
+export interface BrowserBrokerDiscovery {
+  protocol: typeof BROWSER_BROKER_PROTOCOL;
+  workspace: string;
+  host: "127.0.0.1";
+  port: number;
+  token: string;
+  pid: number;
+  createdAt: string;
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -31,11 +39,39 @@ function record(value: unknown): Record<string, unknown> | null {
 }
 
 function discoveryDirectory(): string {
-  const explicit = process.env["SUPERCODE_HOME"];
-  if (explicit) return join(explicit, "providers", "browser");
-  const xdg = process.env["XDG_CONFIG_HOME"];
-  const root = xdg ? join(xdg, "supercode") : join(homedir(), ".config", "supercode");
-  return join(root, "providers", "browser");
+  return join(homedir(), ".vibewaiting", "browser");
+}
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/**
+ * The broker an MCP server started in `cwd` uses: the live one whose
+ * workspace holds `cwd` most closely, else the newest live one.
+ */
+export async function findBrowserBroker(cwd: string): Promise<BrowserBrokerDiscovery | null> {
+  const directory = discoveryDirectory();
+  const names = await readdir(directory).catch(() => [] as string[]);
+  const found: BrowserBrokerDiscovery[] = [];
+  for (const name of names) {
+    if (!name.endsWith(".json")) continue;
+    const parsed = record(await readFile(join(directory, name), "utf8").then((text) => JSON.parse(text) as unknown, () => null));
+    if (parsed?.protocol !== BROWSER_BROKER_PROTOCOL || typeof parsed.workspace !== "string" ||
+      typeof parsed.port !== "number" || typeof parsed.token !== "string" || typeof parsed.pid !== "number" ||
+      typeof parsed.createdAt !== "string" || !alive(parsed.pid)) continue;
+    found.push(parsed as unknown as BrowserBrokerDiscovery);
+  }
+  const here = await canonicalWorkspace(cwd);
+  const holding = found
+    .filter((entry) => here === entry.workspace || here.startsWith(entry.workspace.endsWith(sep) ? entry.workspace : `${entry.workspace}${sep}`))
+    .sort((a, b) => b.workspace.length - a.workspace.length);
+  return holding[0] ?? found.sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null;
 }
 
 async function canonicalWorkspace(workspace: string): Promise<string> {
@@ -47,8 +83,8 @@ function writeSocket(socket: Socket, value: unknown): void {
   socket.end(`${JSON.stringify(value)}\n`);
 }
 
-/** Publishes Vibewaiting's active tab as a Supercode browser provider. */
-export class BrowserProviderBroker {
+/** Serves the person's active tab to `vibewaiting mcp` servers on this machine. */
+export class BrowserBroker {
   private server: Server | null = null;
   private discoveryPath: string | null = null;
   private workspace: string | null = null;
@@ -56,10 +92,10 @@ export class BrowserProviderBroker {
   constructor(
     private readonly dispatch: (
       id: string,
-      call: BrowserOperationCall,
+      call: BrowserToolCall,
       caller: {
         /**
-         * The operation waits for the person: Supercode keeps the call open.
+         * The call waits for the person: the MCP server keeps it open.
          * Null when the request did not declare `accepts: ["pending"]`.
          */
         pending: ((message: string) => void) | null;
@@ -68,7 +104,7 @@ export class BrowserProviderBroker {
         /** The agent task the call belongs to, when the caller names one. */
         task: string | null;
       },
-    ) => Promise<BrowserOperationResult>,
+    ) => Promise<BrowserToolResult>,
   ) {}
 
   async start(workspace: string): Promise<void> {
@@ -87,38 +123,23 @@ export class BrowserProviderBroker {
     const address = server.address();
     if (!address || typeof address === "string") {
       server.close();
-      throw new Error("Could not bind the Vibewaiting browser provider");
+      throw new Error("Could not bind the Vibewaiting browser broker");
     }
     const directory = discoveryDirectory();
     await mkdir(directory, { recursive: true, mode: 0o700 });
     await chmod(directory, 0o700);
-    const workspaceHash = createHash("sha256").update(canonical).digest("hex").slice(0, 16);
-    const path = join(directory, `${workspaceHash}-${process.pid}-${randomUUID()}.json`);
+    const path = join(directory, `${process.pid}-${randomUUID()}.json`);
     const temporary = `${path}.tmp`;
-    await writeFile(temporary, `${JSON.stringify({
-      protocol: SUPERCODE_BROWSER_PROVIDER_PROTOCOL,
+    const discovery: BrowserBrokerDiscovery = {
+      protocol: BROWSER_BROKER_PROTOCOL,
       workspace: canonical,
       host: "127.0.0.1",
       port: address.port,
       token,
       pid: process.pid,
       createdAt: new Date().toISOString(),
-      provider: {
-        id: "vibewaiting.active-tab",
-        name: "Vibewaiting active tab",
-        fidelity: {
-          target: "active-or-leased-http-page",
-          // A page whose CSP forbids eval is driven over chrome.debugger with
-          // Chrome's own input; browser.status reports each page's own.
-          implementation: "playwright-core 1.63.0 over AlmostCDP, or over chrome.debugger where the page forbids eval",
-          transport: "almostcdp or chrome.debugger",
-          accessibility: "playwright-aria-snapshot",
-          syntheticEvents: true,
-          trustedInput: false,
-          script: "extension-sandbox-playwright-page",
-        },
-      },
-    })}\n`, { encoding: "utf8", mode: 0o600 });
+    };
+    await writeFile(temporary, `${JSON.stringify(discovery)}\n`, { encoding: "utf8", mode: 0o600 });
     await rename(temporary, path);
     this.server = server;
     this.discoveryPath = path;
@@ -148,16 +169,14 @@ export class BrowserProviderBroker {
       const newline = data.indexOf("\n");
       if (newline < 0) return;
       socket.pause();
-      let request: BrowserProviderRequest | null = null;
+      let request: BrowserBrokerRequest | null = null;
       try {
         const candidate = record(JSON.parse(data.slice(0, newline)));
-        const call = parseBrowserOperationCall(candidate?.call);
-        if (candidate?.protocol === SUPERCODE_BROWSER_PROVIDER_PROTOCOL &&
+        const call = parseBrowserToolCall(candidate?.call);
+        if (candidate?.protocol === BROWSER_BROKER_PROTOCOL &&
           typeof candidate.id === "string" && candidate.token === token && call) {
           request = {
-            protocol: SUPERCODE_BROWSER_PROVIDER_PROTOCOL,
             id: candidate.id,
-            token,
             call,
             acceptsPending: Array.isArray(candidate.accepts) && candidate.accepts.includes("pending"),
             task: typeof candidate.task === "string" && candidate.task.length <= 200 ? candidate.task : null,
@@ -167,7 +186,7 @@ export class BrowserProviderBroker {
         request = null;
       }
       if (!request) {
-        writeSocket(socket, { ok: false, error: "Invalid browser provider request" });
+        writeSocket(socket, { protocol: BROWSER_BROKER_PROTOCOL, error: "Invalid browser broker request" });
         return;
       }
       const closed = new AbortController();
@@ -177,7 +196,7 @@ export class BrowserProviderBroker {
         if (socket.destroyed) return;
         socket.setTimeout(PERSON_TIMEOUT_MS);
         socket.write(`${JSON.stringify({
-          protocol: SUPERCODE_BROWSER_PROVIDER_PROTOCOL,
+          protocol: BROWSER_BROKER_PROTOCOL,
           id: request!.id,
           pending: { reason: "approval", message },
         })}\n`);
@@ -188,21 +207,14 @@ export class BrowserProviderBroker {
         task: request.task,
       })
         .then((result) => { answered = true; writeSocket(socket, {
-          protocol: SUPERCODE_BROWSER_PROVIDER_PROTOCOL,
+          protocol: BROWSER_BROKER_PROTOCOL,
           id: request!.id,
           result,
         }); })
         .catch((error: unknown) => { answered = true; writeSocket(socket, {
-          protocol: SUPERCODE_BROWSER_PROVIDER_PROTOCOL,
+          protocol: BROWSER_BROKER_PROTOCOL,
           id: request!.id,
-          result: {
-            ok: false,
-            operation: request!.call.operation,
-            error: {
-              code: "FAILED",
-              message: error instanceof Error ? error.message : String(error),
-            },
-          },
+          result: browserToolError(error instanceof Error ? error.message : String(error)),
         }); });
     });
   }

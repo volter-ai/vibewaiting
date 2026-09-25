@@ -82,19 +82,20 @@ four can be remapped from the browser's extension-shortcuts page.
 Vibewaiting has no account, analytics, ads, or hosted transcript service. The ordinary
 page sees only the launcher; full session state renders in an extension-owned iframe.
 Explicit attachment context crosses into the local companion only when you attach it;
-browser-operation results cross only when a local caller invokes one. Native paths,
+browser tool results cross only when a local agent calls a tool. Native paths,
 credentials, tmux handles, and execution policy never enter page content.
 Remote access is off until you enable it.
 
-When you invoke a local browser operation, its bounded result crosses the companion to
-that local caller. Anything an agent does that can change a page or send it input
-(clicking, typing, pressing keys, selecting, scrolling, navigating, mouse presses and
-scripts) asks you first in the messenger, unless you allowed that site for the agent's
-task (until 15 minutes pass unused, the tab closes, or the agent's MCP session ends);
-reading the
-page never asks. Scripts, which run as JavaScript in the page with the page's own power,
-and typing into password, one-time-code, card or file fields ask every time. See [Browser operations](docs/browser-operations.md) for
-the exact operations and trust boundary.
+An agent gets the tab you are looking at through a normal MCP server its harness
+registers (`claude mcp add vibewaiting -- vibewaiting mcp`): Playwright's own browser
+tools, answered inside the extension, without the tools that run code, touch files or
+reach other tabs. A tool's bounded result crosses the companion to that local agent.
+Anything an agent does that can change a page or send it input (clicking, typing,
+pressing keys, selecting, dragging, navigating, answering a dialog) asks you first in
+the messenger, unless you allowed that site for the agent's task (until 15 minutes
+pass unused, the tab closes, or the agent's MCP session ends); reading the page never
+asks. Typing into password, one-time-code, card or file fields asks every time. See
+[Browser tools](docs/browser-tools.md) for the exact tools and trust boundary.
 
 What the cards protect against, plainly: an agent's mistakes, on pages that describe
 themselves honestly. On most pages Vibewaiting drives the tab from inside the page, and

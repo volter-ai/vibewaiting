@@ -3,7 +3,7 @@
  * the person's approval (browser-policy.ts) waits here, naming the exact
  * action and page, until the person answers: Deny, Allow once, or (for an
  * action an allowance can cover) Allow on <origin> for this task. The
- * background re-runs the one approved operation.
+ * background re-runs the one approved tool call.
  *
  * Against clickjacking, an Allow button works only when the card has been
  * fully visible and still for a second (IntersectionObserver v2, restarted by
@@ -27,8 +27,6 @@ export interface BrowserApprovalCard {
   id: string;
   summary: string;
   reason: string;
-  detail?: string;
-  note?: string;
   /** The origin "Allow on <origin> for this task" allows; absent when only Allow once is offered. */
   allowOrigin?: string;
 }
@@ -61,14 +59,9 @@ const SHIELD_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 13
 
 export function parseBrowserApprovalCard(value: unknown): BrowserApprovalCard | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-  const { id, summary, reason, detail, note, allowOrigin } = value as Record<string, unknown>;
+  const { id, summary, reason, allowOrigin } = value as Record<string, unknown>;
   if (typeof id !== "string" || typeof summary !== "string" || typeof reason !== "string") return null;
-  return {
-    id, summary, reason,
-    ...(typeof detail === "string" ? { detail } : {}),
-    ...(typeof note === "string" ? { note } : {}),
-    ...(typeof allowOrigin === "string" ? { allowOrigin } : {}),
-  };
+  return { id, summary, reason, ...(typeof allowOrigin === "string" ? { allowOrigin } : {}) };
 }
 
 /** When the person last pressed Tab or a pointer inside this frame. */
@@ -109,19 +102,9 @@ export function createBrowserApprovals(
     const summary = document.createElement("strong");
     summary.textContent = card.summary;
     element.append(head, summary);
-    if (card.note) {
-      const note = document.createElement("p");
-      note.textContent = card.note;
-      element.append(note);
-    }
-    if (card.detail) {
-      const detail = document.createElement("pre");
-      detail.textContent = card.detail;
-      element.append(detail);
-    }
     const scope = document.createElement("p");
     scope.textContent = card.allowOrigin
-      ? `Allow once runs only this action. Allowing ${card.allowOrigin} lets the agent act on that site in this tab without asking until 15 minutes pass unused, the tab closes or the agent's session ends (except passwords, codes, card numbers, files and scripts).`
+      ? `Allow once runs only this action. Allowing ${card.allowOrigin} lets the agent act on that site in this tab without asking until 15 minutes pass unused, the tab closes or the agent's session ends (except passwords, codes and card numbers).`
       : "Allow once runs only this action. The agent asks again next time.";
     element.append(scope);
 

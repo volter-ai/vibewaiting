@@ -30,11 +30,8 @@ import { FileMessengerPersistence } from "./persistence.js";
 import { RemoteMessengerServer } from "./remote-messenger.js";
 import type { RemoteDeviceSnapshot } from "@volter-ai-dev/supercode-remote-access/client";
 import { formatWorkspacePath } from "@volter-ai-dev/supercode-ui/controller";
-import { BrowserProviderBroker } from "./browser-provider.js";
-import type {
-  BrowserOperationCall,
-  BrowserOperationResult,
-} from "@volter-ai-dev/supercode-browser-playwright/protocol";
+import { BrowserBroker } from "./browser-broker.js";
+import { browserToolError, type BrowserToolResult } from "./browser-tools.js";
 
 const HARNESS_IDS = new Set<HarnessId>(["claude-code", "codex"]);
 const STABLE_RELAY_ENV_KEYS = [
@@ -347,8 +344,7 @@ export async function runNativeHost(
   const pendingBrowserOperations = new Map<
     string,
     {
-      operation: BrowserOperationCall["operation"];
-      resolve: (result: BrowserOperationResult) => void;
+      resolve: (result: BrowserToolResult) => void;
       pending: ((message: string) => void) | null;
       timer: ReturnType<typeof setTimeout>;
     }
@@ -361,7 +357,6 @@ export async function runNativeHost(
   };
   const browserTimeout = (
     id: string,
-    operation: BrowserOperationCall["operation"],
     milliseconds: number,
     message: string,
   ): ReturnType<typeof setTimeout> =>
@@ -370,30 +365,25 @@ export async function runNativeHost(
       if (!pending) return;
       pendingBrowserOperations.delete(id);
       cancelBrowserOperation(id);
-      pending.resolve({ ok: false, operation, error: { code: "TIMED_OUT", message } });
+      pending.resolve(browserToolError(message));
     }, milliseconds);
-  const browserBroker = new BrowserProviderBroker(async (id, call, { pending, signal, task }) => {
+  const browserBroker = new BrowserBroker(async (id, call, { pending, signal, task }) => {
     if (pendingBrowserOperations.has(id))
       throw new Error(`Duplicate browser operation id: ${id}`);
-    return await new Promise<BrowserOperationResult>((resolve) => {
+    return await new Promise<BrowserToolResult>((resolve) => {
       const timer = browserTimeout(
         id,
-        call.operation,
-        10_000,
-        "The Vibewaiting extension did not answer in 10 seconds.",
+        35_000,
+        "The Vibewaiting extension did not answer in 35 seconds.",
       );
-      pendingBrowserOperations.set(id, { operation: call.operation, resolve, pending, timer });
+      pendingBrowserOperations.set(id, { resolve, pending, timer });
       signal.addEventListener("abort", () => {
         const current = pendingBrowserOperations.get(id);
         if (!current) return;
         pendingBrowserOperations.delete(id);
         clearTimeout(current.timer);
         cancelBrowserOperation(id);
-        current.resolve({
-          ok: false,
-          operation: call.operation,
-          error: { code: "NOT_AVAILABLE", message: "The caller stopped waiting." },
-        });
+        current.resolve(browserToolError("The caller stopped waiting."));
       }, { once: true });
       void writer
         .write({
@@ -409,14 +399,7 @@ export async function runNativeHost(
           if (!pending) return;
           pendingBrowserOperations.delete(id);
           clearTimeout(pending.timer);
-          pending.resolve({
-            ok: false,
-            operation: call.operation,
-            error: {
-              code: "NOT_AVAILABLE",
-              message: error instanceof Error ? error.message : String(error),
-            },
-          });
+          pending.resolve(browserToolError(error instanceof Error ? error.message : String(error)));
         });
     });
   });
@@ -424,11 +407,7 @@ export async function runNativeHost(
   const stopBrowserBroker = async (): Promise<void> => {
     for (const pending of pendingBrowserOperations.values()) {
       clearTimeout(pending.timer);
-      pending.resolve({
-        ok: false,
-        operation: pending.operation,
-        error: { code: "NOT_AVAILABLE", message: "The Vibewaiting browser provider stopped." },
-      });
+      pending.resolve(browserToolError("The Vibewaiting browser broker stopped."));
     }
     pendingBrowserOperations.clear();
     await browserBroker.stop();
@@ -573,14 +552,13 @@ export async function runNativeHost(
       return;
     }
     if (command.type === "browser-operation-pending") {
-      // The extension asked the person to approve this operation; it answers
+      // The extension asked the person to approve this call; it answers
       // within its 90 s decision window.
       const pending = pendingBrowserOperations.get(command.id);
       if (!pending) return;
       clearTimeout(pending.timer);
       pending.timer = browserTimeout(
         command.id,
-        pending.operation,
         110_000,
         "The Vibewaiting extension did not answer after asking the person.",
       );
@@ -592,18 +570,7 @@ export async function runNativeHost(
       if (!pending) return;
       pendingBrowserOperations.delete(command.id);
       clearTimeout(pending.timer);
-      pending.resolve(
-        command.result.operation === pending.operation
-          ? command.result
-          : {
-              ok: false,
-              operation: pending.operation,
-              error: {
-                code: "FAILED",
-                message: "The extension answered with the wrong browser operation.",
-              },
-            },
-      );
+      pending.resolve(command.result);
       return;
     }
     bridge?.receive(command.id, command.payload, "local");

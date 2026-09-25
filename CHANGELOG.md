@@ -5,6 +5,23 @@ the complete generated notes and downloadable artifacts for each version.
 
 ## [Unreleased]
 
+### Changed
+
+- An agent drives the shared tab through `vibewaiting mcp`, a stdio MCP server its
+  harness registers like any other (`claude mcp add vibewaiting -- vibewaiting mcp`).
+  It serves Playwright's own browser tools with the schemas `@playwright/mcp`
+  publishes, answered inside the extension by Playwright's MCP tool backend over
+  AlmostCDP 0.1.28 (or Chrome's debugger on a page that forbids eval), and leaves out
+  the tools that run code, touch files, or reach other tabs and the window. The
+  Supercode browser provider, its discovery files and `browser.script` are gone; no
+  agent code runs in the page or the extension, and no CDP endpoint is exposed to
+  local processes.
+- Approvals apply to tool calls: click, drag, select, type, fill a form, press a key,
+  navigate, go back and answering a dialog ask unless the site is allowed for the
+  agent's task (one `vibewaiting mcp` server); typing into a sensitive field asks
+  once each. Cards describe elements as the page does. Acting on Vibewaiting's own
+  launcher or messenger, on a selector, or on an element inside a frame is refused.
+
 ## [0.2.0] - 2026-09-25
 
 ### Added

@@ -10,7 +10,7 @@ ordinary web page
        └─ extension-owned iframe: full Supercode messenger UI
             └─ browser native messaging (bounded, chunked protocol)
                  └─ Vibewaiting native host
-                      ├─ workspace-scoped Supercode active-tab provider
+                      ├─ browser broker for `vibewaiting mcp` (Playwright's tools on the active tab)
                       ├─ Supercode controller: discovery, resume, input, settings
                       ├─ local terminal service: opaque short-lived attachment grants
                       ├─ local persistence: drafts, unread state, presentation memory
@@ -28,8 +28,9 @@ ordinary web page
 | Overlay lifecycle, geometry, iframe isolation | Widget Shell |
 | Optional managed/headless browser attachment | Lucarne |
 | Stable or temporary public transport | Supercode Remote Access and Volter Tunnel |
-| Browser permissions, context capture, active-tab provider adaptation, native messaging, product composition | Vibewaiting |
-| Canonical browser operations, shared in-page executor, SDK/CLI/MCP projections, provider routing and agent policy | Supercode |
+| Browser permissions, context capture, the browser tools' MCP server and approval policy, native messaging, product composition | Vibewaiting |
+| Browser tools and their schemas | Playwright (`playwright-core`'s MCP tool backend) |
+| Playwright in the browser, the in-page CDP surface | AlmostCDP |
 
 If a change is useful to another Supercode frontend or overlay application without
 Vibewaiting's browser-companion workflow, it likely belongs upstream.
@@ -40,11 +41,11 @@ The content script runs in ordinary pages but receives only the launcher state n
 to render the fob and a redacted remote-access status. The complete messenger and all
 pairing URLs, passcodes, and device details render inside an extension-origin iframe.
 Attach context crosses into the extension only after an explicit attach action and is
-normalized and bounded before native messaging. Separately, Vibewaiting can register
-an active-tab provider for Supercode's canonical browser capability, answered by
-Playwright in a sandboxed extension page against an AlmostCDP surface in the page's
-main world, or through `chrome.debugger` on a page whose Content-Security-Policy
-forbids eval ([browser operations](browser-operations.md)). On the AlmostCDP path
+normalized and bounded before native messaging. Separately, `vibewaiting mcp` serves an
+agent Playwright's own browser tools on the active tab, answered by Playwright's MCP tool
+backend in a sandboxed extension page against an AlmostCDP surface in the page's main
+world, or through `chrome.debugger` on a page whose Content-Security-Policy forbids eval
+([browser tools](browser-tools.md)). On the AlmostCDP path
 events are synthetic; it does not claim downloads, network interception, or
 hidden-tab selection.
 

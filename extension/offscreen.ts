@@ -3,9 +3,8 @@
  * sandboxed page without extension APIs) alive across the tabs' navigations,
  * and connects it to them: each driven tab's surface port, relayed by the
  * tab's content script, a tab's debugger relay from the background, and the
- * background's operation requests.
+ * background's tool calls.
  */
-import type { BrowserOperationResult } from "@volter-ai-dev/supercode-browser-playwright/protocol";
 
 const frame = document.createElement("iframe");
 frame.src = "playwright.html";
@@ -98,8 +97,8 @@ chrome.runtime.onConnect.addListener((port) => {
 
 /**
  * A tab driven over Chrome's debugger (the background's relay, reached by a
- * runtime port) is its own Playwright connection in the host, named by
- * `debugger:<tabId>`.
+ * runtime port) is its own Playwright connection in the host, for that
+ * tab; `debugger:<tabId>` names it here.
  */
 const debuggerTabs = new Map<number, string>();
 function debuggerTarget(host: Window, tabId: number): string {
@@ -130,7 +129,7 @@ function debuggerTarget(host: Window, tabId: number): string {
     else channel.port1.postMessage(message);
   });
   relay.onDisconnect.addListener(close);
-  host.postMessage({ type: "debugger", target }, "*", [channel.port2]);
+  host.postMessage({ type: "debugger", tabId }, "*", [channel.port2]);
   return target;
 }
 
@@ -167,6 +166,11 @@ chrome.runtime.onMessage.addListener((raw, sender, respond) => {
     void ready.then((host) => host.postMessage({ type: "grant-revoke", nonce }, "*"));
     return false;
   }
+  if (message?.type === "vibewaiting:tab-closed" && typeof message.tabId === "number") {
+    const tabId = message.tabId;
+    void ready.then((host) => host.postMessage({ type: "tab-closed", tabId }, "*"));
+    return false;
+  }
   if (message?.type === "vibewaiting:approval-settled" && typeof message.tabId === "number") {
     // The person answered (or no one will): calls on the tab may run again.
     const tabId = message.tabId;
@@ -178,7 +182,7 @@ chrome.runtime.onMessage.addListener((raw, sender, respond) => {
   const grant = typeof message.grant === "string" ? message.grant : undefined;
   const reply = new MessageChannel();
   reply.port1.onmessage = (event) => {
-    respond(event.data as BrowserOperationResult);
+    respond(event.data);
     reply.port1.close();
   };
   void ready.then(async (host) => {
@@ -186,7 +190,7 @@ chrome.runtime.onMessage.addListener((raw, sender, respond) => {
     const target = message.via === "debugger" ? debuggerTarget(host, tabId) : await surfaceOf(tabId) ?? `none:${tabId}`;
     // The origins the person allowed for this call's task on this tab (background.ts).
     const allowed = Array.isArray(message.allowed) ? message.allowed.filter((origin) => typeof origin === "string") : [];
-    host.postMessage({ type: "operation", target, tabId, call: message.call, grant, allowed }, "*", [reply.port2]);
+    host.postMessage({ type: "operation", target, tabId, via: message.via === "debugger" ? "debugger" : "surface", call: message.call, grant, allowed }, "*", [reply.port2]);
   });
   return true;
 });

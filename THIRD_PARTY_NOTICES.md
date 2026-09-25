@@ -22,6 +22,10 @@ provides browser-side JavaScript syntax checking.
 Their exact transitive dependency versions are recorded in `package-lock.json` and
 `experiments/browser-agent/rhai-wasm/Cargo.lock`.
 
+The browser extension bundles AlmostCDP (`@volter/almostcdp` 0.1.28, MIT) with the
+unmodified `playwright-core` 1.63.0 (Apache-2.0) it builds for the browser, whose MCP
+tool backend answers the agent's browser tools.
+
 The Vibewaiting CLI release bundles the production packages below. Exact versions and
 dependency relationships are also recorded in the release CycloneDX SBOM. License
 files supplied by each package remain beside that package under `node_modules` in the
@@ -30,7 +34,6 @@ CLI tarball.
 | Package | Version | License |
 | --- | --- | --- |
 | `@termfleet/terminal` | 0.1.9 | Apache-2.0 |
-| `@volter-ai-dev/supercode-browser-playwright` | 0.2.1 | MIT OR Apache-2.0 |
 | `@volter-ai-dev/supercode-client` | 0.3.42 | MIT OR Apache-2.0 |
 | `@volter-ai-dev/supercode-harness-sdk` | 0.3.18 | MIT OR Apache-2.0 |
 | `@volter-ai-dev/supercode-remote-access` | 0.2.0 | MIT OR Apache-2.0 |

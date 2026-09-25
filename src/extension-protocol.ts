@@ -3,10 +3,10 @@ import type {
   RemotePairingHandoff,
 } from "@volter-ai-dev/supercode-remote-access/client";
 import {
-  parseBrowserOperationResult,
-  type BrowserOperationCall,
-  type BrowserOperationResult,
-} from "@volter-ai-dev/supercode-browser-playwright/protocol";
+  parseBrowserToolResult,
+  type BrowserToolCall,
+  type BrowserToolResult,
+} from "./browser-tools.js";
 
 export type {
   RemoteDeviceSnapshot,
@@ -14,7 +14,7 @@ export type {
 } from "@volter-ai-dev/supercode-remote-access/client";
 
 export const VIBEWAITING_EXTENSION_PROTOCOL =
-  "vibewaiting/extension-v1" as const;
+  "vibewaiting/extension-v2" as const;
 export const NATIVE_HOST_NAME = "ai.volter.vibewaiting";
 
 export type RemoteAccessProvider = "auto" | "cloudflare" | "ngrok" | "stable";
@@ -60,10 +60,10 @@ export type NativeHostCommand =
       protocol: typeof VIBEWAITING_EXTENSION_PROTOCOL;
       type: "browser-operation-response";
       id: string;
-      result: BrowserOperationResult;
+      result: BrowserToolResult;
     }
   | {
-      /** The operation waits for the person's approval, named by `message`. */
+      /** The tool call waits for the person's approval, named by `message`. */
       protocol: typeof VIBEWAITING_EXTENSION_PROTOCOL;
       type: "browser-operation-pending";
       id: string;
@@ -94,10 +94,10 @@ export type NativeHostEvent =
       protocol: typeof VIBEWAITING_EXTENSION_PROTOCOL;
       type: "browser-operation-request";
       id: string;
-      call: BrowserOperationCall;
+      call: BrowserToolCall;
       /** The caller keeps the call open while the person decides. */
       acceptsPending: boolean;
-      /** The agent task the call belongs to (Supercode's), which a per-origin allowance is kept for. */
+      /** The agent task the call belongs to (one `vibewaiting mcp` server), which a per-origin allowance is kept for. */
       task: string | null;
     }
   | {
@@ -155,7 +155,7 @@ export function parseNativeHostCommand(
       : null;
   }
   if (candidate.type === "browser-operation-response") {
-    const result = parseBrowserOperationResult(candidate.result);
+    const result = parseBrowserToolResult(candidate.result);
     return typeof candidate.id === "string" && result
       ? {
           protocol: VIBEWAITING_EXTENSION_PROTOCOL,
