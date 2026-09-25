@@ -27,9 +27,10 @@ npm ci
 npm run check
 ```
 
-`npm run check` is the merge gate: strict TypeScript, the focused Vitest suite, and a
-production build. Chromium tests are deliberately excluded from merge CI and run only
-in the nightly browser workflow or manually with `npm run check:browser`.
+`npm run check` is what the release runs: the store identity and assets, strict
+TypeScript, the dependency audit and a production build. It runs no test suite, and
+nothing waits on it to merge. `npm test` (Vitest) and `npm run check:browser` (Chromium)
+run by hand.
 
 To exercise an unpacked development extension:
 
