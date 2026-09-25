@@ -5,8 +5,6 @@ the complete generated notes and downloadable artifacts for each version.
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-09-25
-
 ### Added
 
 - Vibewaiting can publish its active extension tab as a Supercode browser provider.
