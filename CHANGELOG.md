@@ -11,7 +11,7 @@ the complete generated notes and downloadable artifacts for each version.
   harness registers like any other (`claude mcp add vibewaiting -- vibewaiting mcp`).
   It serves Playwright's own browser tools with the schemas `@playwright/mcp`
   publishes, answered inside the extension by Playwright's MCP tool backend over
-  AlmostCDP 0.1.28 (or Chrome's debugger on a page that forbids eval), and leaves out
+  AlmostCDP 0.1.29 (or Chrome's debugger on a page that forbids eval), and leaves out
   the tools that run code, touch files, read the page's request headers and bodies,
   or reach other tabs and the window; navigation goes only to http and https. The
   Supercode browser provider, its discovery files and `browser.script` are gone; no
@@ -22,6 +22,8 @@ the complete generated notes and downloadable artifacts for each version.
   agent's task (one `vibewaiting mcp` server); typing into a sensitive field asks
   once each. Cards describe elements as the page does. Acting on Vibewaiting's own
   launcher or messenger, on a selector, or on an element inside a frame is refused.
+- On a tab an agent has driven, the page's own alert, confirm and prompt appear to the
+  person as usual instead of being answered with "cancel".
 
 ## [0.2.0] - 2026-09-25
 

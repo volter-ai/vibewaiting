@@ -116,7 +116,10 @@ and the messenger shows the person the same line. Reloading (or any new document
 clears it.
 
 On the in-page path Vibewaiting leaves `navigator.webdriver` as the browser reports it,
-so the person's signed-in sites do not see an automated browser.
+so the person's signed-in sites do not see an automated browser, and the page's own
+alert, confirm and prompt appear to the person as usual: the person answers them, and
+`browser_handle_dialog` there is refused. On the debugger path an agent may answer a
+dialog, and asks first.
 
 Just before an acting call runs, Vibewaiting asks Chrome for the tab: a navigation in
 flight (`pendingUrl`), another origin than the one checked, or, on the in-page path, a
@@ -140,8 +143,10 @@ the tab (on the debugger path the debugger detaches), so Playwright sends it not
 and the next call connects again. What was already sent has happened: a navigation that
 had started keeps loading.
 
-A middle click, a click holding Shift, Control or Meta, and Enter or Space held with one
-of those can open another tab or window, and are refused. A link that opens its own tab
+A middle click and a click holding Shift, Control or Meta can open another tab or window,
+and are refused; with Shift, Control or Meta held, a key press may only be one visible
+character or a key that moves or edits (Tab, the arrows, Home, End, Page Up and Down,
+Backspace, Delete, Escape). A link that opens its own tab
 still can; acting there asks again. Pressing a card's Allow button moves focus into the messenger; an approved
 key press goes back to the element it was approved for before it runs.
 

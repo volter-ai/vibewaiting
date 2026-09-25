@@ -46,8 +46,10 @@ if (!surfaceGlobal.__vibewaitingSurface) {
       succession: { token: message.token },
       title: document.title,
       url: location.href,
-      // The person's own tab: navigator.webdriver stays as the browser has it.
+      // The person's own tab: navigator.webdriver stays as the browser has it,
+      // and the person answers its alert, confirm and prompt themselves.
       automation: false,
+      dialogs: "person",
     });
   };
   window.addEventListener("message", accept);

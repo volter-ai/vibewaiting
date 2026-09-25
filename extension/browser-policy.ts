@@ -77,6 +77,20 @@ function opaque(url: string): boolean {
 const CONSEQUENTIAL =
   /\b(accept|allow|approve|authori[sz]e|buy|checkout|confirm|delete|grant|log\s*out|merge|order|pay|place\s+order|post|publish|purchase|remove|send|sign\s*out|submit|transfer)\b/i;
 
+/** Keys that may be pressed with Shift, Control or Meta held: they move or edit, never open. */
+const MODIFIED_KEYS = new Set([
+  "Tab", "Backspace", "Delete", "Escape", "Home", "End", "PageUp", "PageDown",
+  "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown",
+]);
+
+/** A Playwright key chord's parts, as Playwright splits it ("Shift++" is Shift and "+"). */
+function keyParts(chord: string): string[] {
+  const parts = chord.split("+");
+  // Playwright reads a trailing "+" (an empty last part after "++") as the key "+".
+  if (chord.endsWith("++")) return [...parts.slice(0, -2), "+"];
+  return parts;
+}
+
 /** Calls that only read: they never ask. */
 const READING = new Set([
   "browser_snapshot",
@@ -234,7 +248,8 @@ function findFocusTarget(approvedId: string | null): Element | null {
       }
       return null;
     };
-    return visit(document) ?? active;
+    // The approved element is gone: no key goes to the messenger instead.
+    return visit(document);
   }
   return active && active !== document.body ? active : null;
 }
@@ -337,10 +352,14 @@ export async function approvalFor(
       break;
     }
     case "browser_press_key": {
-      // Shift, Control or Meta with Enter or Space opens a link in another tab or window.
-      // Playwright takes physical names too (ShiftLeft, ControlRight, MetaLeft).
-      if (/(^|\+)(Shift|Control|Meta|ControlOrMeta)(Left|Right)?\+/.test(String(args.key ?? "")) && /\+(Enter|NumpadEnter| |Space)$/.test(String(args.key ?? "")))
-        throw new BrowserRefusal("Enter or Space held with Shift, Control or Meta can open another tab or window; Vibewaiting drives only this tab.");
+      // With Shift, Control or Meta held, a key can open a link in another tab or
+      // window (Enter under any of its spellings, Space). Only keys that cannot
+      // are allowed there: one visible character, or a key that moves or edits.
+      const parts = keyParts(String(args.key ?? ""));
+      const final = parts[parts.length - 1] ?? "";
+      if (parts.slice(0, -1).some((part) => /^(Shift|Control|Meta|ControlOrMeta)(Left|Right)?$/.test(part)) &&
+        !(/^\S$/u.test(final) || MODIFIED_KEYS.has(final)))
+        throw new BrowserRefusal("With Shift, Control or Meta held, Vibewaiting presses only a visible character or a key that moves or edits: others can open another tab or window, and Vibewaiting drives only this tab.");
       const focused = await describeFocused(page, approvedFocus(approvedKey));
       if (focused) elements.push(focused);
       const key = String(args.key ?? "");

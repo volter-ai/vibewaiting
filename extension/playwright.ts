@@ -75,13 +75,13 @@ const running = new Map<string, () => void>();
 /** Playwright as a client of a surface tab's endpoint, over a port this host can cut. */
 function connectSurfaceTab(driven: Driven): Promise<Browser> {
   const channel = new MessageChannel();
-  driven.endpoint!.attachClient(new MessagePortTransport(channel.port1));
+  const transport = new MessagePortTransport(channel.port1);
+  driven.endpoint!.attachClient(transport);
   driven.cut = () => {
     driven.cut = null;
-    // Each end hears the other close: Playwright sends nothing more, and AlmostCDP drops its session.
-    channel.port1.postMessage({ type: "close", code: 1000, reason: "The agent stopped waiting" });
-    channel.port2.postMessage({ type: "close", code: 1000, reason: "The agent stopped waiting" });
-    channel.port1.close();
+    // Closing AlmostCDP's transport ends the client's session on every surface,
+    // and tells Playwright, which sends nothing more.
+    transport.close(1000, "The agent stopped waiting");
   };
   return connectPlaywright(channel.port2);
 }
@@ -213,6 +213,8 @@ async function execute(
   } catch (error) {
     return { result: browserToolError(`The page is not reachable: ${error instanceof Error ? error.message : String(error)}`) };
   }
+  if (call.tool === "browser_handle_dialog" && via === "surface")
+    return { result: browserToolError("On this page the person answers its dialogs themselves; the browser showed it to them.") };
   let approval: BrowserApproval | null;
   try {
     approval = await approvalFor(call, page, dialogs.get(page) ?? null, key);
