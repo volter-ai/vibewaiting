@@ -88,8 +88,8 @@ Remote access is off until you enable it.
 
 An agent gets the tab you are looking at through a normal MCP server its harness
 registers (`claude mcp add vibewaiting -- vibewaiting mcp`): Playwright's own browser
-tools, answered inside the extension, without the tools that run code, touch files or
-reach other tabs. A tool's bounded result crosses the companion to that local agent.
+tools, answered inside the extension, without the tools that run code, touch files,
+read the page's request headers and bodies, or reach other tabs. A tool's bounded result crosses the companion to that local agent.
 Anything an agent does that can change a page or send it input (clicking, typing,
 pressing keys, selecting, dragging, navigating, answering a dialog) asks you first in
 the messenger, unless you allowed that site for the agent's task (until 15 minutes

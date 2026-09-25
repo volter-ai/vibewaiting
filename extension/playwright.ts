@@ -25,7 +25,7 @@ import {
   type PlaywrightMcpBackend,
 } from "@volter/almostcdp/playwright";
 import { browserToolError, parseBrowserToolCall, servedBrowserTool, type BrowserToolResult } from "../src/browser-tools.js";
-import { approvalFor, BrowserRefusal, type BrowserApproval } from "./browser-policy.js";
+import { approvalFor, BrowserRefusal, type BrowserApproval, type OpenDialog } from "./browser-policy.js";
 
 const tools = playwrightMcpTools().filter((tool) => servedBrowserTool(tool.schema.name));
 
@@ -56,6 +56,26 @@ const offers = new Map<string, { key: string; tabId: number }>();
  * it as it starts.
  */
 const awaiting = new Map<number, string>();
+
+/**
+ * Calls the agent stopped waiting for (cancelled, or timed out in the
+ * background), by call id: a queued one never starts, a running one is
+ * aborted before its input when it has not been sent.
+ */
+const cancelled = new Set<string>();
+const running = new Map<string, AbortController>();
+/** Calls from queueing until they answer. */
+const inFlight = new Set<string>();
+
+/** The dialog each page shows, which an approval to answer it names. */
+const dialogs = new WeakMap<Page, OpenDialog | null>();
+let dialogSequence = 0;
+function watchDialogs(page: Page): void {
+  if (dialogs.has(page)) return;
+  dialogs.set(page, null);
+  page.on("dialog", (dialog) => { dialogs.set(page, { type: dialog.type(), message: dialog.message(), sequence: ++dialogSequence }); });
+  page.on("framenavigated", (frame) => { if (frame === page.mainFrame()) dialogs.set(page, null); });
+}
 
 /** A call's answer to the background: the tool's result, and what the policy decided. */
 interface Answer {
@@ -111,7 +131,11 @@ async function stale(page: Page, tabId: number, inPage: boolean, checked: string
 
 function browserOf(driven: Driven, connect: () => Promise<Browser>): Promise<Browser> {
   driven.browser ??= connect().then((browser) => {
-    browser.on("disconnected", () => { driven.browser = null; driven.backend = null; });
+    browser.on("disconnected", () => {
+      void driven.backend?.then((backend) => backend.dispose()).catch(() => undefined);
+      driven.browser = null;
+      driven.backend = null;
+    });
     return browser;
   }, (error: unknown) => {
     driven.browser = null;
@@ -131,6 +155,7 @@ function backendOf(driven: Driven, browser: Browser): Promise<PlaywrightMcpBacke
 }
 
 async function execute(
+  id: string,
   target: string,
   tabId: number,
   via: "surface" | "debugger",
@@ -138,6 +163,7 @@ async function execute(
   grant: string | null,
   allowed: readonly string[],
 ): Promise<Answer> {
+  if (cancelled.delete(id)) return { result: browserToolError("The agent stopped waiting for this call, so it did not run.") };
   const call = parseBrowserToolCall(rawCall);
   if (!call) return { result: browserToolError("Vibewaiting does not serve that tool.") };
   // A grant is a nonce the background issued for this tab; its key stays here.
@@ -161,30 +187,43 @@ async function execute(
   try {
     const browser = await browserOf(driven, () => connectPlaywright(driven.endpoint!));
     page = await pageFor(browser, via === "debugger" ? undefined : target);
+    watchDialogs(page);
     backend = await backendOf(driven, browser);
   } catch (error) {
     return { result: browserToolError(`The page is not reachable: ${error instanceof Error ? error.message : String(error)}`) };
   }
   let approval: BrowserApproval | null;
   try {
-    approval = await approvalFor(call, page);
+    approval = await approvalFor(call, page, dialogs.get(page) ?? null);
   } catch (error) {
     if (error instanceof BrowserRefusal) return { result: browserToolError(error.message) };
     return { result: browserToolError(`The page could not describe what this call acts on, so nothing ran: ${error instanceof Error ? error.message : String(error)}`) };
   }
   let allowanceUsed: string | undefined;
   if (approval) {
-    if (!approval.onceOnly && allowed.includes(approval.origin)) allowanceUsed = approval.origin;
-    else if (key === null) {
+    // An approved re-run runs only the exact action the card named, whichever
+    // button the person pressed (Allow on <origin> also installed an allowance).
+    if (key !== null) {
+      if (key !== approval.key)
+        return { result: browserToolError(`${approval.summary} was not the action the person approved (the page changed), so it did not run.`) };
+    } else if (!approval.onceOnly && allowed.includes(approval.origin)) allowanceUsed = approval.origin;
+    else {
       awaiting.set(tabId, approval.summary);
       return { result: browserToolError(approval.reason), approval };
-    } else if (key !== approval.key) {
-      return { result: browserToolError(`${approval.summary} was not the action the person approved (the page changed), so it did not run.`) };
     }
     const why = await stale(page, tabId, via === "surface", page.url());
     if (why) return { result: browserToolError(why) };
   }
-  const result = await backend.callTool(call.tool, call.arguments);
+  if (cancelled.delete(id)) return { result: browserToolError("The agent stopped waiting for this call, so it did not run.") };
+  const controller = new AbortController();
+  running.set(id, controller);
+  let result: BrowserToolResult;
+  try {
+    result = await backend.callTool(call.tool, call.arguments, controller.signal);
+  } finally {
+    running.delete(id);
+  }
+  if (call.tool === "browser_handle_dialog" && !result.isError) dialogs.set(page, null);
   return allowanceUsed ? { result, allowanceUsed } : { result };
 }
 
@@ -195,6 +234,12 @@ window.addEventListener("message", (event) => {
     type?: unknown; target?: unknown; call?: unknown; grant?: unknown; tabId?: unknown; allowed?: unknown;
     nonce?: unknown; key?: unknown; id?: unknown; via?: unknown;
   } | null;
+  if (message?.type === "cancel" && typeof message.id === "string") {
+    const active = running.get(message.id);
+    if (active) active.abort();
+    else if (inFlight.has(message.id)) cancelled.add(message.id);
+    return;
+  }
   if (message?.type === "settled" && typeof message.tabId === "number") {
     awaiting.delete(message.tabId);
     return;
@@ -245,12 +290,15 @@ window.addEventListener("message", (event) => {
     }, () => { if (debuggerTabs.get(tabId) === driven) debuggerTabs.delete(tabId); });
     return;
   }
-  if (message.type === "operation" && typeof message.target === "string") {
+  if (message.type === "operation" && typeof message.target === "string" && typeof message.id === "string") {
+    const id = message.id;
     const target = message.target;
     const via = message.via === "debugger" ? "debugger" : "surface";
     const grant = typeof message.grant === "string" ? message.grant : null;
     const allowed = Array.isArray(message.allowed) ? message.allowed.filter((origin): origin is string => typeof origin === "string") : [];
-    const run = (queues.get(tabId) ?? Promise.resolve()).then(() => execute(target, tabId, via, message.call, grant, allowed));
+    inFlight.add(id);
+    const run = (queues.get(tabId) ?? Promise.resolve()).then(() => execute(id, target, tabId, via, message.call, grant, allowed))
+      .finally(() => { inFlight.delete(id); cancelled.delete(id); });
     const settled = run.catch(() => undefined);
     queues.set(tabId, settled);
     void settled.then(() => { if (queues.get(tabId) === settled) queues.delete(tabId); });

@@ -3,7 +3,7 @@
  * own MCP tools (the core set `@playwright/mcp` serves), answered inside the
  * extension by Playwright's MCP tool backend, less the tools that would reach
  * past the page the person shares (running code, files, other tabs, the
- * window). Shared by the MCP server (`vibewaiting mcp`), the native host and
+ * window, the headers and bodies of the page's own requests). Shared by the MCP server (`vibewaiting mcp`), the native host and
  * the extension.
  */
 
@@ -15,8 +15,6 @@ export const SERVED_BROWSER_TOOLS = [
   "browser_hover",
   "browser_wait_for",
   "browser_console_messages",
-  "browser_network_requests",
-  "browser_network_request",
   "browser_click",
   "browser_drag",
   "browser_select_option",

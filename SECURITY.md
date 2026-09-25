@@ -15,7 +15,8 @@ the agent processes it controls.
 - The content script remembers the latest pointed or focused element reference for
   Attach. An agent reaches the tab only through `vibewaiting mcp`, which serves
   Playwright's own browser tools less those that run code (`browser_evaluate`,
-  `browser_run_code_unsafe`), touch files, or reach other tabs and the window; no CDP
+  `browser_run_code_unsafe`), touch files, read the page's request headers and bodies,
+  or reach other tabs and the window; navigation goes only to http and https; no CDP
   endpoint is exposed to local processes, and no agent code runs in the page or the
   extension. Every acting call (click, drag, select, type, fill a form, press a key,
   navigate, go back, answer a dialog) runs only after the person allows it in the

@@ -166,6 +166,11 @@ chrome.runtime.onMessage.addListener((raw, sender, respond) => {
     void ready.then((host) => host.postMessage({ type: "grant-revoke", nonce }, "*"));
     return false;
   }
+  if (message?.type === "vibewaiting:operation-cancel" && typeof message.id === "string") {
+    const id = message.id;
+    void ready.then((host) => host.postMessage({ type: "cancel", id }, "*"));
+    return false;
+  }
   if (message?.type === "vibewaiting:tab-closed" && typeof message.tabId === "number") {
     const tabId = message.tabId;
     void ready.then((host) => host.postMessage({ type: "tab-closed", tabId }, "*"));
@@ -177,7 +182,7 @@ chrome.runtime.onMessage.addListener((raw, sender, respond) => {
     void ready.then((host) => host.postMessage({ type: "settled", tabId }, "*"));
     return false;
   }
-  if (message?.type !== "vibewaiting:browser-operation" || typeof message.tabId !== "number") return false;
+  if (message?.type !== "vibewaiting:browser-operation" || typeof message.tabId !== "number" || typeof message.id !== "string") return false;
   const tabId = message.tabId;
   const grant = typeof message.grant === "string" ? message.grant : undefined;
   const reply = new MessageChannel();
@@ -190,7 +195,7 @@ chrome.runtime.onMessage.addListener((raw, sender, respond) => {
     const target = message.via === "debugger" ? debuggerTarget(host, tabId) : await surfaceOf(tabId) ?? `none:${tabId}`;
     // The origins the person allowed for this call's task on this tab (background.ts).
     const allowed = Array.isArray(message.allowed) ? message.allowed.filter((origin) => typeof origin === "string") : [];
-    host.postMessage({ type: "operation", target, tabId, via: message.via === "debugger" ? "debugger" : "surface", call: message.call, grant, allowed }, "*", [reply.port2]);
+    host.postMessage({ type: "operation", id: message.id, target, tabId, via: message.via === "debugger" ? "debugger" : "surface", call: message.call, grant, allowed }, "*", [reply.port2]);
   });
   return true;
 });

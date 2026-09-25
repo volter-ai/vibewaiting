@@ -463,6 +463,7 @@ function handleNativeMessage(raw: unknown): void {
     if (pending) {
       clearTimeout(pending.timer);
       pendingAgentBrowserRequests.delete(message.id);
+      cancelInHost(message.id);
     }
     return;
   }
@@ -503,6 +504,11 @@ function handleNativeMessage(raw: unknown): void {
     };
     broadcastRemoteAccess();
   }
+}
+
+/** A call the agent no longer waits for never starts, and one running is aborted (playwright.ts). */
+function cancelInHost(id: string): void {
+  void chrome.runtime.sendMessage({ type: "vibewaiting:operation-cancel", id }).catch(() => undefined);
 }
 
 function sendAgentBrowserResponse(id: string, result: BrowserToolResult): void {
@@ -573,6 +579,8 @@ async function runBrowserOperation(
   if (existing) clearTimeout(existing.timer);
   const timer = setTimeout(() => {
     if (!pendingAgentBrowserRequests.delete(id)) return;
+    // The agent is told it failed: it must not also happen later.
+    cancelInHost(id);
     sendAgentBrowserResponse(id, browserToolError(`The active page did not answer in ${CALL_TIMEOUT_MS / 1000} seconds.`));
   }, CALL_TIMEOUT_MS);
   pendingAgentBrowserRequests.set(id, { tabId, timer, acceptsPending, task });
@@ -588,6 +596,7 @@ async function runBrowserOperation(
     }
     raw = await chrome.runtime.sendMessage({
       type: "vibewaiting:browser-operation",
+      id,
       tabId,
       via,
       call,
@@ -747,6 +756,13 @@ function settleApproval(
     allowances.set(key, origins);
   }
   if (decision === "approve" || decision === "allow-origin") {
+    // The companion's wait restarts: the approved call now runs.
+    nativePort?.postMessage({
+      protocol: VIBEWAITING_EXTENSION_PROTOCOL,
+      type: "browser-operation-pending",
+      id: approval.requestId,
+      message: `The person allowed it in Vibewaiting; running: ${approval.summary}`,
+    });
     void runBrowserOperation(approval.requestId, approval.tabId, approval.call, approval.nonce, true, approval.task);
     return;
   }

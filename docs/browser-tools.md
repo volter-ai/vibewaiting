@@ -10,19 +10,21 @@ codex mcp add vibewaiting -- vibewaiting mcp
 
 The tools are Playwright's own: the core set `@playwright/mcp` serves, with the schemas
 it publishes (`dist/browser-tools.json`, generated from the pinned `playwright-core` at
-build time). Vibewaiting serves 17 of them:
+build time). Vibewaiting serves 15 of them:
 
 - **Reading:** `browser_snapshot`, `browser_take_screenshot`, `browser_find`,
-  `browser_hover`, `browser_wait_for`, `browser_console_messages`,
-  `browser_network_requests`, `browser_network_request`.
+  `browser_hover`, `browser_wait_for`, `browser_console_messages`.
 - **Acting:** `browser_click`, `browser_drag`, `browser_select_option`, `browser_type`,
   `browser_fill_form`, `browser_press_key`, `browser_navigate`, `browser_navigate_back`,
   `browser_handle_dialog`.
 
 It does not serve the tools that reach past the page the person shares:
 `browser_evaluate` and `browser_run_code_unsafe` (code), `browser_file_upload` and
-`browser_drop` (files), `browser_tabs` and `browser_close` (other tabs), and
-`browser_resize` (the person's window). No agent code runs in the page or in the
+`browser_drop` (files), `browser_tabs` and `browser_close` (other tabs),
+`browser_resize` (the person's window), and `browser_network_requests` and
+`browser_network_request` (the headers and bodies of the page's own requests, which
+carry its cookies and tokens). `browser_navigate` goes only to http and https
+addresses. No agent code runs in the page or in the
 extension.
 
 `vibewaiting mcp` forwards each call to the running native companion, over a loopback
@@ -50,11 +52,13 @@ when a call arrives:
   and at once when the person cancels the bar, closes the tab or revokes website
   access; the next call attaches it again. Other tabs are not attached.
 
-An agent acts on elements by the refs of the page's own snapshot (`e12`): a call that
-names a selector, or an element inside a frame, is refused. After an action the answer
+An agent names elements by the refs of the page's own snapshot (`e12`), for reading
+calls too: a call that names a selector, or an element inside a frame, is refused, and so
+is a key press while focus is inside a frame. After an action the answer
 says what ran; the agent takes `browser_snapshot` to see the page again (there is no
 file system for the snapshot `@playwright/mcp` would save beside it). Vibewaiting's own
-messenger and launcher appear in snapshots, and every call on them is refused.
+messenger and launcher appear in snapshots, and every call on them, or a key press while
+one of them has focus, is refused.
 
 ## Approvals
 
@@ -64,7 +68,7 @@ per-site permissions (`extension/browser-policy.ts`):
 - **Asks:** every acting call: click, drag, select, type, fill a form, press a key,
   navigate, go back, and answering the page's dialog.
 - **Never asks:** reading: snapshots, screenshots, finding text, waiting, hovering,
-  console and network reads.
+  console reads.
 - **Allowing a site:** a card offers **Deny**, **Allow once** and **Allow on
   &lt;origin&gt; for this task**. The allowance covers that exact origin, in that tab,
   for the agent task that asked, and lives only in the extension's memory. A task is
@@ -121,6 +125,18 @@ Playwright then resolves the ref again as it acts. One race remains: the page ca
 between that check and the input, and the input then reaches what the ref names at that
 moment.
 
+An approval holds only for the exact call on the same elements of the same document:
+each element is identified on its document the first time the policy sees it, each
+document when an approval is asked, and a dialog by its own opening, so an element
+described the same way, a new document at the same address, or the next dialog is
+another action. An approved re-run, whether the person pressed Allow once or Allow on
+&lt;origin&gt;, runs only if its call still matches the card. A card for a dialog names
+its kind and message.
+
+A call the agent stopped waiting for (its call was cancelled, or the extension told it
+the page did not answer in 30 seconds) never starts if it was still queued, and is
+aborted if it was running.
+
 The Playwright host takes messages only from the offscreen document that holds it
 (trusted `postMessage` events from its parent), and an approved re-run only by a
 single-use nonce the background issued for that tab; the approved action's key never
@@ -128,7 +144,7 @@ travels with a call.
 
 When a call asks, the messenger in that tab opens with the card and the agent's call
 stays open: the companion writes a `pending` line and `vibewaiting mcp` reports it as MCP
-progress while it waits. While a card is open, every other call on that tab is refused
+progress while it waits, and writes another when the person allows it and the call runs. While a card is open, every other call on that tab is refused
 with the pending decision named, both when it is routed and again when a call queued
 earlier starts to run.
 

@@ -4,7 +4,7 @@
  * or send it input asks the person, unless they allowed the tab's current
  * origin for this agent task (the Playwright host applies that allowance).
  * Reading never asks (snapshots, screenshots, finding text, waiting, hovering,
- * console and network reads). Some calls ask even on an allowed origin, and
+ * console reads). Navigating anywhere but an http or https address is refused. Some calls ask even on an allowed origin, and
  * can only be allowed once: typing into a sensitive field (a password,
  * one-time code or card field, or a field that was one earlier on this
  * document), and anything on a page without a real origin (about:, data:,
@@ -49,6 +49,18 @@ interface Described {
   inForm: boolean;
   /** Part of Vibewaiting's own launcher or messenger. */
   own: boolean;
+  /** A frame element: input focused there goes to a document the policy cannot see. */
+  frame: boolean;
+  /** This element's identity on its document, fixed when the policy first sees it. */
+  id: string;
+}
+
+/** The dialog the page shows, as the host saw it open. */
+export interface OpenDialog {
+  type: string;
+  message: string;
+  /** Distinguishes one dialog from the next with the same words. */
+  sequence: number;
 }
 
 /** Pages without a real origin: an allowance could never name them. */
@@ -73,8 +85,6 @@ const READING = new Set([
   "browser_hover",
   "browser_wait_for",
   "browser_console_messages",
-  "browser_network_requests",
-  "browser_network_request",
 ]);
 
 /** "shop.example/cart": the page as the person reads it in the address bar. */
@@ -119,7 +129,9 @@ function warning(elements: readonly Described[]): string {
  */
 function describeInPage(element: Element): Described {
   const mark = Symbol.for("vibewaiting.sensitive");
+  const identity = Symbol.for("vibewaiting.element");
   const marked = element as Element & { [key: symbol]: string | undefined };
+  const id = marked[identity] ??= crypto.randomUUID();
   const tag = element.localName;
   const input = element as HTMLInputElement;
   const type = (element.getAttribute("type") ?? "").toLowerCase();
@@ -169,6 +181,8 @@ function describeInPage(element: Element): Described {
     textField: tag === "textarea" || (tag === "input" && textTypes.includes(type)),
     inForm: element.closest("form") !== null,
     own,
+    frame: ["iframe", "frame", "object", "embed"].includes(tag),
+    id,
   };
 }
 
@@ -184,7 +198,7 @@ async function describeTarget(page: Page, target: unknown): Promise<Described & 
   return { ...described, target };
 }
 
-/** The element keys go to, described by the page. */
+/** The element keys go to, described by the page; keys for a frame or Vibewaiting's own overlay are refused. */
 async function describeFocused(page: Page): Promise<Described | null> {
   const focused = await page.evaluateHandle(() => {
     let active = document.activeElement;
@@ -194,16 +208,30 @@ async function describeFocused(page: Page): Promise<Described | null> {
   const element = focused.asElement();
   const described = element ? await element.evaluate(describeInPage) : null;
   await focused.dispose();
+  if (described?.frame) throw new BrowserRefusal("Focus is inside a frame, whose element Vibewaiting cannot see, so keys are not sent there.");
+  if (described?.own) throw new BrowserRefusal("Focus is on Vibewaiting's own launcher or messenger; an agent cannot type there.");
   return described;
+}
+
+/** The document the page shows now: an approval holds only for the document it was asked on. */
+function documentOf(page: Page): Promise<string> {
+  return page.evaluate(() => {
+    const holder = document as Document & { [key: symbol]: string | undefined };
+    return holder[Symbol.for("vibewaiting.document")] ??= crypto.randomUUID();
+  });
 }
 
 /**
  * The approval this call asks for, or null when it never asks (reading).
  * Describes the elements it would act on by asking the page.
  */
-export async function approvalFor(call: BrowserToolCall, page: Page): Promise<BrowserApproval | null> {
-  if (READING.has(call.tool)) return null;
+export async function approvalFor(call: BrowserToolCall, page: Page, dialog: OpenDialog | null): Promise<BrowserApproval | null> {
   const args = call.arguments;
+  if (READING.has(call.tool)) {
+    // A reading call still names only the page's own elements, never the overlay's.
+    if (args.target !== undefined) await describeTarget(page, args.target);
+    return null;
+  }
   const url = page.url();
   const place = `${pagePlace(url)} (as described by the page)`;
   let origin = originOf(url);
@@ -266,17 +294,21 @@ export async function approvalFor(call: BrowserToolCall, page: Page): Promise<Br
     }
     case "browser_navigate": {
       const destination = String(args.url ?? "");
+      // A javascript: or data: address would run the agent's code as the page.
+      if (!/^https?:$/.test((() => { try { return new URL(destination).protocol; } catch { return ""; } })()))
+        throw new BrowserRefusal("Vibewaiting navigates only to http and https addresses.");
       summary = `Go to ${pagePlace(destination)} from ${pagePlace(url)}`;
       // Allowing covers the site the tab goes to.
       origin = originOf(destination);
-      if (opaque(destination)) onceWhy = "That address has no real origin, so the person approves each such navigation, once each.";
       break;
     }
     case "browser_navigate_back":
       summary = `Go back from ${place}`;
       break;
     case "browser_handle_dialog":
-      summary = `${args.accept === true ? "Accept" : "Dismiss"} the page's dialog on ${place}${args.accept === true ? " — may confirm what it asks" : ""}`;
+      if (!dialog) throw new BrowserRefusal("The page shows no dialog.");
+      summary = `${args.accept === true ? "Accept" : "Dismiss"} the page's ${dialog.type} ${quoted(dialog.message)} on ${place}${args.accept === true ? " — may confirm what it asks" : ""}`;
+      identity = dialog;
       break;
     default:
       throw new BrowserRefusal(`Vibewaiting does not serve ${call.tool}.`);
@@ -285,7 +317,8 @@ export async function approvalFor(call: BrowserToolCall, page: Page): Promise<Br
   const typing = ["browser_type", "browser_fill_form", "browser_press_key"].includes(call.tool);
   if (typing && sensitive) onceWhy = `Typing into a ${sensitive} field always needs the person's approval, once each.`;
   return {
-    key: JSON.stringify([call.tool, url, args, identity]),
+    // A page showing a dialog cannot answer script, and the dialog is the identity.
+    key: JSON.stringify([call.tool, url, call.tool === "browser_handle_dialog" ? null : await documentOf(page), args, identity]),
     summary,
     reason: onceWhy ?? `Acting on a page needs the person's approval unless they allowed ${origin} for this task.`,
     origin,
