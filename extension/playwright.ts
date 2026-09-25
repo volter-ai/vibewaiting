@@ -99,7 +99,7 @@ async function execute(
       operation: operationOf(call),
       error: {
         code: "APPROVAL_REQUIRED",
-        message: `Waiting for the person's decision on “${deciding}” in Vibewaiting; no other browser operation runs on this tab until they answer.`,
+        message: `Waiting for the person's decision on “${deciding}” in Vibewaiting; no other browser operation runs on this tab until they answer (this call was already queued when the card appeared).`,
       },
     };
   let page: Page;

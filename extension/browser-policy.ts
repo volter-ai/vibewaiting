@@ -65,8 +65,11 @@ function namesOf(node: GuardedNode): string[] {
 
 /** What the element under a point is called, as best known. */
 function overName(nodes: readonly GuardedNode[], ancestors: readonly GuardedNode[]): string | null {
-  const name = [...nodes, ...ancestors].flatMap(namesOf)[0];
-  return name ? quoted(name.replace(/\s+/g, " ").trim()) : null;
+  // The document itself is not what is under the pointer.
+  const controls = ancestors.filter((node) => !/^(RootWebArea|WebArea)$/.test(node.role));
+  const name = [...nodes, ...controls].flatMap(namesOf)[0];
+  if (name) return quoted(name.replace(/\s+/g, " ").trim());
+  return nodes[0]?.tag ? `a <${nodes[0].tag}> element` : null;
 }
 
 const POINTER_VERBS: Record<string, string> = {
