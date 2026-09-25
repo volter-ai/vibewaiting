@@ -40,7 +40,12 @@ const queues = new Map<string, Promise<unknown>>();
  * approved standing.
  */
 interface Grant { key: string; used: boolean }
-interface Running { grant: Grant | null; approval: BrowserApproval | null }
+interface Running {
+  grant: Grant | null;
+  approval: BrowserApproval | null;
+  /** The origins the person allowed for this call's task on its tab. */
+  allowed: readonly string[];
+}
 const running = new WeakMap<Page, Running>();
 
 /**
@@ -53,9 +58,9 @@ const running = new WeakMap<Page, Running>();
 const awaiting = new Map<number, string>();
 
 async function guard(page: Page, request: PlaywrightAction, inPage: boolean): Promise<void> {
-  const approval = approvalFor(request, page.url(), inPage);
-  if (!approval) return;
   const call = running.get(page);
+  const approval = approvalFor(request, page.url(), inPage, call?.allowed ?? []);
+  if (!approval) return;
   if (call?.grant && !call.grant.used && call.grant.key === approval.key) {
     call.grant.used = true;
     return;
@@ -90,6 +95,7 @@ async function execute(
   tabId: number,
   call: unknown,
   grant: string | null,
+  allowed: readonly string[],
 ): Promise<BrowserOperationResult & { approval?: BrowserApproval }> {
   if (grant !== null) awaiting.delete(tabId);
   const deciding = awaiting.get(tabId);
@@ -125,7 +131,7 @@ async function execute(
     });
     executors.set(page, executor);
   }
-  const state: Running = { grant: grant === null ? null : { key: grant, used: false }, approval: null };
+  const state: Running = { grant: grant === null ? null : { key: grant, used: false }, approval: null, allowed };
   running.set(page, state);
   try {
     const result = await executor.execute(call);
@@ -142,7 +148,9 @@ async function execute(
 
 window.addEventListener("message", (event) => {
   if (event.source !== window.parent) return;
-  const message = event.data as { type?: unknown; target?: unknown; call?: unknown; grant?: unknown; tabId?: unknown } | null;
+  const message = event.data as {
+    type?: unknown; target?: unknown; call?: unknown; grant?: unknown; tabId?: unknown; allowed?: unknown;
+  } | null;
   if (message?.type === "settled" && typeof message.tabId === "number") {
     awaiting.delete(message.tabId);
     return;
@@ -167,7 +175,8 @@ window.addEventListener("message", (event) => {
     const target = message.target;
     const tabId = message.tabId;
     const grant = typeof message.grant === "string" ? message.grant : null;
-    const run = (queues.get(target) ?? Promise.resolve()).then(() => execute(target, tabId, message.call, grant));
+    const run = (queues.get(target) ?? Promise.resolve()).then(() => execute(target, tabId, message.call, grant,
+      Array.isArray(message.allowed) ? message.allowed.filter((origin): origin is string => typeof origin === "string") : []));
     const settled = run.catch(() => undefined);
     queues.set(target, settled);
     void settled.then(() => { if (queues.get(target) === settled) queues.delete(target); });

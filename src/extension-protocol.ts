@@ -97,6 +97,8 @@ export type NativeHostEvent =
       call: BrowserOperationCall;
       /** The caller keeps the call open while the person decides. */
       acceptsPending: boolean;
+      /** The agent task the call belongs to (Supercode's), which a per-origin allowance is kept for. */
+      task: string | null;
     }
   | {
       /** The agent's call ended before an answer: an approval it waits on is void. */

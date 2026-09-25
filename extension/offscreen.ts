@@ -144,7 +144,9 @@ chrome.runtime.onMessage.addListener((raw, sender, respond) => {
   };
   void ready.then((host) => {
     const target = message.via === "debugger" ? debuggerTarget(host, tabId) : surfaceOf(tabId).id;
-    host.postMessage({ type: "operation", target, tabId, call: message.call, grant }, "*", [reply.port2]);
+    // The origins the person allowed for this call's task on this tab (background.ts).
+    const allowed = Array.isArray(message.allowed) ? message.allowed.filter((origin) => typeof origin === "string") : [];
+    host.postMessage({ type: "operation", target, tabId, call: message.call, grant, allowed }, "*", [reply.port2]);
   });
   return true;
 });

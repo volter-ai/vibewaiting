@@ -48,6 +48,8 @@ const pendingAgentBrowserRequests = new Map<
     timer: ReturnType<typeof setTimeout>;
     /** The caller keeps the call open while the person decides (Supercode `pending` lines). */
     acceptsPending: boolean;
+    /** The agent task the call belongs to: per-origin allowances are kept for it. */
+    task: string | null;
   }
 >();
 /**
@@ -63,6 +65,10 @@ interface PendingApproval {
   key: string;
   /** Single-use: the offscreen document honours the grant only with it. */
   nonce: string;
+  task: string | null;
+  origin: string;
+  onceOnly: boolean;
+  note?: string;
   summary: string;
   reason: string;
   detail?: string;
@@ -448,7 +454,8 @@ function handleNativeMessage(raw: unknown): void {
   if (message.type === "browser-operation-request") {
     const call = parseBrowserOperationCall(message.call);
     if (typeof message.id === "string" && call)
-      void routeBrowserOperation(message.id, call, message.acceptsPending === true);
+      void routeBrowserOperation(message.id, call, message.acceptsPending === true,
+        typeof message.task === "string" ? message.task : null);
     return;
   }
   if (message.type === "browser-operation-cancelled") {
@@ -526,6 +533,7 @@ async function routeBrowserOperation(
   id: string,
   call: BrowserOperationCall,
   acceptsPending: boolean,
+  task: string | null,
 ): Promise<void> {
   const offscreen = chrome.offscreen;
   if (!offscreen) {
@@ -580,7 +588,7 @@ async function routeBrowserOperation(
     });
     return;
   }
-  await runBrowserOperation(id, tabId, call, null, acceptsPending);
+  await runBrowserOperation(id, tabId, call, null, acceptsPending, task);
 }
 
 /**
@@ -594,6 +602,7 @@ async function runBrowserOperation(
   call: BrowserOperationCall,
   grant: string | null,
   acceptsPending: boolean,
+  task: string | null,
 ): Promise<void> {
   const offscreen = chrome.offscreen!;
   const existing = pendingAgentBrowserRequests.get(id);
@@ -606,7 +615,7 @@ async function runBrowserOperation(
       error: { code: "TIMED_OUT", message: "The active page did not answer in 10 seconds." },
     });
   }, 10_000);
-  pendingAgentBrowserRequests.set(id, { tabId, operation: call.operation, timer, acceptsPending });
+  pendingAgentBrowserRequests.set(id, { tabId, operation: call.operation, timer, acceptsPending, task });
   let raw: unknown;
   debuggerBusy(tabId);
   try {
@@ -623,6 +632,7 @@ async function runBrowserOperation(
       via,
       call,
       ...(grant === null ? {} : { grant }),
+      allowed: allowedOrigins(task, tabId),
     });
   } catch (error) {
     raw = {
@@ -642,7 +652,7 @@ async function runBrowserOperation(
   if (approval && pending?.tabId === tabId && pending.acceptsPending) {
     pendingAgentBrowserRequests.delete(id);
     clearTimeout(pending.timer);
-    askPerson(id, tabId, call, approval);
+    askPerson(id, tabId, call, approval, task);
     return;
   }
   if (approval && pending?.tabId === tabId) {
@@ -659,19 +669,47 @@ async function runBrowserOperation(
   finishAgentBrowserRequest(id, tabId, raw);
 }
 
+/**
+ * Origins the person allowed, per agent task and tab ("Allow on <origin> for
+ * this task"). An allowance covers exactly that origin on that tab for that
+ * task: a task id is never reused, so it ends with the task, and it goes with
+ * the tab.
+ */
+const allowances = new Map<string, Set<string>>();
+function allowanceKey(task: string, tabId: number): string {
+  return `${tabId}\n${task}`;
+}
+function allowedOrigins(task: string | null, tabId: number): string[] {
+  return task === null ? [] : [...allowances.get(allowanceKey(task, tabId)) ?? []];
+}
+
 function releaseTab(tabId: number): void {
   void chrome.runtime.sendMessage({ type: "vibewaiting:approval-settled", tabId }).catch(() => undefined);
 }
 
 /** The approval a refused operation asks for (playwright.ts attaches it to an `APPROVAL_REQUIRED` result). */
-function approvalRequest(raw: unknown): { key: string; summary: string; reason: string; detail?: string } | null {
+interface ApprovalRequest {
+  key: string;
+  summary: string;
+  reason: string;
+  detail?: string;
+  note?: string;
+  origin: string;
+  onceOnly: boolean;
+}
+
+function approvalRequest(raw: unknown): ApprovalRequest | null {
   const result = record(raw);
   const error = record(result?.error);
   const approval = record(result?.approval);
   if (result?.ok !== false || error?.code !== "APPROVAL_REQUIRED" || !approval) return null;
-  const { key, summary, reason, detail } = approval;
-  if (typeof key !== "string" || typeof summary !== "string" || typeof reason !== "string") return null;
-  return { key, summary, reason, ...(typeof detail === "string" ? { detail } : {}) };
+  const { key, summary, reason, detail, note, origin, onceOnly } = approval;
+  if (typeof key !== "string" || typeof summary !== "string" || typeof reason !== "string" || typeof origin !== "string") return null;
+  return {
+    key, summary, reason, origin, onceOnly: onceOnly !== false,
+    ...(typeof detail === "string" ? { detail } : {}),
+    ...(typeof note === "string" ? { note } : {}),
+  };
 }
 
 function approvalCard(approval: PendingApproval): unknown {
@@ -682,6 +720,10 @@ function approvalCard(approval: PendingApproval): unknown {
       summary: approval.summary,
       reason: approval.reason,
       ...(approval.detail ? { detail: approval.detail } : {}),
+      ...(approval.note ? { note: approval.note } : {}),
+      // "Allow on <origin> for this task" exists only for an action an
+      // allowance can cover, from a caller that names its task.
+      ...(!approval.onceOnly && approval.task !== null ? { allowOrigin: approval.origin } : {}),
     },
   };
 }
@@ -691,7 +733,8 @@ function askPerson(
   requestId: string,
   tabId: number,
   call: BrowserOperationCall,
-  approval: { key: string; summary: string; reason: string; detail?: string },
+  approval: ApprovalRequest,
+  task: string | null,
 ): void {
   const id = crypto.randomUUID();
   const nonce = Array.from(crypto.getRandomValues(new Uint8Array(32)), (byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -701,6 +744,7 @@ function askPerson(
     tabId,
     call,
     nonce,
+    task,
     ...approval,
     timer: setTimeout(() => settleApproval(id, "expired"), APPROVAL_WINDOW_MS),
   };
@@ -723,7 +767,7 @@ function askPerson(
 /** The person's answer (or its absence): Approve re-runs the one operation; anything else refuses it. */
 function settleApproval(
   id: string,
-  decision: "approve" | "deny" | "expired" | "closed" | "abandoned",
+  decision: "approve" | "allow-origin" | "deny" | "expired" | "closed" | "abandoned",
 ): void {
   const approval = pendingApprovals.get(id);
   if (!approval) return;
@@ -737,8 +781,14 @@ function settleApproval(
   for (const [port, guest] of guestPorts)
     if (guest.tabId === approval.tabId)
       post(port, { type: "browser-approval-settled", id, decision });
-  if (decision === "approve") {
-    void runBrowserOperation(approval.requestId, approval.tabId, approval.call, approval.nonce, true);
+  if (decision === "allow-origin" && approval.task !== null && !approval.onceOnly) {
+    const key = allowanceKey(approval.task, approval.tabId);
+    const origins = allowances.get(key) ?? new Set<string>();
+    origins.add(approval.origin);
+    allowances.set(key, origins);
+  }
+  if (decision === "approve" || decision === "allow-origin") {
+    void runBrowserOperation(approval.requestId, approval.tabId, approval.call, approval.nonce, true, approval.task);
     return;
   }
   void chrome.runtime.sendMessage({ type: "vibewaiting:grant-revoke", nonce: approval.nonce }).catch(() => undefined);
@@ -1346,7 +1396,7 @@ chrome.runtime.onConnect.addListener((port) => {
     if (
       message?.type === "browser-approval-decision" &&
       typeof message.id === "string" &&
-      (message.decision === "approve" || message.decision === "deny")
+      (message.decision === "approve" || message.decision === "allow-origin" || message.decision === "deny")
     ) {
       // Only the messenger in the approval's own tab can answer it.
       if (pendingApprovals.get(message.id)?.tabId === guest.tabId)
@@ -1410,6 +1460,7 @@ chrome.runtime.onMessage.addListener((raw) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   drivenTabs.delete(tabId);
+  for (const key of [...allowances.keys()]) if (key.startsWith(`${tabId}\n`)) allowances.delete(key);
   for (const approval of [...pendingApprovals.values()])
     if (approval.tabId === tabId) settleApproval(approval.id, "closed");
 });

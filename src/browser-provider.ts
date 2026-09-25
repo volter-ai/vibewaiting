@@ -21,6 +21,7 @@ interface BrowserProviderRequest {
   token: string;
   call: BrowserOperationCall;
   acceptsPending: boolean;
+  task: string | null;
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -64,6 +65,8 @@ export class BrowserProviderBroker {
         pending: ((message: string) => void) | null;
         /** Aborted when the caller's connection closes before the answer. */
         signal: AbortSignal;
+        /** The agent task the call belongs to, when the caller names one. */
+        task: string | null;
       },
     ) => Promise<BrowserOperationResult>,
   ) {}
@@ -157,6 +160,7 @@ export class BrowserProviderBroker {
             token,
             call,
             acceptsPending: Array.isArray(candidate.accepts) && candidate.accepts.includes("pending"),
+            task: typeof candidate.task === "string" && candidate.task.length <= 200 ? candidate.task : null,
           };
         }
       } catch {
@@ -181,6 +185,7 @@ export class BrowserProviderBroker {
       void this.dispatch(request.id, request.call, {
         pending: request.acceptsPending ? pending : null,
         signal: closed.signal,
+        task: request.task,
       })
         .then((result) => { answered = true; writeSocket(socket, {
           protocol: SUPERCODE_BROWSER_PROVIDER_PROTOCOL,

@@ -1,8 +1,16 @@
 /**
  * The approval cards in the messenger: an agent's browser action that needs
  * the person's approval (browser-policy.ts) waits here, naming the exact
- * action and page, until the person approves it once or denies it. The
- * background re-runs the one approved operation; nothing is approved standing.
+ * action and page, until the person answers: Deny, Allow once, or (for an
+ * action an allowance can cover) Allow on <origin> for this task. The
+ * background re-runs the one approved operation.
+ *
+ * Against clickjacking, an Allow button works only when the card has been
+ * fully visible and still for a second (IntersectionObserver v2, restarted by
+ * any move or resize of the card or of the messenger frame) and the pointer
+ * has rested on that button for half a second (restarted whenever it enters
+ * or leaves the button, and by any move of the frame). Both are measured
+ * inside the extension's own frame.
  */
 
 export interface BrowserApprovalCard {
@@ -10,18 +18,25 @@ export interface BrowserApprovalCard {
   summary: string;
   reason: string;
   detail?: string;
+  note?: string;
+  /** The origin "Allow on <origin> for this task" allows; absent when only Allow once is offered. */
+  allowOrigin?: string;
 }
+
+export type BrowserApprovalDecision = "approve" | "allow-origin" | "deny";
 
 export interface BrowserApprovals {
   readonly node: HTMLElement;
   show(card: BrowserApprovalCard): void;
   settle(id: string, decision: string): void;
-  /** The messenger frame moved or resized: every Approve waits a fresh second. */
+  /** The messenger frame moved or resized: every Allow waits afresh. */
   restart(): void;
 }
 
-/** Approve stays disabled until the card has been continuously visible this long. */
+/** An Allow button works only after the card has been visible and still this long. */
 const VISIBLE_BEFORE_APPROVE_MS = 1_000;
+/** ... and the pointer has rested on that button this long. */
+const REST_BEFORE_APPROVE_MS = 500;
 
 interface VisibilityEntry extends IntersectionObserverEntry {
   /** Intersection Observer v2: true only when nothing covers, fades or distorts the element. */
@@ -32,13 +47,18 @@ const SHIELD_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 13
 
 export function parseBrowserApprovalCard(value: unknown): BrowserApprovalCard | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-  const { id, summary, reason, detail } = value as Record<string, unknown>;
+  const { id, summary, reason, detail, note, allowOrigin } = value as Record<string, unknown>;
   if (typeof id !== "string" || typeof summary !== "string" || typeof reason !== "string") return null;
-  return { id, summary, reason, ...(typeof detail === "string" ? { detail } : {}) };
+  return {
+    id, summary, reason,
+    ...(typeof detail === "string" ? { detail } : {}),
+    ...(typeof note === "string" ? { note } : {}),
+    ...(typeof allowOrigin === "string" ? { allowOrigin } : {}),
+  };
 }
 
 export function createBrowserApprovals(
-  decide: (id: string, decision: "approve" | "deny") => void,
+  decide: (id: string, decision: BrowserApprovalDecision) => void,
 ): BrowserApprovals {
   const node = document.createElement("div");
   node.className = "vw-approvals";
@@ -60,47 +80,81 @@ export function createBrowserApprovals(
     head.append(label);
     const summary = document.createElement("strong");
     summary.textContent = card.summary;
-    const scope = document.createElement("p");
-    scope.textContent = "Approve once lets only this action run. The agent asks again next time.";
-    element.append(head, summary, scope);
+    element.append(head, summary);
+    if (card.note) {
+      const note = document.createElement("p");
+      note.textContent = card.note;
+      element.append(note);
+    }
     if (card.detail) {
       const detail = document.createElement("pre");
       detail.textContent = card.detail;
       element.append(detail);
     }
+    const scope = document.createElement("p");
+    scope.textContent = card.allowOrigin
+      ? `Allow once runs only this action. Allowing ${card.allowOrigin} lets the agent act on that site in this tab without asking until its task ends (except passwords, codes, card numbers, files and scripts).`
+      : "Allow once runs only this action. The agent asks again next time.";
+    element.append(scope);
+
     const actions = document.createElement("div");
     actions.className = "vw-approval-actions";
     const deny = document.createElement("button");
     deny.type = "button";
     deny.className = "vw-approval-deny";
     deny.textContent = "Deny";
-    const approve = document.createElement("button");
-    approve.type = "button";
-    approve.className = "vw-approval-approve";
-    approve.textContent = "Approve once";
-    // Clickjacking: Approve works only after the card has been fully visible
-    // on screen (not covered, faded or transformed, as the browser itself
-    // judges it) and still for a continuous second. Hiding it, moving or
-    // resizing it (or the messenger frame, reported by the page's content
-    // script through `restart`) starts the count again.
-    approve.disabled = true;
-    let visibleTimer: ReturnType<typeof setTimeout> | undefined;
+    const button = (text: string, decision: BrowserApprovalDecision): HTMLButtonElement => {
+      const allow = document.createElement("button");
+      allow.type = "button";
+      allow.className = "vw-approval-approve";
+      allow.dataset.decision = decision;
+      allow.textContent = text;
+      return allow;
+    };
+    const allows = [button("Allow once", "approve")];
+    if (card.allowOrigin) allows.push(button(`Allow on ${card.allowOrigin} for this task`, "allow-origin"));
+
     let answered = false;
+    // The visibility gate: shared by the card's buttons.
+    let visibleTimer: ReturnType<typeof setTimeout> | undefined;
     let visible = false;
-    let place = "";
-    let tracking = 0;
+    let still = false;
+    // The rest gate: per button.
+    const rested = new Map<HTMLButtonElement, boolean>();
+    const restTimers = new Map<HTMLButtonElement, ReturnType<typeof setTimeout>>();
+    const hovered = new Set<HTMLButtonElement>();
+    const render = (): void => {
+      for (const allow of allows) {
+        const armed = !answered && still && rested.get(allow) === true;
+        allow.setAttribute("aria-disabled", String(!armed));
+        allow.dataset.armed = String(armed);
+      }
+    };
+    const rest = (allow: HTMLButtonElement): void => {
+      clearTimeout(restTimers.get(allow));
+      rested.set(allow, false);
+      if (hovered.has(allow))
+        restTimers.set(allow, setTimeout(() => { rested.set(allow, true); render(); }, REST_BEFORE_APPROVE_MS));
+      render();
+    };
     const restart = (): void => {
       clearTimeout(visibleTimer);
-      if (answered) return;
-      approve.disabled = true;
-      if (visible)
-        visibleTimer = setTimeout(() => { if (!answered) approve.disabled = false; }, VISIBLE_BEFORE_APPROVE_MS);
+      still = false;
+      if (!answered && visible)
+        visibleTimer = setTimeout(() => { still = true; render(); }, VISIBLE_BEFORE_APPROVE_MS);
+      for (const allow of allows) rest(allow);
     };
+    for (const allow of allows) {
+      allow.addEventListener("pointerenter", () => { hovered.add(allow); rest(allow); });
+      allow.addEventListener("pointerleave", () => { hovered.delete(allow); rest(allow); });
+    }
     const observer = new IntersectionObserver((entries) => {
       const entry = entries[entries.length - 1] as VisibilityEntry | undefined;
       visible = entry?.isIntersecting === true && entry.isVisible === true;
       restart();
     }, { threshold: [1], trackVisibility: true, delay: 100 } as IntersectionObserverInit);
+    let place = "";
+    let tracking = 0;
     const track = (): void => {
       const rect = element.getBoundingClientRect();
       const now = `${rect.x},${rect.y},${rect.width},${rect.height}`;
@@ -111,21 +165,28 @@ export function createBrowserApprovals(
     tracking = requestAnimationFrame(track);
     const stop = (): void => {
       clearTimeout(visibleTimer);
+      for (const timer of restTimers.values()) clearTimeout(timer);
       cancelAnimationFrame(tracking);
       observer.disconnect();
     };
-    const answer = (decision: "approve" | "deny"): void => {
+    const answer = (decision: BrowserApprovalDecision, pressed: HTMLButtonElement): void => {
       answered = true;
       stop();
+      render();
       deny.disabled = true;
-      approve.disabled = true;
-      (decision === "approve" ? approve : deny).textContent = decision === "approve" ? "Approving…" : "Denying…";
+      for (const allow of allows) allow.disabled = true;
+      pressed.textContent = decision === "deny" ? "Denying…" : "Allowing…";
       decide(card.id, decision);
     };
-    deny.addEventListener("click", () => answer("deny"));
-    approve.addEventListener("click", () => answer("approve"));
-    actions.append(deny, approve);
+    deny.addEventListener("click", () => { if (!answered) answer("deny", deny); });
+    for (const allow of allows)
+      allow.addEventListener("click", () => {
+        if (answered || allow.dataset.armed !== "true") return;
+        answer(allow.dataset.decision as BrowserApprovalDecision, allow);
+      });
+    actions.append(deny, ...allows);
     element.append(actions);
+    render();
     cards.set(card.id, { element, stop, restart });
     // No focus move: a keystroke meant for the page never answers the card.
     node.append(element);
@@ -144,11 +205,12 @@ export function createBrowserApprovals(
     status.className = "vw-approval-status";
     status.setAttribute("role", "status");
     status.textContent =
-      decision === "approve" ? "Approved once. The agent's action is running."
-        : decision === "deny" ? "Denied. The agent was told."
-          : decision === "expired" ? "No answer in time. Nothing ran."
-            : decision === "abandoned" ? "The agent stopped waiting. Nothing ran."
-              : "The tab closed. Nothing ran.";
+      decision === "approve" ? "Allowed once. The agent's action is running."
+        : decision === "allow-origin" ? "Allowed on this site for this task. The agent's action is running."
+          : decision === "deny" ? "Denied. The agent was told."
+            : decision === "expired" ? "No answer in time. Nothing ran."
+              : decision === "abandoned" ? "The agent stopped waiting. Nothing ran."
+                : "The tab closed. Nothing ran.";
     element.querySelector(".vw-approval-actions")?.replaceWith(status);
     // A card the agent walked away from stays until the person has read it.
     if (decision === "abandoned") {

@@ -88,7 +88,8 @@ body { background:transparent }
 .vw-approval-deny { color:var(--vw-approval-fg); background:var(--vw-approval-bg) }
 .vw-approval-approve { border-color:transparent !important; color:#fff; background:var(--vw-approval-fg) }
 .vw-approval-actions button:hover,.vw-approval-actions button:focus-visible { outline:2px solid var(--vw-approval-accent); outline-offset:1px }
-.vw-approval-actions button:disabled { opacity:.55; cursor:default; outline:0 }
+.vw-approval-actions button:disabled,.vw-approval-actions button[aria-disabled="true"] { opacity:.55; cursor:default; outline:0 }
+.vw-approval-actions { flex-wrap:wrap }
 .vw-approval .vw-approval-status { color:var(--vw-approval-fg); font-weight:600 }
 
 @media (prefers-color-scheme:dark) {

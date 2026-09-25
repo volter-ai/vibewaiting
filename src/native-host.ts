@@ -372,7 +372,7 @@ export async function runNativeHost(
       cancelBrowserOperation(id);
       pending.resolve({ ok: false, operation, error: { code: "TIMED_OUT", message } });
     }, milliseconds);
-  const browserBroker = new BrowserProviderBroker(async (id, call, { pending, signal }) => {
+  const browserBroker = new BrowserProviderBroker(async (id, call, { pending, signal, task }) => {
     if (pendingBrowserOperations.has(id))
       throw new Error(`Duplicate browser operation id: ${id}`);
     return await new Promise<BrowserOperationResult>((resolve) => {
@@ -402,6 +402,7 @@ export async function runNativeHost(
           id,
           call,
           acceptsPending: pending !== null,
+          task,
         })
         .catch((error: unknown) => {
           const pending = pendingBrowserOperations.get(id);
