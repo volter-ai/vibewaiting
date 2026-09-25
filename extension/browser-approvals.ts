@@ -8,10 +8,12 @@
  * Against clickjacking, an Allow button works only when the card has been
  * fully visible and still for a second (IntersectionObserver v2, restarted by
  * any move or resize of the card or of the messenger frame) and the pointer
- * has rested on that button for half a second: the half second starts when
- * the pointer, having moved onto the button, stops moving; any movement of
- * 3 px or more, leaving or re-entering the button, and any move of the frame
- * restart it. Both are measured inside the extension's own frame, where a
+ * had rested on that button for half a second when it is pressed: the half
+ * second starts when the pointer, having moved onto the button, stops moving;
+ * any movement of 3 px or more, leaving or re-entering the button, and any
+ * move of the frame restart it, and movement between press and release is
+ * ignored. An unarmed button reads "Hold still to allow", and a press on it
+ * says so, so a click that does nothing is never silent. Both are measured inside the extension's own frame, where a
  * change in `screenX - clientX` (or its Y twin) between pointer events is a
  * move of the frame itself.
  */
@@ -113,6 +115,8 @@ export function createBrowserApprovals(
       allow.type = "button";
       allow.className = "vw-approval-approve";
       allow.dataset.decision = decision;
+      allow.dataset.label = text;
+      allow.setAttribute("aria-label", text);
       allow.textContent = text;
       return allow;
     };
@@ -133,12 +137,13 @@ export function createBrowserApprovals(
         const armed = !answered && still && rested.get(allow) === true;
         allow.setAttribute("aria-disabled", String(!armed));
         allow.dataset.armed = String(armed);
+        if (!answered) allow.textContent = !armed && hovered.has(allow) ? "Hold still to allow" : allow.dataset.label ?? "";
       }
     };
     // The rest starts where the pointer, having moved on the button, is; a
     // button that appears (or is moved) under a pointer that is not moving
     // never arms, and moving 3 px or more starts it again.
-    const anchors = new Map<HTMLButtonElement, { x: number; y: number }>();
+    const anchors = new Map<HTMLButtonElement, { x: number; y: number; at: number }>();
     const rest = (allow: HTMLButtonElement): void => {
       clearTimeout(restTimers.get(allow));
       restTimers.delete(allow);
@@ -147,11 +152,12 @@ export function createBrowserApprovals(
       render();
     };
     const moved = (allow: HTMLButtonElement, event: PointerEvent): void => {
-      if (!hovered.has(allow)) return;
+      // Movement while pressed belongs to the click, not to the rest.
+      if (!hovered.has(allow) || (event.buttons & 1) === 1) return;
       const anchor = anchors.get(allow);
       if (anchor && Math.hypot(event.clientX - anchor.x, event.clientY - anchor.y) < REST_TOLERANCE_PX) return;
       rest(allow);
-      anchors.set(allow, { x: event.clientX, y: event.clientY });
+      anchors.set(allow, { x: event.clientX, y: event.clientY, at: performance.now() });
       restTimers.set(allow, setTimeout(() => { restTimers.delete(allow); rested.set(allow, true); render(); }, REST_BEFORE_APPROVE_MS));
     };
     // The frame's place on the screen, as pointer events report it.
@@ -212,11 +218,33 @@ export function createBrowserApprovals(
       decide(card.id, decision);
     };
     deny.addEventListener("click", () => { if (!answered) answer("deny", deny); });
-    for (const allow of allows)
-      allow.addEventListener("click", () => {
-        if (answered || allow.dataset.armed !== "true") return;
+    // Arming is decided when the button is pressed: the card has been visible
+    // and still for a second, and the pointer has rested on this button for
+    // half a second.
+    const pressedArmed = new Map<HTMLButtonElement, boolean>();
+    const hint = document.createElement("p");
+    hint.className = "vw-approval-status";
+    hint.setAttribute("role", "status");
+    for (const allow of allows) {
+      allow.addEventListener("pointerdown", (event) => {
+        const anchor = anchors.get(allow);
+        pressedArmed.set(allow, event.isTrusted && !answered && still && hovered.has(allow) &&
+          anchor !== undefined && performance.now() - anchor.at >= REST_BEFORE_APPROVE_MS);
+      });
+      allow.addEventListener("click", (event) => {
+        if (answered) return;
+        // A trusted keyboard press (no pointer) needs only the visibility gate.
+        const armed = pressedArmed.get(allow) === true || (event.isTrusted && event.detail === 0 && still);
+        pressedArmed.delete(allow);
+        if (!armed) {
+          hint.textContent = "Hold the pointer still on the button for half a second, then click.";
+          if (!hint.isConnected) actions.before(hint);
+          allow.textContent = "Hold still to allow";
+          return;
+        }
         answer(allow.dataset.decision as BrowserApprovalDecision, allow);
       });
+    }
     actions.append(deny, ...allows);
     element.append(actions);
     render();

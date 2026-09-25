@@ -280,7 +280,7 @@ window.addEventListener("message", (event) => {
   if (!event.isTrusted || event.source !== window.parent) return;
   const message = event.data as {
     type?: unknown; target?: unknown; call?: unknown; grant?: unknown; tabId?: unknown; allowed?: unknown;
-    nonce?: unknown; key?: unknown;
+    nonce?: unknown; key?: unknown; id?: unknown;
   } | null;
   if (message?.type === "settled" && typeof message.tabId === "number") {
     awaiting.delete(message.tabId);
@@ -298,7 +298,13 @@ window.addEventListener("message", (event) => {
   const port = event.ports[0];
   if (!port) return;
   if (message?.type === "surface") {
-    endpoint.attachSurface(new MessagePortTransport(port));
+    // The offscreen document names the target this transport belongs to, from
+    // Chrome's own sender: the surface is refused unless it is that target.
+    if (typeof message.id !== "string") {
+      port.close();
+      return;
+    }
+    endpoint.attachSurface(new MessagePortTransport(port), { id: message.id });
     return;
   }
   if (message?.type === "debugger" && typeof message.target === "string") {

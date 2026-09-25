@@ -18,16 +18,27 @@ const ready = new Promise<Window>((resolve) => {
 });
 document.body.append(frame);
 
-/** Each tab's surface identity: the target id Playwright finds it by, and its succession token. */
-const surfaces = new Map<number, { id: string; token: string }>();
-function surfaceOf(tabId: number): { id: string; token: string } {
-  let surface = surfaces.get(tabId);
-  if (!surface) {
-    const bytes = crypto.getRandomValues(new Uint8Array(24));
-    surface = { id: crypto.randomUUID(), token: Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("") };
-    surfaces.set(tabId, surface);
-  }
-  return surface;
+/**
+ * Each tab's surface id: the target Playwright finds the tab by. It is issued
+ * per tab, and the identity of a surface connection comes only from Chrome:
+ * the port's own sender (its tab, top frame and document), never from
+ * anything the page says. The Playwright host binds each connection to the id
+ * issued for its tab, so a page that learned another tab's id cannot claim it.
+ */
+const surfaceIds = new Map<number, string>();
+function surfaceOf(tabId: number): string {
+  let id = surfaceIds.get(tabId);
+  if (!id) surfaceIds.set(tabId, id = crypto.randomUUID());
+  return id;
+}
+
+/** Each document's succession token: fresh per document, the previous one retired. */
+const documentTokens = new Map<number, { documentId: string | undefined; token: string }>();
+function tokenFor(tabId: number, documentId: string | undefined): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(24));
+  const token = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  documentTokens.set(tabId, { documentId, token });
+  return token;
 }
 
 chrome.runtime.onConnect.addListener((port) => {
@@ -37,6 +48,7 @@ chrome.runtime.onConnect.addListener((port) => {
     port.disconnect();
     return;
   }
+  const documentId = port.sender?.documentId;
   const channel = new MessageChannel();
   channel.port1.onmessage = (event) => {
     try { port.postMessage(event.data); } catch { /* The document is gone; its disconnect follows. */ }
@@ -45,10 +57,12 @@ chrome.runtime.onConnect.addListener((port) => {
   port.onDisconnect.addListener(() => {
     channel.port1.postMessage({ type: "close" });
     channel.port1.close();
+    if (documentTokens.get(tabId)?.documentId === documentId) documentTokens.delete(tabId);
   });
   void ready.then((host) => {
-    host.postMessage({ type: "surface" }, "*", [channel.port2]);
-    port.postMessage({ type: "hello", ...surfaceOf(tabId) });
+    const id = surfaceOf(tabId);
+    host.postMessage({ type: "surface", tabId, id }, "*", [channel.port2]);
+    port.postMessage({ type: "hello", id, token: tokenFor(tabId, documentId) });
   });
 });
 
@@ -138,7 +152,7 @@ chrome.runtime.onMessage.addListener((raw, sender, respond) => {
     reply.port1.close();
   };
   void ready.then((host) => {
-    const target = message.via === "debugger" ? debuggerTarget(host, tabId) : surfaceOf(tabId).id;
+    const target = message.via === "debugger" ? debuggerTarget(host, tabId) : surfaceOf(tabId);
     // The origins the person allowed for this call's task on this tab (background.ts).
     const allowed = Array.isArray(message.allowed) ? message.allowed.filter((origin) => typeof origin === "string") : [];
     host.postMessage({ type: "operation", target, tabId, call: message.call, grant, allowed }, "*", [reply.port2]);

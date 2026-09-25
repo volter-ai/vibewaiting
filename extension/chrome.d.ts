@@ -9,6 +9,7 @@ interface ExtensionPort {
     url?: string;
     tab?: { id?: number; windowId?: number };
     frameId?: number;
+    documentId?: string;
   };
   postMessage(message: unknown): void;
   disconnect(): void;
