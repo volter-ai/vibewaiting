@@ -25,16 +25,19 @@ document.body.append(frame);
  * from anything the page says, and the Playwright host binds the connection
  * to that id. An operation on a tab goes to its current document's id only.
  */
-const currentSurface = new Map<number, string>();
+const currentSurface = new Map<number, { id: string; order: number }>();
 const surfaceWaiters = new Map<number, Array<(id: string) => void>>();
-function surfaceIdFor(tabId: number, documentId: string | undefined): Promise<string | null> {
+function surfaceIdFor(tabId: number, documentId: string | undefined): Promise<{ id: string; order: number } | null> {
   return chrome.runtime.sendMessage({ type: "vibewaiting:surface-id", tabId, documentId })
-    .then((id) => typeof id === "string" ? id : null, () => null);
+    .then((minted) => {
+      const { id, order } = (minted ?? {}) as { id?: unknown; order?: unknown };
+      return typeof id === "string" && typeof order === "number" ? { id, order } : null;
+    }, () => null);
 }
 /** The tab's current surface id, waiting briefly for a document that is still connecting. */
 function surfaceOf(tabId: number): Promise<string | null> {
-  const id = currentSurface.get(tabId);
-  if (id) return Promise.resolve(id);
+  const current = currentSurface.get(tabId);
+  if (current) return Promise.resolve(current.id);
   return new Promise((resolve) => {
     const waiters = surfaceWaiters.get(tabId) ?? [];
     const timer = setTimeout(() => resolve(null), 5_000);
@@ -61,6 +64,7 @@ chrome.runtime.onConnect.addListener((port) => {
   }
   const documentId = port.sender?.documentId;
   let surfaceId: string | null = null;
+  let connected = true;
   const channel = new MessageChannel();
   channel.port1.onmessage = (event) => {
     try { port.postMessage(event.data); } catch { /* The document is gone; its disconnect follows. */ }
@@ -70,18 +74,23 @@ chrome.runtime.onConnect.addListener((port) => {
     channel.port1.postMessage({ type: "close" });
     channel.port1.close();
     if (documentTokens.get(tabId)?.documentId === documentId) documentTokens.delete(tabId);
+    connected = false;
     // The document is gone: its id is no one's target any more.
-    if (currentSurface.get(tabId) === surfaceId) currentSurface.delete(tabId);
+    if (currentSurface.get(tabId)?.id === surfaceId) currentSurface.delete(tabId);
   });
-  void Promise.all([ready, surfaceIdFor(tabId, documentId)]).then(([host, id]) => {
-    if (!id) {
-      port.disconnect();
+  void Promise.all([ready, surfaceIdFor(tabId, documentId)]).then(([host, minted]) => {
+    // Ids arrive asynchronously: a document that has gone, or whose id is
+    // older than the tab's current one, never becomes the tab's target.
+    const stale = !minted || !connected || (currentSurface.get(tabId)?.order ?? -1) > minted.order;
+    if (stale) {
+      if (connected) port.disconnect();
       return;
     }
+    const id = minted.id;
     surfaceId = id;
     host.postMessage({ type: "surface", tabId, id }, "*", [channel.port2]);
     port.postMessage({ type: "hello", id, token: tokenFor(tabId, documentId) });
-    currentSurface.set(tabId, id);
+    currentSurface.set(tabId, { id, order: minted.order });
     for (const waiter of surfaceWaiters.get(tabId) ?? []) waiter(id);
     surfaceWaiters.delete(tabId);
   });

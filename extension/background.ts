@@ -670,6 +670,9 @@ async function runBrowserOperation(
   finishAgentBrowserRequest(id, tabId, raw);
 }
 
+/** Surface ids are minted in this order: a later document's id is newer. */
+let surfaceMintOrder = 0;
+
 /**
  * Origins the person allowed, per agent task and tab ("Allow on <origin> for
  * this task"), with when each last let an action through. An allowance covers
@@ -1334,7 +1337,11 @@ chrome.runtime.onConnect.addListener((port) => {
     return;
   }
   if (port.name === "vibewaiting:content") {
-    const { tabId } = senderTab(port);
+    const sender = port.sender as (typeof port.sender & { documentLifecycle?: string }) | undefined;
+    // Only the tab's own active top document speaks for the tab: never a
+    // prerendered, cached or frame document.
+    const { tabId } = sender?.frameId === 0 && (sender.documentLifecycle ?? "active") === "active"
+      ? senderTab(port) : { tabId: null };
     contentPorts.add(port);
     if (tabId !== null) {
       const priorPage = contentPageByTab.get(tabId);
@@ -1463,7 +1470,7 @@ chrome.runtime.onMessage.addListener((raw, sender, respond) => {
     // A fresh target id for each document's in-page connection, minted here
     // for the tab and document Chrome named (relayed by the offscreen document).
     if (sender.tab || sender.url !== chrome.runtime.getURL("offscreen.html")) return;
-    respond(crypto.randomUUID());
+    respond({ id: crypto.randomUUID(), order: ++surfaceMintOrder });
     return;
   }
   if (message?.type === "vibewaiting:tab-state" && typeof message.tabId === "number") {

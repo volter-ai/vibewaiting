@@ -25,10 +25,21 @@ interface VibewaitingContentGlobal {
 }
 
 const contentGlobal = globalThis as VibewaitingContentGlobal;
-if (!contentGlobal.__vibewaitingContentMounted) {
+const mount = (): void => {
+  if (contentGlobal.__vibewaitingContentMounted) return;
   contentGlobal.__vibewaitingContentMounted = true;
   mountVibewaitingContent();
-}
+};
+// A prerendered page mounts when the person activates it, not before: until
+// then it is not the tab's page.
+const prerendering = (document as Document & { prerendering?: boolean }).prerendering === true;
+if (prerendering) document.addEventListener("prerenderingchange", mount, { once: true });
+else mount();
+// A page restored from the back/forward cache was torn down on pagehide; it
+// mounts again and connects as a new document (a fresh id through the hello).
+addEventListener("pageshow", (event) => {
+  if (event.persisted) mount();
+});
 
 function mountVibewaitingContent(): void {
   const contentPort = chrome.runtime.connect({ name: "vibewaiting:content" });
