@@ -12,7 +12,7 @@ active-tab provider for Supercode's browser capability, is tracked with its Supe
 ## Next
 
 - One-click provisioning and revocation of a durable remote origin
-- Signed browser-store packaging and automatic updates
+- Chrome Web Store publication (the signed extension is in review) and automatic updates
 - Setup diagnostics and guided recovery beyond the current permission onboarding
 - Verified Firefox and Windows support
 - Deeper mobile terminal input, selection, and session-switching parity
