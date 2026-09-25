@@ -27,8 +27,8 @@ switch the same conversation into a familiar terminal.
 - **Attach the page in one action.** Send a selection, link, image, GitHub object,
   Hacker News item, or the visible page without copying it by hand.
 - **Let Supercode agents use the tab you are already in.** Vibewaiting hosts
-  Supercode's bounded accessibility and Playwright-shaped in-page package—without
-  CDP or a second automation browser.
+  Playwright itself, running inside the extension against the page—without a
+  second automation browser or the `debugger` permission.
 
 ## Try the alpha
 

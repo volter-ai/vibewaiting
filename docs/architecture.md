@@ -41,11 +41,10 @@ to render the fob and a redacted remote-access status. The complete messenger an
 pairing URLs, passcodes, and device details render inside an extension-origin iframe.
 Attach context crosses into the extension only after an explicit attach action and is
 normalized and bounded before native messaging. Separately, Vibewaiting can register
-an active-tab provider for Supercode's canonical browser capability. That path carries
-structured locator plans rather than executable source and returns bounded
-JSON. Supercode's Playwright-shaped in-page package is a DOM compatibility surface: events are synthetic
-and it does not claim CDP semantics, arbitrary evaluation, trusted input, downloads,
-network interception, or hidden-tab selection.
+an active-tab provider for Supercode's canonical browser capability, answered by
+Playwright in a sandboxed extension page against an AlmostCDP surface in the page's
+main world ([browser operations](browser-operations.md)). Events are synthetic; it does
+not claim trusted input, downloads, network interception, or hidden-tab selection.
 
 HTTP and HTTPS access is optional rather than an install-time host grant. Onboarding
 discloses the page-facing behavior before requesting access. The background worker

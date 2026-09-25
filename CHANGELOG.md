@@ -9,8 +9,9 @@ the complete generated notes and downloadable artifacts for each version.
 
 - Vibewaiting can publish its active extension tab as a Supercode browser provider.
   Supercode owns the shared SDK, CLI, MCP operation registry, and policy surface;
-  Vibewaiting supplies bounded accessibility snapshots and structured DOM actions
-  without CDP or arbitrary page evaluation.
+  Vibewaiting answers all 21 operations with unmodified Playwright running in a
+  sandboxed extension page against an AlmostCDP surface in the tab, including
+  `browser.script`, and keeps the tab across navigations.
 
 ### Security
 

@@ -34,7 +34,7 @@ import { BrowserProviderBroker } from "./browser-provider.js";
 import type {
   BrowserOperationCall,
   BrowserOperationResult,
-} from "@volter-ai-dev/supercode-playwright-shim";
+} from "@volter-ai-dev/supercode-browser-playwright/protocol";
 
 const HARNESS_IDS = new Set<HarnessId>(["claude-code", "codex"]);
 const STABLE_RELAY_ENV_KEYS = [

@@ -24,7 +24,11 @@ declare const chrome: {
     openOptionsPage(): Promise<void>;
     sendMessage(message: unknown): Promise<unknown>;
     onConnect: ExtensionEvent<(port: ExtensionPort) => void>;
-    onMessage: ExtensionEvent<(message: unknown) => void>;
+    onMessage: ExtensionEvent<(
+      message: unknown,
+      sender: { tab?: { id?: number }; frameId?: number },
+      sendResponse: (response: unknown) => void,
+    ) => unknown>;
     onInstalled: ExtensionEvent<(details: { reason: "install" | "update" | "chrome_update" | "shared_module_update" }) => void>;
   };
   permissions: {
@@ -41,13 +45,19 @@ declare const chrome: {
       js: string[];
       matches: string[];
       persistAcrossSessions?: boolean;
-      runAt?: "document_idle";
+      runAt?: "document_start" | "document_idle";
+      world?: "ISOLATED" | "MAIN";
     }>): Promise<void>;
     unregisterContentScripts(filter?: { ids?: string[] }): Promise<void>;
     executeScript(injection: {
       files: string[];
       target: { tabId: number };
+      world?: "ISOLATED" | "MAIN";
     }): Promise<unknown[]>;
+  };
+  offscreen: {
+    createDocument(parameters: { url: string; reasons: Array<"IFRAME_SCRIPTING">; justification: string }): Promise<void>;
+    hasDocument(): Promise<boolean>;
   };
   storage: {
     local: {
@@ -95,6 +105,7 @@ declare const chrome: {
       active?: boolean;
       lastFocusedWindow?: boolean;
     }): Promise<Array<{ id?: number; url?: string; title?: string; windowId?: number }>>;
+    onRemoved: ExtensionEvent<(tabId: number) => void>;
   };
 };
 declare module "qrcode-generator" {

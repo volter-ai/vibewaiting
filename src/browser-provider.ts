@@ -8,7 +8,7 @@ import {
   SUPERCODE_BROWSER_PROVIDER_PROTOCOL,
   type BrowserOperationCall,
   type BrowserOperationResult,
-} from "@volter-ai-dev/supercode-playwright-shim";
+} from "@volter-ai-dev/supercode-browser-playwright/protocol";
 
 const MAX_WIRE_BYTES = 1_000_000;
 const DEFAULT_TIMEOUT_MS = 12_000;
@@ -43,7 +43,7 @@ function writeSocket(socket: Socket, value: unknown): void {
   socket.end(`${JSON.stringify(value)}\n`);
 }
 
-/** Publishes Vibewaiting's active-tab executor as a Supercode browser provider. */
+/** Publishes Vibewaiting's active tab as a Supercode browser provider. */
 export class BrowserProviderBroker {
   private server: Server | null = null;
   private discoveryPath: string | null = null;
@@ -93,11 +93,12 @@ export class BrowserProviderBroker {
         name: "Vibewaiting active tab",
         fidelity: {
           target: "active-or-leased-http-page",
-          domEvents: "synthetic",
-          accessibility: "dom-derived",
-          cdp: false,
-          arbitraryEvaluate: false,
+          implementation: "playwright-core 1.63.0 over AlmostCDP",
+          transport: "almostcdp",
+          accessibility: "playwright-aria-snapshot",
+          syntheticEvents: true,
           trustedInput: false,
+          script: "extension-sandbox-playwright-page",
         },
       },
     })}\n`, { encoding: "utf8", mode: 0o600 });

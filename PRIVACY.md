@@ -24,6 +24,7 @@ the tunnel provider you choose to a paired device.
 | Optional access to websites | Place the isolated messenger overlay on ordinary pages, capture context you explicitly attach, and let invoked local browser tools inspect or operate the active page. You grant or revoke HTTP/HTTPS access from Vibewaiting settings. |
 | Native messaging | Chrome cannot read local coding-agent transcripts, process state, or terminals. This connects the extension-owned messenger to the on-device Vibewaiting companion that can bridge those existing Claude Code and Codex sessions. |
 | Storage | Remember the selected workspace and local UI preferences. |
+| Offscreen document | Keep the extension's Playwright host running while an invoked browser tool drives a tab across its navigations. It has no page access of its own. |
 | Context menus | Offer a precise fallback for attaching a link. |
 
 The page-facing content script receives only enough coding-agent state to render the

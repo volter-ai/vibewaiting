@@ -12,7 +12,7 @@ import {
   parseBrowserOperationResult,
   type BrowserOperationCall,
   type BrowserOperationResult,
-} from "@volter-ai-dev/supercode-playwright-shim";
+} from "@volter-ai-dev/supercode-browser-playwright/protocol";
 import {
   launcherBadgeFromState,
   type LauncherBadgeTone,
@@ -25,6 +25,7 @@ import {
 const SETTINGS_KEY = "vibewaiting:settings";
 const ATTACH_LINK_MENU = "vibewaiting:attach-link";
 const CONTENT_SCRIPT_ID = "vibewaiting-content";
+const SURFACE_SCRIPT_ID = "vibewaiting-surface";
 const SITE_ORIGINS = ["http://*/*", "https://*/*"];
 const contentPorts = new Set<ExtensionPort>();
 const contentPortsByTab = new Map<number, ExtensionPort>();
@@ -47,6 +48,8 @@ const pendingAgentBrowserRequests = new Map<
     timer: ReturnType<typeof setTimeout>;
   }
 >();
+/** Tabs an agent has driven: each new document's surface reconnects to the Playwright host. */
+const drivenTabs = new Set<number>();
 const pendingHostEvents = new Map<number, unknown[]>();
 const pendingRemoteAccessOpen = new Set<number>();
 const pendingIntents: Array<{ id: string; payload: unknown }> = [];
@@ -147,13 +150,13 @@ function syncSiteAccess(injectExisting = false): Promise<void> {
         origins: SITE_ORIGINS,
       });
       const registered = await chrome.scripting.getRegisteredContentScripts({
-        ids: [CONTENT_SCRIPT_ID],
+        ids: [CONTENT_SCRIPT_ID, SURFACE_SCRIPT_ID],
       });
-      const active = registered.some(
-        (script) => script.id === CONTENT_SCRIPT_ID,
-      );
+      const active = registered.map((script) => script.id);
       let registeredNow = false;
-      if (allowed && !active) {
+      if (allowed && active.length < 2) {
+        if (active.length)
+          await chrome.scripting.unregisterContentScripts({ ids: active });
         await chrome.scripting.registerContentScripts([
           {
             id: CONTENT_SCRIPT_ID,
@@ -162,14 +165,22 @@ function syncSiteAccess(injectExisting = false): Promise<void> {
             persistAcrossSessions: true,
             runAt: "document_idle",
           },
+          {
+            // The page's AlmostCDP surface: in the main world, from the
+            // document's start, idle until an agent drives the tab.
+            id: SURFACE_SCRIPT_ID,
+            js: ["surface.js"],
+            matches: SITE_ORIGINS,
+            persistAcrossSessions: true,
+            runAt: "document_start",
+            world: "MAIN",
+          },
         ]);
         registeredNow = true;
-      } else if (!allowed && active) {
+      } else if (!allowed && active.length) {
         for (const port of contentPorts)
           post(port, { type: "site-access-revoked" });
-        await chrome.scripting.unregisterContentScripts({
-          ids: [CONTENT_SCRIPT_ID],
-        });
+        await chrome.scripting.unregisterContentScripts({ ids: active });
       }
       if (allowed) installContextMenus();
       else chrome.contextMenus.removeAll(() => void chrome.runtime.lastError);
@@ -186,12 +197,21 @@ function syncSiteAccess(injectExisting = false): Promise<void> {
           tabs
             .slice(offset, offset + 12)
             .map((tab) =>
-              chrome.scripting
-                .executeScript({
-                  files: ["content.js"],
-                  target: { tabId: tab.id! },
-                })
-                .catch(() => undefined),
+              Promise.all([
+                chrome.scripting
+                  .executeScript({
+                    files: ["surface.js"],
+                    target: { tabId: tab.id! },
+                    world: "MAIN",
+                  })
+                  .catch(() => undefined),
+                chrome.scripting
+                  .executeScript({
+                    files: ["content.js"],
+                    target: { tabId: tab.id! },
+                  })
+                  .catch(() => undefined),
+              ]),
             ),
         );
       }
@@ -508,7 +528,69 @@ async function routeBrowserOperation(
     });
   }, 10_000);
   pendingAgentBrowserRequests.set(id, { tabId, operation: call.operation, timer });
-  post(content, { type: "browser-operation-request", id, call });
+  let raw: unknown;
+  try {
+    await ensurePlaywrightHost();
+    drivenTabs.add(tabId);
+    post(content, { type: "surface-connect" });
+    raw = await chrome.runtime.sendMessage({ type: "vibewaiting:browser-operation", tabId, call });
+  } catch (error) {
+    raw = {
+      ok: false,
+      operation: call.operation,
+      error: { code: "NOT_AVAILABLE", message: `The Playwright host is not available: ${error instanceof Error ? error.message : String(error)}` },
+    };
+  }
+  finishAgentBrowserRequest(id, tabId, raw);
+}
+
+let playwrightHost: Promise<void> | null = null;
+/** The offscreen document hosting Playwright (offscreen.html → playwright.html). */
+async function ensurePlaywrightHost(): Promise<void> {
+  if (await chrome.offscreen.hasDocument()) return;
+  playwrightHost ??= chrome.offscreen.createDocument({
+    url: "offscreen.html",
+    reasons: ["IFRAME_SCRIPTING"],
+    justification: "Runs Playwright in a sandboxed frame to answer an agent's browser operations on the tab the person shares.",
+  }).finally(() => { playwrightHost = null; });
+  await playwrightHost;
+}
+
+function finishAgentBrowserRequest(id: string, tabId: number, raw: unknown): void {
+  const pending = pendingAgentBrowserRequests.get(id);
+  if (!pending || pending.tabId !== tabId) return;
+  pendingAgentBrowserRequests.delete(id);
+  clearTimeout(pending.timer);
+  const result = parseBrowserOperationResult(raw);
+  if (!result) {
+    sendAgentBrowserResponse(id, {
+      ok: false,
+      operation: pending.operation,
+      error: { code: "FAILED", message: "The page returned an invalid browser result." },
+    });
+    return;
+  }
+  if (result.operation !== pending.operation) {
+    sendAgentBrowserResponse(id, {
+      ok: false,
+      operation: pending.operation,
+      error: { code: "FAILED", message: "The page returned a result for the wrong browser operation." },
+    });
+    return;
+  }
+  sendAgentBrowserResponse(id, {
+    ...result,
+    ...(result.target
+      ? {
+          target: {
+            ...result.target,
+            ...(contentPageByTab.get(tabId)
+              ? { page: contentPageByTab.get(tabId)! }
+              : {}),
+          },
+        }
+      : {}),
+  });
 }
 
 async function settings(): Promise<ExtensionSettings | null> {
@@ -612,43 +694,6 @@ function handleContentMessage(
 ): void {
   const message = record(raw);
   if (!message) return;
-  if (message.type === "browser-operation-response" && typeof message.id === "string") {
-    const pending = pendingAgentBrowserRequests.get(message.id);
-    if (!pending || pending.tabId !== tabId) return;
-    pendingAgentBrowserRequests.delete(message.id);
-    clearTimeout(pending.timer);
-    const result = parseBrowserOperationResult(message.result);
-    if (!result) {
-      sendAgentBrowserResponse(message.id, {
-        ok: false,
-        operation: pending.operation,
-        error: { code: "FAILED", message: "The page returned an invalid browser result." },
-      });
-      return;
-    }
-    if (result.operation !== pending.operation) {
-      sendAgentBrowserResponse(message.id, {
-        ok: false,
-        operation: pending.operation,
-        error: { code: "FAILED", message: "The page returned a result for the wrong browser operation." },
-      });
-      return;
-    }
-    sendAgentBrowserResponse(message.id, {
-      ...result,
-      ...(result.target
-        ? {
-            target: {
-              ...result.target,
-              ...(contentPageByTab.get(tabId)
-                ? { page: contentPageByTab.get(tabId)! }
-                : {}),
-            },
-          }
-        : {}),
-    });
-    return;
-  }
   if (message.type === "remote-access-open") {
     let delivered = false;
     for (const [guestPort, guest] of guestPorts)
@@ -807,6 +852,8 @@ chrome.runtime.onConnect.addListener((port) => {
       port.onMessage.addListener((raw) =>
         handleContentMessage(port, tabId, raw),
       );
+    if (tabId !== null && drivenTabs.has(tabId))
+      post(port, { type: "surface-connect" });
     port.onDisconnect.addListener(() => {
       contentPorts.delete(port);
       if (tabId !== null) {
@@ -826,16 +873,8 @@ chrome.runtime.onConnect.addListener((port) => {
           error: "The page changed before context capture finished.",
         });
       }
-      for (const [id, pending] of pendingAgentBrowserRequests) {
-        if (pending.tabId !== tabId) continue;
-        pendingAgentBrowserRequests.delete(id);
-        clearTimeout(pending.timer);
-        sendAgentBrowserResponse(id, {
-          ok: false,
-          operation: pending.operation,
-          error: { code: "NOT_AVAILABLE", message: "The active page disconnected during the browser operation." },
-        });
-      }
+      // An operation in flight keeps its page across a navigation (the
+      // surface's succession); the Playwright host answers or times out.
     });
     void ensureNative();
     return;
@@ -919,6 +958,8 @@ chrome.runtime.onMessage.addListener((raw) => {
       }),
     );
 });
+
+chrome.tabs.onRemoved.addListener((tabId) => { drivenTabs.delete(tabId); });
 
 chrome.action.onClicked.addListener(
   () => void chrome.runtime.openOptionsPage(),

@@ -73,7 +73,7 @@ export class CodexBrowserAgent {
   private readonly runtime: GrokBuildToolRuntime;
   private readonly tools: readonly GrokTool[];
   private readonly maxTurns: number;
-  private readonly onEvent?: (event: GrokBuildEvent) => void;
+  private readonly onEvent: ((event: GrokBuildEvent) => void) | undefined;
   private readonly fetchImpl: typeof globalThis.fetch;
   private readonly core: CodexBrowserCore;
   private readonly instructions: string;

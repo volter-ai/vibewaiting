@@ -17,7 +17,7 @@ local control over adding another standalone coding environment.
 - Optional website access with an in-product disclosure, affirmative browser consent,
   and immediate revocation
 - A Vibewaiting active-tab provider for Supercode's shared browser capability, with
-  bounded accessibility snapshots and Playwright-shaped DOM locators
+  Playwright's aria snapshots, locators and scripts running inside the extension
 
 ## Next
 

@@ -16,42 +16,9 @@ import {
 } from "./browser-context.js";
 import { browserShortcutLabel } from "../src/browser-shortcuts.js";
 import { createRemoteAccessLauncher } from "./remote-access-companion.js";
-import {
-  BrowserActionRefusal,
-  BrowserPageExecutor,
-  type InPageAction,
-} from "@volter-ai-dev/supercode-playwright-shim";
 
-const CONSEQUENTIAL_BROWSER_ACTION =
-  /\b(buy|checkout|confirm|delete|log\s*out|pay|place\s+order|post|publish|purchase|remove|send|sign\s*out|submit|transfer)\b/i;
-
-function browserActionName(element: Element): string {
-  return (
-    element.getAttribute("aria-label") ||
-    element.getAttribute("title") ||
-    element.getAttribute("placeholder") ||
-    element.textContent ||
-    element.tagName.toLowerCase()
-  ).replace(/\s+/g, " ").trim();
-}
-
-function guardBrowserAction({ action, element, value }: InPageAction): void {
-  if (action === "fill" && element instanceof HTMLInputElement &&
-    (element.type === "password" || element.type === "file")) {
-    throw new BrowserActionRefusal(
-      "APPROVAL_REQUIRED",
-      "Filling password and file inputs requires explicit browser approval.",
-    );
-  }
-  const activating = action === "click" || action === "check" || action === "uncheck" ||
-    action === "select" || (action === "press" && ["Enter", "Space", " "].includes(String(value)));
-  if (activating && CONSEQUENTIAL_BROWSER_ACTION.test(browserActionName(element))) {
-    throw new BrowserActionRefusal(
-      "APPROVAL_REQUIRED",
-      `${action} on ${JSON.stringify(browserActionName(element))} may perform a consequential action.`,
-    );
-  }
-}
+/** Tells the page's main-world surface (surface.ts) which port reaches the Playwright host. */
+const SURFACE_MESSAGE = "vibewaiting:almostcdp-surface";
 
 interface VibewaitingContentGlobal {
   __vibewaitingContentMounted?: boolean;
@@ -65,7 +32,32 @@ if (!contentGlobal.__vibewaitingContentMounted) {
 
 function mountVibewaitingContent(): void {
   const contentPort = chrome.runtime.connect({ name: "vibewaiting:content" });
-  const browserPage = new BrowserPageExecutor(document, { actionGuard: guardBrowserAction });
+  // The agent's browser operations reach this page through the extension's
+  // Playwright host (offscreen.ts) and the main-world AlmostCDP surface; this
+  // script only relays the surface's port, once the background asks for it.
+  let surfacePort: ExtensionPort | null = null;
+  const connectSurface = (): void => {
+    if (surfacePort) return;
+    const host = chrome.runtime.connect({ name: "vibewaiting:surface" });
+    surfacePort = host;
+    const channel = new MessageChannel();
+    host.onMessage.addListener((raw) => {
+      const message = typeof raw === "object" && raw !== null ? raw as Record<string, unknown> : null;
+      if (message?.type === "hello" && typeof message.id === "string" && typeof message.token === "string") {
+        window.postMessage({ type: SURFACE_MESSAGE, id: message.id, token: message.token }, "*", [channel.port2]);
+        return;
+      }
+      if (message?.type === "data" || message?.type === "close") channel.port1.postMessage(message);
+    });
+    channel.port1.onmessage = (event) => {
+      try { host.postMessage(event.data); } catch { /* The host went away; its disconnect follows. */ }
+    };
+    host.onDisconnect.addListener(() => {
+      channel.port1.postMessage({ type: "close" });
+      channel.port1.close();
+      if (surfacePort === host) surfacePort = null;
+    });
+  };
   const remoteAccess = createRemoteAccessLauncher({
     open() {
       overlay.open();
@@ -96,7 +88,7 @@ function mountVibewaitingContent(): void {
     if (destroyed) return;
     destroyed = true;
     contentGlobal.__vibewaitingContentMounted = false;
-    browserPage.destroy();
+    surfacePort?.disconnect();
     remoteAccess.destroy();
     contentPort.disconnect();
     overlay.destroy();
@@ -108,17 +100,8 @@ function mountVibewaitingContent(): void {
       destroy();
       return;
     }
-    if (
-      message.type === "browser-operation-request" &&
-      typeof message.id === "string"
-    ) {
-      void browserPage.execute(message.call).then((result) => {
-        contentPort.postMessage({
-          type: "browser-operation-response",
-          id: message.id,
-          result,
-        });
-      });
+    if (message.type === "surface-connect") {
+      connectSurface();
       return;
     }
     if (message.type === "remote-access-status") {

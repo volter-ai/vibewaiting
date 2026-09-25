@@ -32,8 +32,25 @@ await build({
   entryPoints: {
     background: "extension/background.ts",
     content: "extension/content.ts",
+    offscreen: "extension/offscreen.ts",
     options: "extension/options.ts",
   },
+});
+// Classic scripts: the page's main-world surface, and the Playwright host (a
+// sandboxed page has an opaque origin), where playwright-core is AlmostCDP's
+// browser build of it.
+await build({
+  ...browserBuild,
+  format: "iife",
+  entryPoints: { surface: "extension/surface.ts" },
+});
+await build({
+  ...browserBuild,
+  format: "iife",
+  entryPoints: { playwright: "extension/playwright.ts" },
+  alias: { "playwright-core": "@volter/almostcdp/playwright" },
+  // Playwright's page functions are sent as source; eval is theirs.
+  logOverride: { "direct-eval": "silent" },
 });
 
 const mobileOutput = fileURLToPath(new URL("../dist/mobile/", import.meta.url));
@@ -62,7 +79,7 @@ await cp(join(root, "mobile/manifest.webmanifest"), join(mobileOutput, "manifest
 await cp(join(root, "mobile/service-worker.js"), join(mobileOutput, "service-worker.js"));
 await writeFile(join(mobileOutput, "icon-192.png"), createMobileIconPng(192));
 await writeFile(join(mobileOutput, "icon-512.png"), createMobileIconPng(512));
-for (const name of ["manifest.json", "app.html", "options.html", "options.css"]) {
+for (const name of ["manifest.json", "app.html", "offscreen.html", "options.html", "options.css", "playwright.html"]) {
   await cp(join(source, name), join(output, name));
 }
 for (const size of [16, 32, 48, 128])
@@ -71,6 +88,9 @@ for (const size of [16, 32, 48, 128])
 const assetNames = [
   "background.js",
   "content.js",
+  "surface.js",
+  "offscreen.js",
+  "playwright.js",
   "app.js",
   "options.js",
   "app.css",

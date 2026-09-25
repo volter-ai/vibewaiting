@@ -6,7 +6,7 @@ import {
   parseBrowserOperationResult,
   type BrowserOperationCall,
   type BrowserOperationResult,
-} from "@volter-ai-dev/supercode-playwright-shim";
+} from "@volter-ai-dev/supercode-browser-playwright/protocol";
 
 export type {
   RemoteDeviceSnapshot,
