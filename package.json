@@ -80,9 +80,7 @@
     "@volter-ai-dev/supercode-ui": "0.1.67",
     "@volter-ai-dev/widget-shell": "0.4.1",
     "lucarne": "1.7.5",
-    "smol-toml": "^1.8.0",
-    "ws": "8.21.3",
-    "yaml": "^2.9.0"
+    "ws": "8.21.3"
   },
   "bundleDependencies": [
     "@termfleet/terminal",
@@ -120,9 +118,11 @@
     "preact": "10.29.8",
     "qrcode-generator": "1.5.2",
     "react-refresh": "^0.14.0",
+    "smol-toml": "^1.8.0",
     "three": "^0.180.0",
     "typescript": "^5.7.0",
     "vitest": "^3.2.7",
-    "wrangler": "^4.127.0"
+    "wrangler": "^4.127.0",
+    "yaml": "^2.9.0"
   }
 }

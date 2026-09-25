@@ -30,12 +30,13 @@ CLI tarball.
 | Package | Version | License |
 | --- | --- | --- |
 | `@termfleet/terminal` | 0.1.9 | Apache-2.0 |
-| `@volter-ai-dev/supercode-client` | 0.3.41 | MIT OR Apache-2.0 |
+| `@volter-ai-dev/supercode-browser-playwright` | 0.1.1 | MIT OR Apache-2.0 |
+| `@volter-ai-dev/supercode-client` | 0.3.42 | MIT OR Apache-2.0 |
 | `@volter-ai-dev/supercode-harness-sdk` | 0.3.18 | MIT OR Apache-2.0 |
 | `@volter-ai-dev/supercode-remote-access` | 0.2.0 | MIT OR Apache-2.0 |
 | `@volter-ai-dev/supercode-terminal` | 0.2.13 | MIT OR Apache-2.0 |
-| `@volter-ai-dev/supercode-ui` | 0.1.66 | MIT OR Apache-2.0 |
-| `@volter-ai-dev/widget-shell` | 0.4.0 | MIT |
+| `@volter-ai-dev/supercode-ui` | 0.1.67 | MIT OR Apache-2.0 |
+| `@volter-ai-dev/widget-shell` | 0.4.1 | MIT |
 | `@volter/tunnel` | 2.0.5 | Apache-2.0 |
 | `@volter/tunnel-core` | 0.1.3 | Apache-2.0 |
 | `argparse` | 2.0.1 | Python-2.0 |
@@ -44,6 +45,7 @@ CLI tarball.
 | `lucarne` | 1.7.5 | MIT |
 | `markdown-it` | 14.3.0 | MIT |
 | `mdurl` | 2.1.0 | MIT |
+| `playwright-core` | 1.63.0 | Apache-2.0 |
 | `punycode.js` | 2.3.1 | MIT |
 | `qrcode-terminal` | 0.12.0 | Apache-2.0 |
 | `uc.micro` | 2.1.0 | MIT |
