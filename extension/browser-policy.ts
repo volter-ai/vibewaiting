@@ -51,6 +51,8 @@ interface Described {
   own: boolean;
   /** A frame element: input focused there goes to a document the policy cannot see. */
   frame: boolean;
+  /** In a frame's document, not the page's own. */
+  inFrame: boolean;
   /** This element's identity on its document, fixed when the policy first sees it. */
   id: string;
 }
@@ -197,18 +199,22 @@ function describeInPage(element: Element): Described {
     inForm: element.closest("form") !== null,
     own,
     frame: ["iframe", "frame", "object", "embed"].includes(tag),
+    inFrame: window.top !== window,
     id,
   };
 }
 
 /** The element a snapshot ref names, described by the page; one element in the page's own frame. */
 async function describeTarget(page: Page, target: unknown): Promise<Described & { target: string }> {
-  if (typeof target !== "string" || !/^e\d+$/.test(target))
-    throw new BrowserRefusal("Vibewaiting acts only on elements named by a ref from the page's own snapshot (e12), not on selectors or elements inside frames.");
+  // A snapshot ref, as Playwright writes it: e12, or f2e12 once the page has
+  // navigated (the main frame's number changes with each document).
+  if (typeof target !== "string" || !/^(f\d+)?e\d+$/.test(target))
+    throw new BrowserRefusal("Vibewaiting acts only on elements named by a ref from the page's own snapshot (e12), not on selectors.");
   const locator = page.locator(`aria-ref=${target}`);
   if (await locator.count() !== 1)
     throw new BrowserRefusal(`Ref ${target} is not in the current page snapshot. Take a new snapshot.`);
   const described = await locator.evaluate(describeInPage);
+  if (described.inFrame) throw new BrowserRefusal("That element is inside a frame; Vibewaiting acts only on the page's own document.");
   if (described.own) throw new BrowserRefusal("That is Vibewaiting's own launcher or messenger; an agent cannot act on it.");
   return { ...described, target };
 }

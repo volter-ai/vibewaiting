@@ -52,7 +52,8 @@ when a call arrives:
   and at once when the person cancels the bar, closes the tab or revokes website
   access; the next call attaches it again. Other tabs are not attached.
 
-An agent names elements by the refs of the page's own snapshot (`e12`), for reading
+An agent names elements by the refs of the page's own snapshot (`e12`, or `f2e12` once
+the page has navigated), for reading
 calls too: a call that names a selector, or an element inside a frame, is refused, and so
 is a key press while focus is inside a frame. After an action the answer
 says what ran; the agent takes `browser_snapshot` to see the page again (there is no
@@ -99,9 +100,10 @@ types into.
 
 Each document's in-page connection is bound to it by Chrome. The document's surface
 port reaches the offscreen document, which takes its tab, frame and document from the
-port's sender (Chrome's, never the page's); the background mints a fresh target id for
-that document, and the Playwright host registers the connection with that tab's
-AlmostCDP endpoint as that id (`attachSurface(peer, { id })`). Each tab is its own
+port's sender (Chrome's, never the page's); the background mints the tab's target id
+once, and the Playwright host registers each document's connection with that tab's
+AlmostCDP endpoint as that id (`attachSurface(peer, { id })`), so a new document is the
+same target's successor and Playwright sees one page navigate. Each tab is its own
 endpoint, so a tab's Playwright browser holds only that tab's documents. The endpoint
 runs with `requireExpect`, so a connection that announces any other id, or none the
 host named, is refused; the workers a page runs become subsurfaces whose ids AlmostCDP

@@ -19,19 +19,26 @@ document.body.append(frame);
 
 /**
  * Each tab's current surface: the target Playwright finds the tab's document
- * by. The background mints a fresh id for every document, from the identity
- * Chrome gives the document's port (its tab, top frame and document), never
- * from anything the page says, and the Playwright host binds the connection
- * to that id. An operation on a tab goes to its current document's id only.
+ * by. The background mints the tab's id once, for the tab Chrome gives the
+ * document's port (never from anything the page says); each new document of
+ * the tab connects as that target's successor, in the tab's own endpoint, and
+ * the latest document to connect is the current one.
  */
 const currentSurface = new Map<number, { id: string; order: number }>();
 const surfaceWaiters = new Map<number, Array<(id: string) => void>>();
-function surfaceIdFor(tabId: number, documentId: string | undefined): Promise<{ id: string; order: number } | null> {
-  return chrome.runtime.sendMessage({ type: "vibewaiting:surface-id", tabId, documentId })
-    .then((minted) => {
-      const { id, order } = (minted ?? {}) as { id?: unknown; order?: unknown };
-      return typeof id === "string" && typeof order === "number" ? { id, order } : null;
-    }, () => null);
+/**
+ * Each tab's AlmostCDP target id, minted here once for the tab Chrome names as
+ * the port's sender (never from anything the page says), and kept as long as
+ * this document and its Playwright host live: each new document of the tab
+ * connects as that target's successor, so Playwright sees one page navigate.
+ * Connections are numbered in the order they arrive; the latest is the tab's.
+ */
+const tabTargets = new Map<number, string>();
+let surfaceOrder = 0;
+function surfaceIdFor(tabId: number): { id: string; order: number } {
+  let id = tabTargets.get(tabId);
+  if (!id) tabTargets.set(tabId, id = crypto.randomUUID());
+  return { id, order: ++surfaceOrder };
 }
 /** The tab's current surface id, waiting briefly for a document that is still connecting. */
 function surfaceOf(tabId: number): Promise<string | null> {
@@ -62,7 +69,7 @@ chrome.runtime.onConnect.addListener((port) => {
     return;
   }
   const documentId = port.sender?.documentId;
-  let surfaceId: string | null = null;
+  let surfaceOrder: number | null = null;
   let connected = true;
   const channel = new MessageChannel();
   channel.port1.onmessage = (event) => {
@@ -74,19 +81,20 @@ chrome.runtime.onConnect.addListener((port) => {
     channel.port1.close();
     if (documentTokens.get(tabId)?.documentId === documentId) documentTokens.delete(tabId);
     connected = false;
-    // The document is gone: its id is no one's target any more.
-    if (currentSurface.get(tabId)?.id === surfaceId) currentSurface.delete(tabId);
+    // The document is gone; a successor that already connected stays the tab's target.
+    if (surfaceOrder !== null && currentSurface.get(tabId)?.order === surfaceOrder) currentSurface.delete(tabId);
   });
-  void Promise.all([ready, surfaceIdFor(tabId, documentId)]).then(([host, minted]) => {
+  const minted = surfaceIdFor(tabId);
+  void ready.then((host) => {
     // Ids arrive asynchronously: a document that has gone, or whose id is
     // older than the tab's current one, never becomes the tab's target.
-    const stale = !minted || !connected || (currentSurface.get(tabId)?.order ?? -1) > minted.order;
+    const stale = !connected || (currentSurface.get(tabId)?.order ?? -1) > minted.order;
     if (stale) {
       if (connected) port.disconnect();
       return;
     }
     const id = minted.id;
-    surfaceId = id;
+    surfaceOrder = minted.order;
     host.postMessage({ type: "surface", tabId, id }, "*", [channel.port2]);
     port.postMessage({ type: "hello", id, token: tokenFor(tabId, documentId) });
     currentSurface.set(tabId, { id, order: minted.order });
@@ -179,6 +187,7 @@ chrome.runtime.onMessage.addListener((raw, sender, respond) => {
   }
   if (message?.type === "vibewaiting:tab-closed" && typeof message.tabId === "number") {
     const tabId = message.tabId;
+    tabTargets.delete(tabId);
     void ready.then((host) => host.postMessage({ type: "tab-closed", tabId }, "*"));
     return false;
   }
