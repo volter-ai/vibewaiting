@@ -5,23 +5,12 @@ composes Supercode's agent/session model, Widget Shell's overlay runtime, and op
 Lucarne browser attachment. The roadmap favors seamless continuation and trustworthy
 local control over adding another standalone coding environment.
 
-## Available now
-
-- A messenger overlay in ordinary Chrome, Chromium, and Brave pages
-- Claude Code and Codex conversation discovery, continuation, unread state, and
-  capability-aware actions
-- Switchable chat and tmux-backed terminal views
-- One-action page, selection, link, GitHub, and Hacker News context attachment
-- Authenticated phone access over temporary or stable tunnel providers
-- Installable mobile app behavior on stable origins only
-- Optional website access with an in-product disclosure, affirmative browser consent,
-  and immediate revocation
-- A Vibewaiting active-tab provider for Supercode's shared browser capability, with
-  Playwright's aria snapshots, locators and scripts running inside the extension,
-  through Chrome's debugger on pages that forbid eval
+What ships today is in [README.md](README.md) and [CHANGELOG.md](CHANGELOG.md).
 
 ## Next
 
+- Release 0.2.0 with the active-tab provider for Supercode's browser capability,
+  once its approval step passes review
 - One-click provisioning and revocation of a durable remote origin
 - Signed browser-store packaging and automatic updates
 - Setup diagnostics and guided recovery beyond the current permission onboarding
