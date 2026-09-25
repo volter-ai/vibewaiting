@@ -5,9 +5,7 @@ composes Supercode's agent/session model, Widget Shell's overlay runtime, and op
 Lucarne browser attachment. The roadmap favors seamless continuation and trustworthy
 local control over adding another standalone coding environment.
 
-What ships today is in [README.md](README.md) and [CHANGELOG.md](CHANGELOG.md). The 0.2.0 release, with the
-active-tab provider for Supercode's browser capability, is tracked with its Supercode and Widget Shell parts in
-`volter-ai/volter`'s roadmap (`vibewaiting-release`).
+What ships today is in [README.md](README.md) and [CHANGELOG.md](CHANGELOG.md).
 
 ## Next
 
