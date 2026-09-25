@@ -15,16 +15,21 @@ the agent processes it controls.
 - The content script remembers the latest pointed or focused element reference for
   Attach. It also executes Supercode's closed, structured browser-operation protocol
   when the workspace-scoped provider receives a call. Snapshots and query results are
-  bounded. Filling password/file fields, consequential controls, every raw pointer
-  press, click, wheel or drag, and every `browser.script` (Playwright with the page,
-  including `page.evaluate`) run only after the person approves that one action in the
-  messenger; denial, no answer in 90 s, or a changed page refuses it. On the in-page
-  (AlmostCDP) path every fill and key press is approved too.
-- Limits of the approvals: the classifier catches an agent's mistakes on honest pages.
-  On the in-page path the page itself describes its elements to the guard, so a hostile
-  page can mislabel them; cards there say "(as described by the page)". On the
-  debugger path the description is Chrome's. Nothing an agent types is secret from the
-  page it types into. Credential-like URL
+  bounded. Every action that can change a page or send it input (click, fill, press,
+  focus, check, select, scroll, back, forward, reload, raw mouse presses, wheel, drag,
+  and `browser.script`, which is Playwright with the page including `page.evaluate`)
+  runs only after the person allows it in the messenger, once or for the tab's current
+  origin for the agent's task; reading never asks. Scripts and fills into password,
+  one-time-code, card or file fields are allowed once each, even on an allowed origin.
+  Denial, no answer in 90 s, or a changed page refuses the action.
+- Whether to ask never depends on what an element is called; those words only shape
+  the card. What the cards say comes from the browser on the debugger path; on the
+  in-page (AlmostCDP) path the page describes its own elements, so a hostile page can
+  mislabel them, and cards there say "(as described by the page)". The cards protect
+  against an agent's mistakes on pages that describe themselves honestly. Nothing an
+  agent types is secret from the page it types into. A locator in another frame, a
+  press whose focus lands elsewhere or inside a frame or closed shadow root, and a
+  mouse press whose position is unknown are refused. Credential-like URL
   parameters and tracking parameters are removed from Attach payloads.
 - Browser-provider discovery files are owner-only under Supercode's configuration
   directory; every native-host process binds a random-token-protected server to loopback

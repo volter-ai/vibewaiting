@@ -19,20 +19,22 @@ the complete generated notes and downloadable artifacts for each version.
   60 seconds after the last browser operation and re-attaches on the next. Snapshots
   leave out Vibewaiting's own messenger and launcher. Firefox remains unsupported: it
   does not install the extension.
-- Browser approvals in the messenger. Before an agent fills a password or file field,
-  activates a consequential control, presses, clicks, scrolls or drags with the raw
-  mouse (always, whatever is under it), or runs a script, the messenger opens with a
-  card naming the exact action and page, with a script's full source and arguments.
-  On the in-page path every fill and key press is asked too, and cards say the page
-  described the element. The classifier catches an agent's mistakes on honest pages; a
-  hostile page can mislabel its own elements on the in-page path. Approve once re-runs that one operation with a
-  single-use, nonce-bound grant for its operation id, tab and target, and becomes
-  clickable only after the card has been visible and still for a continuous second. Deny, no
-  answer within 90 seconds, closing the tab, or the agent's call ending refuses it
-  with the reason; while a card is open, nothing else runs on that tab. The agent's
-  call stays open while the person decides (Supercode `pending` lines: needs a
-  Supercode CLI with `BROWSER_PERSON_TIMEOUT`). The guard reads each target from the
-  browser side (Supercode browser-playwright 0.2.0).
+- Browser permissions in the messenger, after Claude in Chrome's per-site permissions.
+  Every action that can change a page or send it input (click, fill, press, focus,
+  check, select, scroll, back, forward, reload, raw mouse presses, wheel, drag, scripts)
+  asks unless the person allowed the tab's current origin for the agent's task; reading
+  never asks. Cards offer Deny, Allow once and Allow on <origin> for this task; scripts
+  and fills into password, one-time-code, card or file fields offer only Allow once,
+  every time. Cards name what actually happens (the key Playwright sends, a select's
+  options, a drag's drop target, a script's full source, arguments and reach) and, on
+  the in-page path, say the page described it. Allow buttons arm after a second of
+  visibility and stillness and half a second of the pointer resting on them. Deny, no
+  answer within 90 seconds, closing the tab, or the agent's call ending refuses the
+  action with the reason; while a card is open, nothing else runs on that tab. The
+  agent's call stays open while the person decides (Supercode `pending` lines: needs a
+  Supercode CLI with `BROWSER_PERSON_TIMEOUT`). Targets are described from the browser
+  side, and a script's routes, bindings, init scripts and listeners are removed when it
+  ends (Supercode browser-playwright 0.2.0).
 
 ### Fixed
 

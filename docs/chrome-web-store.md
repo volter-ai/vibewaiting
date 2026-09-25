@@ -38,9 +38,9 @@ and switch the same conversation into a terminal.
 > Attach, and you can revoke website access at any time.
 >
 > With website access, local agents can also operate the active tab through Supercode's
-> browser tools. Before an agent fills a password or file field, submits, buys, sends or
-> deletes, or runs a script in the page, the messenger asks you and names the exact
-> action; Approve once runs only that action. On pages whose security policy blocks the
+> browser tools. Before an agent clicks, types, navigates or runs a script, the messenger
+> asks you and names the exact action; allow it once, or allow that site for the
+> agent's task. Scripts and password, code, card or file fields ask every time. On pages whose security policy blocks the
 > in-page tools (GitHub, for example), Vibewaiting uses Chrome's debugger permission for
 > that one tab while the agent drives it: Chrome shows its debugging bar, and the
 > debugger detaches a minute after the agent's last action.
@@ -71,7 +71,7 @@ lanes are verified.
 
 | Permission | Dashboard justification |
 | --- | --- |
-| Optional HTTP/HTTPS host access | Granted from Vibewaiting onboarding after a prominent disclosure. It places the messenger on ordinary pages, supports explicit context attachment, and enables invoked local agent tools to inspect or operate the active tab through a fixed, bounded operation set. Password/file fields, consequential controls and Playwright scripts run only after the person approves that one action in the messenger. No extension code runs on websites before consent. |
+| Optional HTTP/HTTPS host access | Granted from Vibewaiting onboarding after a prominent disclosure. It places the messenger on ordinary pages, supports explicit context attachment, and enables invoked local agent tools to inspect or operate the active tab through a fixed, bounded operation set. Every action that changes the page or sends it input runs only after the person allows it in the messenger, once or for that site for the agent's task; scripts and password, one-time-code, card or file fields ask every time. No extension code runs on websites before consent. |
 | Native messaging | Chrome's sandbox cannot read the local transcripts, process state, or terminals created by Claude Code and Codex. This permission connects the extension-owned messenger to the on-device Vibewaiting companion that bridges those existing sessions. |
 | Scripting | Registers the content script only after optional website access is granted and unregisters it when access is revoked. |
 | Debugger | Used only on pages whose Content-Security-Policy forbids the in-page executor's evaluation (GitHub, for example), so an invoked local agent tool can operate that page. It attaches only to the tab that tool drives, only after website access is granted, and never to other pages or tabs. Chrome shows its debugging bar on that tab; the debugger detaches 60 seconds after the tool's last operation, and cancelling the bar, closing the tab or revoking website access detaches it at once. |

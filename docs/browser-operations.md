@@ -54,69 +54,90 @@ page, so a screen reader still reads them.
 
 ## Approvals
 
-Filling a password or file field, activating a control likely to submit, purchase,
-publish, send, transfer or delete, all raw pointer input (a mouse press, release or
-click, a wheel, a drag, from coordinates or from a locator), and every
-`browser.script` need the person's approval; moving the mouse does not. On the
-in-page (AlmostCDP) path every fill and key press needs approval too, because nothing
-there can check the target outside the page. Vibewaiting's guard (`extension/browser-policy.ts`) is asked before each
-locator action, each coordinate action (`browser.mouse`, `browser.drag`,
-`browser.wheel`) and each script; a script runs the agent's Playwright source with
-the real `page`, including `page.evaluate`, and its own locator calls do not pass the
-guard, so the script itself is what the person approves. A raw pointer card names the
-point and the element under it as best known ("Press the mouse at (590, 90) on
-example.com, over “Pay”"); a page can change what is under the pointer before it
-presses, which is why pointer input is asked every time.
+Vibewaiting asks the person before an agent changes a page, after Claude in Chrome's
+per-site permissions (`extension/browser-policy.ts`):
 
-The guard reads the target as Supercode's executor describes it from the browser
-side: a locator is resolved once (waiting up to 5 s, so a control that renders late
-is guarded rather than skipped) and the action runs on that same element; a
-coordinate action is guarded on the element at the point, and a point on
-Vibewaiting's own messenger or launcher is refused. The element is found in an
-isolated world and described over CDP (tag, attributes, accessible role and name,
-and the controls it sits in), so a page cannot change what the guard reads by
-overriding DOM functions. On the AlmostCDP path the CDP endpoint itself runs in the
-page, so there the description is only as trustworthy as the page's world; on the
-debugger path it is Chrome's. A target that cannot be described (inside an embedded
-frame or a closed shadow root), a target that is itself an embedded frame, a box more
-than eight elements share, and a key press while focus is inside a frame are refused.
-For an element in a `<label>`, the guard also classifies the control the label forwards
-to, which is what Playwright fills or clicks. What this protects: an agent's mistakes on
-honest pages. On the in-page path a hostile page can mislabel its own elements (cards
-there say "(as described by the page)"), and nothing an agent types is secret from the
-page it types into.
+- **Asks:** every action that can change the page or send it input: click, fill,
+  press (with or without a locator), focus, check, uncheck, select, scroll, back,
+  forward, reload, every raw mouse down, up and click, wheel, drag, and every
+  `browser.script` (Playwright with the real `page`, including `page.evaluate`).
+- **Never asks:** reading: status, snapshot, query, wait, box, hover, and moving the
+  mouse.
+- **Allowing a site:** a card offers **Deny**, **Allow once** and **Allow on
+  &lt;origin&gt; for this task**. The allowance covers that exact origin, in that tab,
+  for the agent task that asked, and ends with the task: `supercode mcp serve` gives
+  its calls one task id for its lifetime, and a CLI call carries `SUPERCODE_TASK_ID`
+  when it is set (without one, a card offers only Allow once). Navigating to another
+  origin asks again.
+- **Always asks, once only:** scripts, and fills into a sensitive field: an input
+  whose `type` is `password` or `file` when the fill is about to run, or whose
+  `autocomplete` names a password, a one-time code or a card (`cc-*`). These cards
+  offer only Allow once, even on an allowed origin.
 
-When the guard stops an operation, the messenger in that tab opens with an approval
-card naming the exact action and page ("Fill password field on github.com/login",
-"Run script on example.com", with the script's full source and arguments shown;
-scripts over 20,000 characters are refused outright). The agent's call stays open
-meanwhile: the native companion writes Supercode `pending` lines, and Supercode waits
-up to 120 s after each, never past 10 minutes. A caller that does not declare it can
-wait is refused at once and the person is not asked. While a card is open, every
+Whether to ask never depends on what an element is called. The words on and around
+the element only shape the card: "may submit, pay or delete" when they include words
+such as submit, pay, delete, order, approve, merge or transfer, and "may submit its
+form" for Enter in a text field inside a form. A card names the key Playwright
+actually sends (modifiers kept, `NumpadEnter` shown as Enter), a select's chosen
+options by label and value, a drag's element at the drop point, and a raw pointer
+action's point and the element under it. A script card shows the full source and
+arguments and what the script can reach while it runs; scripts over 20,000 characters
+are refused.
+
+What the card describes comes from Supercode's executor, which describes each target
+from the browser side: a locator is resolved once (waiting up to 5 s) and the action
+runs on that same element handle; the handle must be in the page's main frame and
+must be one of the elements found at its box in an isolated world (a one-off marker
+attribute confirms it), and those elements are described over CDP (tag, attributes,
+accessible role and name, the controls they sit in, whether they belong to a form).
+For an element in a `<label>`, the control the label forwards to is described too. A
+locator that resolves inside another frame, to a frame, or to a box more than eight
+elements share is refused. A locator press focuses its element and is refused if focus
+is not then on or inside it; a press without a locator is described from the focused
+element and refused when focus is inside a frame or a closed shadow root. Before
+every mouse down, up and wheel the mouse is moved to the point that was described;
+after a locator action the pointer's position is the acted element's box centre, or
+unknown, and a press then needs coordinates. A point inside a frame is described as
+"an element that could not be identified", and asks; a point on Vibewaiting's own
+messenger or launcher is refused.
+
+On the debugger path those descriptions are Chrome's. On the in-page (AlmostCDP) path
+the CDP endpoint itself runs in the page, so the page describes its own elements and
+URL, and every card there says "(as described by the page)". What the cards protect
+against: an agent's mistakes, on pages that describe themselves honestly. A hostile page
+can mislabel its own elements on the in-page path, and nothing an agent types is secret
+from the page it types into.
+
+A script holds the page through a membrane: when it ends, or its 9 seconds run out, the
+membrane closes, so every later call it makes throws, and the routes, exposed bindings
+and functions, init scripts and listeners it installed are removed before the next call.
+
+When an operation asks, the messenger in that tab opens with the card and the agent's
+call stays open: the native companion writes Supercode `pending` lines, and Supercode
+waits up to 120 s after each, never past 10 minutes. A caller that does not declare it
+can wait is refused at once and the person is not asked. While a card is open, every
 other browser operation on that tab is refused with the pending decision named, both
 when it is routed and again when a call queued earlier starts to run.
 
-Approve becomes clickable only after the card has been continuously visible on
-screen for one second, as the browser itself judges it (IntersectionObserver v2:
-not covered, faded or transformed) and still; covering, hiding, moving or resizing the
-card or the messenger frame starts the count again. The card never takes focus, so a keystroke meant for the page cannot answer
-it.
+Against clickjacking, measured inside the extension's frame: an Allow button arms only
+after the card has been fully visible and still for a second (IntersectionObserver v2:
+not covered, faded or transformed; any move or resize of the card or of the messenger
+frame restarts it) and the pointer has moved onto that button and rested there for half
+a second (leaving or re-entering the button, or the frame moving, restarts it; a button
+that appears under a pointer that is not moving does not arm). The card never takes
+focus, so a keystroke meant for the page cannot answer it.
 
-- **Approve once** re-runs that one operation with a one-time grant bound to the
-  operation's id, its tab and the exact action the card named (the action, the page
-  URL and the element, or the script's source and arguments). The background mints a
-  single-use nonce per card, and the Playwright host's offscreen document honours the
-  grant only with that nonce, for that tab, from the background. The grant lets that
-  single action through and ends with the operation; the agent receives the
-  operation's own result. If the page changed so the action no longer matches, nothing
-  runs and the agent is told so.
+- **Allow once** and **Allow on &lt;origin&gt;** re-run that one operation with a
+  one-time grant bound to the operation's id, its tab and the exact action the card
+  named. The background mints a single-use nonce per card, and the Playwright host's
+  offscreen document honours the grant only with that nonce, for that tab, from the
+  background. If the page changed so the action no longer matches, nothing runs and
+  the agent is told so.
 - **Deny** returns `APPROVAL_REQUIRED` with "The person denied this in Vibewaiting: …
   Nothing ran."
 - No answer in 90 seconds, or closing the tab, refuses the same way and says why.
-- If the agent's call ends first (it stopped waiting), the card says "The agent
-  stopped waiting. Nothing ran." and can no longer approve anything.
-
-Nothing is approved standing: the same action later asks again.
+- If the agent's call ends first, the card says "The agent stopped waiting. Nothing
+  ran." and can no longer allow anything.
 
 ## Permissions
 

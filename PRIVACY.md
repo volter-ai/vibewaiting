@@ -32,11 +32,13 @@ The page-facing content script receives only enough coding-agent state to render
 launcher plus a redacted remote-access status. Full session state, pairing URLs,
 passcodes, and device details render inside an extension-origin iframe. Website access
 is requested only after an in-product disclosure names the page data and pointer/focus
-activity described above. When a browser tool tries to fill a password or file field,
-activate a consequential control (submit, purchase, publish, send, transfer, delete), or
-run a script in the page, the messenger asks you first, naming the exact action and page.
-**Approve once** runs only that one action; **Deny**, or no answer within 90 seconds,
-refuses it, and nothing is approved for later. Page text, selections, links, and images do not cross into the
+activity described above. Before a browser tool changes a page or sends it input
+(clicking, typing, pressing keys, selecting, scrolling, navigating, mouse presses,
+scripts), the messenger asks you, naming the action and page. **Allow once** runs only
+that action; **Allow on <origin> for this task** lets the agent act on that site in that
+tab until its task ends; **Deny**, or no answer within 90 seconds, refuses it. Scripts
+and fills into password, one-time-code, card or file fields ask every time. Allowances
+live only in the extension's memory and are never stored. Page text, selections, links, and images do not cross into the
 local companion unless you use **Attach** or invoke a browser snapshot/query operation. URLs are
 normalized to remove credentials, credential-like parameters, and tracking parameters.
 Disabling website access unregisters the page script and removes the overlay from open
