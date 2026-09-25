@@ -463,8 +463,9 @@ function handleNativeMessage(raw: unknown): void {
     if (pending) {
       clearTimeout(pending.timer);
       pendingAgentBrowserRequests.delete(message.id);
-      cancelInHost(message.id);
     }
+    // Also a call still being routed: it must not start later.
+    cancelInHost(message.id);
     return;
   }
   if (message.type === "patch") {
@@ -506,8 +507,21 @@ function handleNativeMessage(raw: unknown): void {
   }
 }
 
-/** A call the agent no longer waits for never starts, and one running is aborted (playwright.ts). */
+/**
+ * Calls the agent stopped waiting for before they reached the Playwright host,
+ * by id: kept long enough to outlast a call's own routing.
+ */
+const cancelledCalls = new Set<string>();
+function cancelled(id: string): boolean {
+  return cancelledCalls.has(id);
+}
+
+/** A call the agent no longer waits for never starts, and one running sends no more input (playwright.ts). */
 function cancelInHost(id: string): void {
+  if (!cancelledCalls.has(id)) {
+    cancelledCalls.add(id);
+    setTimeout(() => cancelledCalls.delete(id), CALL_TIMEOUT_MS * 2);
+  }
   void chrome.runtime.sendMessage({ type: "vibewaiting:operation-cancel", id }).catch(() => undefined);
 }
 
@@ -594,6 +608,7 @@ async function runBrowserOperation(
       const content = contentPortsByTab.get(tabId);
       if (content) post(content, { type: "surface-connect" });
     }
+    if (cancelled(id)) return;
     raw = await chrome.runtime.sendMessage({
       type: "vibewaiting:browser-operation",
       id,

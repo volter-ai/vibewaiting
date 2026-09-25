@@ -131,7 +131,8 @@ function describeInPage(element: Element): Described {
   const mark = Symbol.for("vibewaiting.sensitive");
   const identity = Symbol.for("vibewaiting.element");
   const marked = element as Element & { [key: symbol]: string | undefined };
-  const id = marked[identity] ??= crypto.randomUUID();
+  // getRandomValues, not randomUUID: plain http pages are not secure contexts.
+  const id = marked[identity] ??= Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("");
   const tag = element.localName;
   const input = element as HTMLInputElement;
   const type = (element.getAttribute("type") ?? "").toLowerCase();
@@ -213,11 +214,41 @@ async function describeFocused(page: Page): Promise<Described | null> {
   return described;
 }
 
+/**
+ * After the person pressed Allow in the messenger, focus is on the messenger:
+ * an approved key press goes back to the element it was approved for, found
+ * by its identity on this document. Focus the page moved elsewhere stays.
+ */
+export async function restoreFocus(page: Page, approvedKey: string): Promise<void> {
+  const [tool, , , , identity] = JSON.parse(approvedKey) as [string, string, string, unknown, { id?: unknown } | null];
+  if (tool !== "browser_press_key" || typeof identity?.id !== "string") return;
+  await page.evaluate((id) => {
+    const identityKey = Symbol.for("vibewaiting.element");
+    let active = document.activeElement;
+    while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+    let overlay = false;
+    for (let node: Element | null = active; node && !overlay; ) {
+      overlay = node.closest('[data-widget-shell-id="vibewaiting"]') !== null;
+      node = (node.getRootNode() as Partial<ShadowRoot>).host ?? null;
+    }
+    if (!overlay) return;
+    const visit = (root: Document | ShadowRoot): HTMLElement | null => {
+      for (const element of Array.from(root.querySelectorAll("*"))) {
+        if ((element as Element & { [key: symbol]: unknown })[identityKey] === id) return element as HTMLElement;
+        const inner = element.shadowRoot ? visit(element.shadowRoot) : null;
+        if (inner) return inner;
+      }
+      return null;
+    };
+    visit(document)?.focus();
+  }, identity.id);
+}
+
 /** The document the page shows now: an approval holds only for the document it was asked on. */
 function documentOf(page: Page): Promise<string> {
   return page.evaluate(() => {
     const holder = document as Document & { [key: symbol]: string | undefined };
-    return holder[Symbol.for("vibewaiting.document")] ??= crypto.randomUUID();
+    return holder[Symbol.for("vibewaiting.document")] ??= Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("");
   });
 }
 
@@ -241,11 +272,14 @@ export async function approvalFor(call: BrowserToolCall, page: Page, dialog: Ope
   let onceWhy: string | null = opaque(url) ? "This page has no real origin, so each action on it needs the person's approval, once each." : null;
   switch (call.tool) {
     case "browser_click": {
+      const modifiers = Array.isArray(args.modifiers) ? args.modifiers.map(String) : [];
+      if (args.button === "middle" || modifiers.some((modifier) => modifier !== "Alt"))
+        throw new BrowserRefusal("A middle click or a click holding Shift, Control or Meta can open another tab or window; Vibewaiting drives only this tab.");
       const element = await describeTarget(page, args.target);
       elements.push(element);
       const verb = args.doubleClick === true ? "Double-click" : args.button === "right" ? "Right-click" : "Click";
-      const modifiers = Array.isArray(args.modifiers) && args.modifiers.length ? ` holding ${args.modifiers.join("+")}` : "";
-      summary = `${verb} ${nameOf(element)}${modifiers} on ${place}${warning(elements)}`;
+      const holding = modifiers.length ? ` holding ${modifiers.join("+")}` : "";
+      summary = `${verb} ${nameOf(element)}${holding} on ${place}${warning(elements)}`;
       identity = element;
       break;
     }

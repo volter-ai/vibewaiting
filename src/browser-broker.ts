@@ -157,6 +157,8 @@ export class BrowserBroker {
   }
 
   private handleSocket(socket: Socket, token: string): void {
+    // A caller that resets its connection only ends its own call.
+    socket.on("error", () => socket.destroy());
     socket.setTimeout(DEFAULT_TIMEOUT_MS, () => socket.destroy());
     socket.setEncoding("utf8");
     let data = "";

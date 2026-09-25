@@ -77,8 +77,14 @@ function callThroughBroker(
     socket.on("data", (chunk: string) => {
       buffer += chunk;
       for (let newline = buffer.indexOf("\n"); newline >= 0; newline = buffer.indexOf("\n")) {
-        const line = record(JSON.parse(buffer.slice(0, newline)) as unknown);
+        const text = buffer.slice(0, newline);
         buffer = buffer.slice(newline + 1);
+        let line: Record<string, unknown> | null;
+        try {
+          line = record(JSON.parse(text) as unknown);
+        } catch {
+          line = null;
+        }
         const pending = record(line?.pending);
         if (typeof pending?.message === "string") {
           progress(pending.message);

@@ -134,8 +134,14 @@ another action. An approved re-run, whether the person pressed Allow once or All
 its kind and message.
 
 A call the agent stopped waiting for (its call was cancelled, or the extension told it
-the page did not answer in 30 seconds) never starts if it was still queued, and is
-aborted if it was running.
+the page did not answer in 30 seconds) never starts if it was still being routed or
+queued. A running one sends nothing more: on the in-page path the surface takes input
+and navigation only while the Playwright host has opened its gate for the running call,
+and on the debugger path the debugger detaches.
+
+A middle click, or a click holding Shift, Control or Meta, can open another tab or window
+and is refused. Pressing a card's Allow button moves focus into the messenger; an approved
+key press goes back to the element it was approved for before it runs.
 
 The Playwright host takes messages only from the offscreen document that holds it
 (trusted `postMessage` events from its parent), and an approved re-run only by a
