@@ -1459,6 +1459,13 @@ chrome.runtime.onConnect.addListener((port) => {
 
 chrome.runtime.onMessage.addListener((raw, sender, respond) => {
   const message = record(raw);
+  if (message?.type === "vibewaiting:surface-id" && typeof message.tabId === "number") {
+    // A fresh target id for each document's in-page connection, minted here
+    // for the tab and document Chrome named (relayed by the offscreen document).
+    if (sender.tab || sender.url !== chrome.runtime.getURL("offscreen.html")) return;
+    respond(crypto.randomUUID());
+    return;
+  }
   if (message?.type === "vibewaiting:tab-state" && typeof message.tabId === "number") {
     // The Playwright host's last check before input, relayed by the offscreen
     // document: the tab as Chrome sees it.

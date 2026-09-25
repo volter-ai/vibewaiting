@@ -125,11 +125,20 @@ against: an agent's mistakes, on pages that describe themselves honestly. A host
 can mislabel its own elements on the in-page path, and nothing an agent types is secret
 from the page it types into.
 
-Each tab's in-page connection is bound to that tab by Chrome: the offscreen document
-takes the tab from the extension port's own sender, never from the page, and the
-Playwright host refuses a connection that claims any other tab's target (a page that
-recorded another tab's id and succession token cannot use them). Succession tokens are
-issued per document.
+Each document's in-page connection is bound to it by Chrome. The document's surface
+port reaches the offscreen document, which takes its tab, frame and document from the
+port's sender (Chrome's, never the page's); the background mints a fresh target id for
+that document, and the Playwright host registers the connection with AlmostCDP as that
+id (`attachSurface(peer, { id })`). The endpoint runs with `requireExpect`, so a
+connection that announces any other id, or none the host named, is refused; the
+workers a page runs become subsurfaces whose ids AlmostCDP assigns (`<parent>.<n>`,
+always `worker` targets), so a page cannot register one under a tab's id. An operation
+on a tab goes only to its current document's id, and a tab with no connected document
+answers "No page for target" rather than reaching any other page. A page that recorded
+another tab's id and token cannot use them.
+
+On the in-page path Vibewaiting leaves `navigator.webdriver` as the browser reports it,
+so the person's signed-in sites do not see an automated browser.
 
 Input goes only to the document that was checked. Just before any input is sent, the
 executor confirms the main frame still holds the document the action was checked on
@@ -162,8 +171,11 @@ re-entering the button, or the frame moving restarts it, movement between press 
 release is ignored, and inside the frame a change in `screenX - clientX` (or its Y twin)
 between pointer events counts as the frame moving. A button that appears under a
 pointer that is not moving does not arm. An unarmed button reads "Hold still to allow",
-and pressing it says so instead of doing nothing silently. A keyboard press on a
-focused Allow button needs only the visibility gate. The card never takes
+and pressing it says so instead of doing nothing silently. By keyboard, Enter or Space
+on an Allow button works when the visibility gate has passed and focus has rested on
+the button for half a second, having arrived there by the person's own Tab or pointer
+press inside the messenger; focus given by a script, including the page focusing the
+messenger's frame, never arms, and Enter then shows the hold-still hint. The card never takes
 focus, so a keystroke meant for the page cannot answer it.
 
 - **Allow once** and **Allow on &lt;origin&gt;** re-run that one operation with a

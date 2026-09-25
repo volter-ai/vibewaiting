@@ -48,6 +48,8 @@ if (!surfaceGlobal.__vibewaitingSurface) {
       url: location.href,
       // Supercode's guard reads each target's role and name over CDP.
       accessibility: createDomAccessibility(),
+      // The person's own tab: navigator.webdriver stays as the browser has it.
+      automation: false,
     });
   };
   window.addEventListener("message", accept);

@@ -30,7 +30,8 @@ const OWN_OVERLAY = '[data-widget-shell-id="vibewaiting"]';
 /** JavaScript run in the page must answer within this. */
 const PAGE_SCRIPT_TIMEOUT_MS = 9_000;
 
-const endpoint = createSocketEndpoint({ address: "vibewaiting.extension" });
+// Every tab's surface must be one the offscreen document named for it.
+const endpoint = createSocketEndpoint({ address: "vibewaiting.extension", requireExpect: true });
 let browser: Promise<Browser> | undefined;
 /** Tabs driven over Chrome's debugger, by `debugger:<tabId>`: one browser each, holding that one page. */
 const debuggerBrowsers = new Map<string, Promise<Browser>>();

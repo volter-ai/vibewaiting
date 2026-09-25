@@ -19,17 +19,28 @@ const ready = new Promise<Window>((resolve) => {
 document.body.append(frame);
 
 /**
- * Each tab's surface id: the target Playwright finds the tab by. It is issued
- * per tab, and the identity of a surface connection comes only from Chrome:
- * the port's own sender (its tab, top frame and document), never from
- * anything the page says. The Playwright host binds each connection to the id
- * issued for its tab, so a page that learned another tab's id cannot claim it.
+ * Each tab's current surface: the target Playwright finds the tab's document
+ * by. The background mints a fresh id for every document, from the identity
+ * Chrome gives the document's port (its tab, top frame and document), never
+ * from anything the page says, and the Playwright host binds the connection
+ * to that id. An operation on a tab goes to its current document's id only.
  */
-const surfaceIds = new Map<number, string>();
-function surfaceOf(tabId: number): string {
-  let id = surfaceIds.get(tabId);
-  if (!id) surfaceIds.set(tabId, id = crypto.randomUUID());
-  return id;
+const currentSurface = new Map<number, string>();
+const surfaceWaiters = new Map<number, Array<(id: string) => void>>();
+function surfaceIdFor(tabId: number, documentId: string | undefined): Promise<string | null> {
+  return chrome.runtime.sendMessage({ type: "vibewaiting:surface-id", tabId, documentId })
+    .then((id) => typeof id === "string" ? id : null, () => null);
+}
+/** The tab's current surface id, waiting briefly for a document that is still connecting. */
+function surfaceOf(tabId: number): Promise<string | null> {
+  const id = currentSurface.get(tabId);
+  if (id) return Promise.resolve(id);
+  return new Promise((resolve) => {
+    const waiters = surfaceWaiters.get(tabId) ?? [];
+    const timer = setTimeout(() => resolve(null), 5_000);
+    waiters.push((next) => { clearTimeout(timer); resolve(next); });
+    surfaceWaiters.set(tabId, waiters);
+  });
 }
 
 /** Each document's succession token: fresh per document, the previous one retired. */
@@ -49,6 +60,7 @@ chrome.runtime.onConnect.addListener((port) => {
     return;
   }
   const documentId = port.sender?.documentId;
+  let surfaceId: string | null = null;
   const channel = new MessageChannel();
   channel.port1.onmessage = (event) => {
     try { port.postMessage(event.data); } catch { /* The document is gone; its disconnect follows. */ }
@@ -58,11 +70,20 @@ chrome.runtime.onConnect.addListener((port) => {
     channel.port1.postMessage({ type: "close" });
     channel.port1.close();
     if (documentTokens.get(tabId)?.documentId === documentId) documentTokens.delete(tabId);
+    // The document is gone: its id is no one's target any more.
+    if (currentSurface.get(tabId) === surfaceId) currentSurface.delete(tabId);
   });
-  void ready.then((host) => {
-    const id = surfaceOf(tabId);
+  void Promise.all([ready, surfaceIdFor(tabId, documentId)]).then(([host, id]) => {
+    if (!id) {
+      port.disconnect();
+      return;
+    }
+    surfaceId = id;
     host.postMessage({ type: "surface", tabId, id }, "*", [channel.port2]);
     port.postMessage({ type: "hello", id, token: tokenFor(tabId, documentId) });
+    currentSurface.set(tabId, id);
+    for (const waiter of surfaceWaiters.get(tabId) ?? []) waiter(id);
+    surfaceWaiters.delete(tabId);
   });
 });
 
@@ -151,8 +172,9 @@ chrome.runtime.onMessage.addListener((raw, sender, respond) => {
     respond(event.data as BrowserOperationResult);
     reply.port1.close();
   };
-  void ready.then((host) => {
-    const target = message.via === "debugger" ? debuggerTarget(host, tabId) : surfaceOf(tabId);
+  void ready.then(async (host) => {
+    // A tab with no connected document has no target: never another page.
+    const target = message.via === "debugger" ? debuggerTarget(host, tabId) : await surfaceOf(tabId) ?? `none:${tabId}`;
     // The origins the person allowed for this call's task on this tab (background.ts).
     const allowed = Array.isArray(message.allowed) ? message.allowed.filter((origin) => typeof origin === "string") : [];
     host.postMessage({ type: "operation", target, tabId, call: message.call, grant, allowed }, "*", [reply.port2]);

@@ -13,7 +13,12 @@
  * any movement of 3 px or more, leaving or re-entering the button, and any
  * move of the frame restart it, and movement between press and release is
  * ignored. An unarmed button reads "Hold still to allow", and a press on it
- * says so, so a click that does nothing is never silent. Both are measured inside the extension's own frame, where a
+ * says so, so a click that does nothing is never silent.
+ *
+ * By keyboard, an Allow button arms when focus has rested on it for half a
+ * second, having arrived there by a trusted Tab or pointer press inside this
+ * frame. Focus a script gave it (including the page focusing the whole frame)
+ * never arms, and Enter or Space then shows the hold-still hint. Both are measured inside the extension's own frame, where a
  * change in `screenX - clientX` (or its Y twin) between pointer events is a
  * move of the frame itself.
  */
@@ -62,6 +67,20 @@ export function parseBrowserApprovalCard(value: unknown): BrowserApprovalCard | 
     ...(typeof note === "string" ? { note } : {}),
     ...(typeof allowOrigin === "string" ? { allowOrigin } : {}),
   };
+}
+
+/** When the person last pressed Tab or a pointer inside this frame. */
+let lastTab = -Infinity;
+let lastPointer = -Infinity;
+document.addEventListener("keydown", (event) => {
+  if (event.isTrusted && event.key === "Tab") lastTab = performance.now();
+}, true);
+document.addEventListener("pointerdown", (event) => {
+  if (event.isTrusted) lastPointer = performance.now();
+}, true);
+/** Focus arriving now was brought by the person's own Tab or pointer. */
+function focusByPerson(): boolean {
+  return performance.now() - Math.max(lastTab, lastPointer) < 300;
 }
 
 export function createBrowserApprovals(
@@ -240,7 +259,28 @@ export function createBrowserApprovals(
     const hint = document.createElement("p");
     hint.className = "vw-approval-hint";
     hint.setAttribute("role", "status");
+    // Keyboard arming: focus that arrived by the person's Tab or pointer and
+    // has rested half a second.
+    const focusedAt = new Map<HTMLButtonElement, number>();
+    const keyboardArmed = (allow: HTMLButtonElement): boolean => {
+      const at = focusedAt.get(allow);
+      return still && document.activeElement === allow && at !== undefined && performance.now() - at >= REST_BEFORE_APPROVE_MS;
+    };
+    const showHint = (allow?: HTMLButtonElement): void => {
+      hint.textContent = "Hold still on the button for half a second, then click.";
+      if (allow) allow.textContent = "Hold still to allow";
+    };
+    document.addEventListener("keydown", (event) => {
+      if (answered || !event.isTrusted || (event.key !== "Enter" && event.key !== " ")) return;
+      const focused = allows.find((allow) => allow === document.activeElement);
+      if (!focused || !keyboardArmed(focused)) showHint(focused);
+    }, true);
     for (const allow of allows) {
+      allow.addEventListener("focus", () => {
+        if (focusByPerson()) focusedAt.set(allow, performance.now());
+        else focusedAt.delete(allow);
+      });
+      allow.addEventListener("blur", () => focusedAt.delete(allow));
       allow.addEventListener("pointerdown", (event) => {
         const anchor = anchors.get(allow);
         pressedArmed.set(allow, event.isTrusted && !answered && still && hovered.has(allow) &&
@@ -248,12 +288,12 @@ export function createBrowserApprovals(
       });
       allow.addEventListener("click", (event) => {
         if (answered) return;
-        // A trusted keyboard press (no pointer) needs only the visibility gate.
-        const armed = pressedArmed.get(allow) === true || (event.isTrusted && event.detail === 0 && still);
+        // A keyboard press (no pointer) needs focus that the person brought
+        // there and that has rested half a second.
+        const armed = pressedArmed.get(allow) === true || (event.isTrusted && event.detail === 0 && keyboardArmed(allow));
         pressedArmed.delete(allow);
         if (!armed) {
-          hint.textContent = "Hold still on the button for half a second, then click.";
-          allow.textContent = "Hold still to allow";
+          showHint(allow);
           return;
         }
         answer(allow.dataset.decision as BrowserApprovalDecision, allow);
