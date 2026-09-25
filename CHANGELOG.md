@@ -5,6 +5,8 @@ the complete generated notes and downloadable artifacts for each version.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-25
+
 ### Added
 
 - Vibewaiting can publish its active extension tab as a Supercode browser provider.
@@ -106,7 +108,8 @@ the complete generated notes and downloadable artifacts for each version.
 - Agent and remote-access defaults now stay outside the first-run critical path, and the
   unsafe confirmation override is labeled explicitly instead of as “Yolo.”
 
-[Unreleased]: https://github.com/volter-ai/vibewaiting/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/volter-ai/vibewaiting/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/volter-ai/vibewaiting/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/volter-ai/vibewaiting/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/volter-ai/vibewaiting/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/volter-ai/vibewaiting/releases/tag/v0.1.0
