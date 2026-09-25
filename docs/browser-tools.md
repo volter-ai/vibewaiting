@@ -54,7 +54,8 @@ when a call arrives:
 
 An agent names elements by the refs of the page's own snapshot (`e12`, or `f2e12` once
 the page has navigated), for reading
-calls too: a call that names a selector, or an element inside a frame, is refused, and so
+calls too: a call that names a selector, or an element inside a frame, is refused, as is
+acting on a frame element itself (it would act inside the frame's document), and so
 is a key press while focus is inside a frame. After an action the answer
 says what ran; the agent takes `browser_snapshot` to see the page again (there is no
 file system for the snapshot `@playwright/mcp` would save beside it). Vibewaiting's own
@@ -103,8 +104,12 @@ port reaches the offscreen document, which takes its tab, frame and document fro
 port's sender (Chrome's, never the page's); the background mints the tab's target id
 once, and the Playwright host registers each document's connection with that tab's
 AlmostCDP endpoint as that id (`attachSurface(peer, { id })`), so a new document is the
-same target's successor and Playwright sees one page navigate. Each tab is its own
-endpoint, so a tab's Playwright browser holds only that tab's documents. The endpoint
+same target's successor and Playwright sees one page navigate. A successor resumes
+with only the init scripts and bindings Playwright itself registered, never state the
+previous page reported about itself, and with Chrome's word for each document's origin
+AlmostCDP drops the rest of that state when the origin changes: no page can seed script
+into the next site the tab loads. Each tab is its own endpoint, so a tab's Playwright
+browser holds only that tab's documents. The endpoint
 runs with `requireExpect`, so a connection that announces any other id, or none the
 host named, is refused; the workers a page runs become subsurfaces whose ids AlmostCDP
 assigns (`<parent>.<n>`, always `worker` targets), so a page cannot register one under a

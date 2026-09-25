@@ -10,6 +10,8 @@ interface ExtensionPort {
     tab?: { id?: number; windowId?: number };
     frameId?: number;
     documentId?: string;
+    /** The sender document's origin, as Chrome knows it. */
+    origin?: string;
   };
   postMessage(message: unknown): void;
   disconnect(): void;

@@ -69,6 +69,9 @@ chrome.runtime.onConnect.addListener((port) => {
     return;
   }
   const documentId = port.sender?.documentId;
+  // Chrome's word for the document's origin: AlmostCDP drops what the previous
+  // document reported about itself when a tab's document changes origin.
+  const origin = port.sender?.origin;
   let surfaceOrder: number | null = null;
   let connected = true;
   const channel = new MessageChannel();
@@ -95,7 +98,7 @@ chrome.runtime.onConnect.addListener((port) => {
     }
     const id = minted.id;
     surfaceOrder = minted.order;
-    host.postMessage({ type: "surface", tabId, id }, "*", [channel.port2]);
+    host.postMessage({ type: "surface", tabId, id, ...(origin ? { origin } : {}) }, "*", [channel.port2]);
     port.postMessage({ type: "hello", id, token: tokenFor(tabId, documentId) });
     currentSurface.set(tabId, { id, order: minted.order });
     for (const waiter of surfaceWaiters.get(tabId) ?? []) waiter(id);

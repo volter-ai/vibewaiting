@@ -22,7 +22,7 @@ provides browser-side JavaScript syntax checking.
 Their exact transitive dependency versions are recorded in `package-lock.json` and
 `experiments/browser-agent/rhai-wasm/Cargo.lock`.
 
-The browser extension bundles AlmostCDP (`@volter/almostcdp` 0.1.29, MIT) with the
+The browser extension bundles AlmostCDP (`@volter/almostcdp` 0.1.30, MIT) with the
 unmodified `playwright-core` 1.63.0 (Apache-2.0) it builds for the browser, whose MCP
 tool backend answers the agent's browser tools.
 

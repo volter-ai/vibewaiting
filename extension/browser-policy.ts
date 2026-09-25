@@ -205,7 +205,7 @@ function describeInPage(element: Element): Described {
 }
 
 /** The element a snapshot ref names, described by the page; one element in the page's own frame. */
-async function describeTarget(page: Page, target: unknown): Promise<Described & { target: string }> {
+async function describeTarget(page: Page, target: unknown, acting = true): Promise<Described & { target: string }> {
   // A snapshot ref, as Playwright writes it: e12, or f2e12 once the page has
   // navigated (the main frame's number changes with each document).
   if (typeof target !== "string" || !/^(f\d+)?e\d+$/.test(target))
@@ -215,6 +215,8 @@ async function describeTarget(page: Page, target: unknown): Promise<Described & 
     throw new BrowserRefusal(`Ref ${target} is not in the current page snapshot. Take a new snapshot.`);
   const described = await locator.evaluate(describeInPage);
   if (described.inFrame) throw new BrowserRefusal("That element is inside a frame; Vibewaiting acts only on the page's own document.");
+  // Acting on a frame element acts inside the frame's document.
+  if (acting && described.frame) throw new BrowserRefusal("That is a frame; acting on it would act inside another document, and Vibewaiting acts only on the page's own.");
   if (described.own) throw new BrowserRefusal("That is Vibewaiting's own launcher or messenger; an agent cannot act on it.");
   return { ...described, target };
 }
@@ -301,7 +303,7 @@ export async function approvalFor(
   const args = call.arguments;
   if (READING.has(call.tool)) {
     // A reading call still names only the page's own elements, never the overlay's.
-    if (args.target !== undefined) await describeTarget(page, args.target);
+    if (args.target !== undefined) await describeTarget(page, args.target, false);
     return null;
   }
   const url = page.url();

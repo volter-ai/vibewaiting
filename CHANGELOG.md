@@ -11,7 +11,7 @@ the complete generated notes and downloadable artifacts for each version.
   harness registers like any other (`claude mcp add vibewaiting -- vibewaiting mcp`).
   It serves Playwright's own browser tools with the schemas `@playwright/mcp`
   publishes, answered inside the extension by Playwright's MCP tool backend over
-  AlmostCDP 0.1.29 (or Chrome's debugger on a page that forbids eval), and leaves out
+  AlmostCDP 0.1.30 (or Chrome's debugger on a page that forbids eval), and leaves out
   the tools that run code, touch files, read the page's request headers and bodies,
   or reach other tabs and the window; navigation goes only to http and https. The
   Supercode browser provider, its discovery files and `browser.script` are gone; no

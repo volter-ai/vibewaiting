@@ -310,7 +310,9 @@ window.addEventListener("message", (event) => {
       driven = { endpoint: createSocketEndpoint({ address: "vibewaiting.extension", requireExpect: true }), browser: null, backend: null, cut: null };
       surfaceTabs.set(tabId, driven);
     }
-    driven.endpoint!.attachSurface(new MessagePortTransport(port), { id: message.id });
+    // The origin is Chrome's (offscreen.ts), never the page's.
+    const origin = typeof (message as { origin?: unknown }).origin === "string" ? (message as { origin: string }).origin : undefined;
+    driven.endpoint!.attachSurface(new MessagePortTransport(port), { id: message.id, ...(origin ? { origin } : {}) });
     return;
   }
   if (message.type === "debugger") {
