@@ -137,6 +137,12 @@ on a tab goes only to its current document's id, and a tab with no connected doc
 answers "No page for target" rather than reaching any other page. A page that recorded
 another tab's id and token cannot use them.
 
+A page restored from the back/forward cache is not instrumented a second time: its
+messenger comes back, but agent calls on the tab fail at once with "This page was
+restored from the browser's back/forward cache; reload it to let the agent drive it",
+and the messenger shows the person the same line. Reloading (or any new document)
+clears it.
+
 On the in-page path Vibewaiting leaves `navigator.webdriver` as the browser reports it,
 so the person's signed-in sites do not see an automated browser.
 

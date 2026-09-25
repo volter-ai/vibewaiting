@@ -25,30 +25,32 @@ interface VibewaitingContentGlobal {
 }
 
 const contentGlobal = globalThis as VibewaitingContentGlobal;
-const mount = (): void => {
+const mount = (restored = false): void => {
   if (contentGlobal.__vibewaitingContentMounted) return;
   contentGlobal.__vibewaitingContentMounted = true;
-  mountVibewaitingContent();
+  mountVibewaitingContent(restored);
 };
 // A prerendered page mounts when the person activates it, not before: until
 // then it is not the tab's page.
 const prerendering = (document as Document & { prerendering?: boolean }).prerendering === true;
-if (prerendering) document.addEventListener("prerenderingchange", mount, { once: true });
+if (prerendering) document.addEventListener("prerenderingchange", () => mount(), { once: true });
 else mount();
-// A page restored from the back/forward cache was torn down on pagehide; it
-// mounts again and connects as a new document (a fresh id through the hello).
+// A page restored from the back/forward cache was torn down on pagehide. Only
+// the messenger mounts again: the page's instrumentation is not started a
+// second time, the tab is marked restored, and the agent is told to reload it.
 addEventListener("pageshow", (event) => {
-  if (event.persisted) mount();
+  if (event.persisted) mount(true);
 });
 
-function mountVibewaitingContent(): void {
+function mountVibewaitingContent(restored: boolean): void {
   const contentPort = chrome.runtime.connect({ name: "vibewaiting:content" });
+  if (restored) contentPort.postMessage({ type: "restored-from-cache" });
   // The agent's browser operations reach this page through the extension's
   // Playwright host (offscreen.ts) and the main-world AlmostCDP surface; this
   // script only relays the surface's port, once the background asks for it.
   let surfacePort: ExtensionPort | null = null;
   const connectSurface = (): void => {
-    if (surfacePort) return;
+    if (surfacePort || restored) return;
     const host = chrome.runtime.connect({ name: "vibewaiting:surface" });
     surfacePort = host;
     const channel = new MessageChannel();

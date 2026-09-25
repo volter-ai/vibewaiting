@@ -41,6 +41,8 @@ export interface BrowserApprovals {
   settle(id: string, decision: string): void;
   /** The messenger frame moved or resized: every Allow waits afresh. */
   restart(): void;
+  /** A line about the tab the person should know (null removes it). */
+  notice(text: string | null): void;
 }
 
 /** An Allow button works only after the card has been visible and still this long. */
@@ -357,5 +359,17 @@ export function createBrowserApprovals(
     for (const card of cards.values()) card.restart();
   };
 
-  return { node, show, settle, restart };
+  const line = document.createElement("p");
+  line.className = "vw-approvals-notice";
+  line.setAttribute("role", "status");
+  const notice = (text: string | null): void => {
+    if (text === null) {
+      line.remove();
+      return;
+    }
+    line.textContent = text;
+    node.prepend(line);
+  };
+
+  return { node, show, settle, restart, notice };
 }

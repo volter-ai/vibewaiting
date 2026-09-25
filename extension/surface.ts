@@ -38,11 +38,10 @@ if (!surfaceGlobal.__vibewaitingSurface) {
       port.close();
       return;
     }
-    // The document's end closes the extension's side of the port. A document
-    // restored from the back/forward cache connects again as a new document
-    // (the content script hands it a fresh id and port on pageshow).
-    surface?.close();
-    surface = connectDomSurface({
+    // The document's end closes the extension's side of the port; a document
+    // restored from the back/forward cache is not connected again (its page
+    // patches are already installed), and the agent is told to reload it.
+    connectDomSurface({
       transport: new MessagePortTransport(port),
       id: message.id,
       succession: { token: message.token },
@@ -55,8 +54,4 @@ if (!surfaceGlobal.__vibewaitingSurface) {
     });
   };
   window.addEventListener("message", accept);
-  let surface: ReturnType<typeof connectDomSurface> | undefined;
-  window.addEventListener("pageshow", (event) => {
-    if (event.persisted) window.addEventListener("message", accept);
-  });
 }

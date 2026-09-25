@@ -89,6 +89,12 @@ port.onMessage.addListener((raw) => {
     if (card) approvals.show(card);
     return;
   }
+  if (message.type === "browser-restored") {
+    approvals.notice(message.restored === true
+      ? "This page was restored from the browser's back/forward cache; reload it to let the agent drive it."
+      : null);
+    return;
+  }
   if (message.type === "browser-approval-moved") {
     approvals.restart();
     return;

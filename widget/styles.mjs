@@ -91,6 +91,9 @@ body { background:transparent }
 .vw-approval-actions button:disabled,.vw-approval-actions button[aria-disabled="true"] { opacity:.55; cursor:default; outline:0 }
 .vw-approval-actions { flex-wrap:wrap }
 .vw-approval .vw-approval-status { color:var(--vw-approval-fg); font-weight:600 }
+.vw-approvals-notice { margin:0; padding:9px 11px; border:1px solid var(--vw-approval-border); border-radius:10px;
+  color:var(--vw-approval-fg); background:var(--vw-approval-bg); box-shadow:0 12px 32px rgba(16,24,40,.18);
+  font-size:12px; line-height:1.4; pointer-events:auto }
 .vw-approval .vw-approval-hint { min-height:1.4em; overflow:hidden; color:var(--vw-approval-accent); font-weight:600; white-space:nowrap; text-overflow:ellipsis }
 
 @media (prefers-color-scheme:dark) {

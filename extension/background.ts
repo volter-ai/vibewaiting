@@ -575,6 +575,10 @@ async function routeBrowserOperation(
     );
     return;
   }
+  if (restoredTabs.has(tabId)) {
+    sendAgentBrowserResponse(id, unavailableBrowserResult(call.operation, RESTORED_MESSAGE));
+    return;
+  }
   // Nothing else runs on a tab while the person decides about an action on it.
   const deciding = [...pendingApprovals.values()].find((approval) => approval.tabId === tabId);
   if (deciding) {
@@ -669,6 +673,10 @@ async function runBrowserOperation(
   }
   finishAgentBrowserRequest(id, tabId, raw);
 }
+
+/** Tabs whose page was restored from the back/forward cache and not reloaded since. */
+const restoredTabs = new Set<number>();
+const RESTORED_MESSAGE = "This page was restored from the browser's back/forward cache; reload it to let the agent drive it.";
 
 /** Surface ids are minted in this order: a later document's id is newer. */
 let surfaceMintOrder = 0;
@@ -1192,6 +1200,14 @@ function handleContentMessage(
 ): void {
   const message = record(raw);
   if (!message) return;
+  if (message.type === "restored-from-cache") {
+    // This document came back from the back/forward cache: the agent cannot
+    // drive it until it is reloaded (a new document clears the mark).
+    restoredTabs.add(tabId);
+    for (const [guestPort, guest] of guestPorts)
+      if (guest.tabId === tabId) post(guestPort, { type: "browser-restored", restored: true });
+    return;
+  }
   if (message.type === "approval-frame-moved") {
     for (const [guestPort, guest] of guestPorts)
       if (guest.tabId === tabId) post(guestPort, { type: "browser-approval-moved" });
@@ -1344,6 +1360,11 @@ chrome.runtime.onConnect.addListener((port) => {
       ? senderTab(port) : { tabId: null };
     contentPorts.add(port);
     if (tabId !== null) {
+      // A new document's hello: a restored page's mark goes (the restored
+      // page's own content script re-marks it with its next message).
+      if (restoredTabs.delete(tabId))
+        for (const [guestPort, guest] of guestPorts)
+          if (guest.tabId === tabId) post(guestPort, { type: "browser-restored", restored: false });
       const priorPage = contentPageByTab.get(tabId);
       if (priorPage) tabByContentPage.delete(priorPage);
       const page = `vibewaiting:${crypto.randomUUID()}`;
@@ -1413,6 +1434,7 @@ chrome.runtime.onConnect.addListener((port) => {
     pendingHostEvents.delete(guest.tabId);
     for (const approval of pendingApprovals.values())
       if (approval.tabId === guest.tabId) post(port, approvalCard(approval));
+    if (restoredTabs.has(guest.tabId)) post(port, { type: "browser-restored", restored: true });
   }
   port.onMessage.addListener((raw) => {
     const message = record(raw);
@@ -1500,6 +1522,7 @@ chrome.runtime.onMessage.addListener((raw, sender, respond) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  restoredTabs.delete(tabId);
   drivenTabs.delete(tabId);
   for (const key of [...allowances.keys()]) if (key.startsWith(`${tabId}\n`)) allowances.delete(key);
   for (const approval of [...pendingApprovals.values()])
