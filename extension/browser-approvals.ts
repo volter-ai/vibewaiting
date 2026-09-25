@@ -151,14 +151,25 @@ export function createBrowserApprovals(
       rested.set(allow, false);
       render();
     };
+    // Where the pointer last was on each button: once it has rested half a
+    // second, the rest is measured from there (where it actually stopped).
+    const lastAt = new Map<HTMLButtonElement, { x: number; y: number }>();
     const moved = (allow: HTMLButtonElement, event: PointerEvent): void => {
       // Movement while pressed belongs to the click, not to the rest.
       if (!hovered.has(allow) || (event.buttons & 1) === 1) return;
+      lastAt.set(allow, { x: event.clientX, y: event.clientY });
       const anchor = anchors.get(allow);
       if (anchor && Math.hypot(event.clientX - anchor.x, event.clientY - anchor.y) < REST_TOLERANCE_PX) return;
       rest(allow);
       anchors.set(allow, { x: event.clientX, y: event.clientY, at: performance.now() });
-      restTimers.set(allow, setTimeout(() => { restTimers.delete(allow); rested.set(allow, true); render(); }, REST_BEFORE_APPROVE_MS));
+      restTimers.set(allow, setTimeout(() => {
+        restTimers.delete(allow);
+        const anchor = anchors.get(allow);
+        const last = lastAt.get(allow);
+        if (anchor && last) anchors.set(allow, { ...last, at: anchor.at });
+        rested.set(allow, true);
+        render();
+      }, REST_BEFORE_APPROVE_MS));
     };
     // The frame's place on the screen, as pointer events report it.
     let frameAt: string | null = null;
