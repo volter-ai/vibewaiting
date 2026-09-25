@@ -132,6 +132,7 @@ declare const chrome: {
       active?: boolean;
       lastFocusedWindow?: boolean;
     }): Promise<Array<{ id?: number; url?: string; title?: string; windowId?: number }>>;
+    get(tabId: number): Promise<{ id?: number; url?: string; pendingUrl?: string; status?: string }>;
     onRemoved: ExtensionEvent<(tabId: number) => void>;
   };
 };

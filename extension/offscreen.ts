@@ -90,28 +90,37 @@ function debuggerTarget(host: Window, tabId: number): string {
   return target;
 }
 
-/**
- * The person's approvals the background has offered, by single-use nonce:
- * the approved action's key and its tab. A grant is honoured once, only with
- * its nonce, only for its tab.
- */
-const grantOffers = new Map<string, { key: string; tabId: number }>();
-
 /** Only the background (an extension context without a tab) drives the Playwright host. */
 function fromBackground(sender: MessageSender): boolean {
   return sender.id === chrome.runtime.id && !sender.tab && sender.url === chrome.runtime.getURL("background.js");
 }
 
+// The Playwright host's one question for the browser: the tab as Chrome sees
+// it (its URL, and a navigation in flight), asked just before input.
+window.addEventListener("message", (event) => {
+  const message = event.data as { type?: unknown; tabId?: unknown } | null;
+  const port = event.ports[0];
+  if (!event.isTrusted || event.source !== frame.contentWindow || message?.type !== "tab-state" ||
+    typeof message.tabId !== "number" || !port) return;
+  void chrome.runtime.sendMessage({ type: "vibewaiting:tab-state", tabId: message.tabId })
+    .then((state) => port.postMessage(state ?? null), () => port.postMessage(null))
+    .finally(() => port.close());
+});
+
 chrome.runtime.onMessage.addListener((raw, sender, respond) => {
   const message = typeof raw === "object" && raw !== null ? raw as Record<string, unknown> : null;
   if (!fromBackground(sender)) return false;
+  // The person's approvals: the nonce and the approved action's key go to the
+  // host, which honours a nonce once, for its tab.
   if (message?.type === "vibewaiting:grant-offer" && typeof message.nonce === "string" &&
     typeof message.key === "string" && typeof message.tabId === "number") {
-    grantOffers.set(message.nonce, { key: message.key, tabId: message.tabId });
+    const offer = { type: "grant-offer", nonce: message.nonce, key: message.key, tabId: message.tabId };
+    void ready.then((host) => host.postMessage(offer, "*"));
     return false;
   }
   if (message?.type === "vibewaiting:grant-revoke" && typeof message.nonce === "string") {
-    grantOffers.delete(message.nonce);
+    const nonce = message.nonce;
+    void ready.then((host) => host.postMessage({ type: "grant-revoke", nonce }, "*"));
     return false;
   }
   if (message?.type === "vibewaiting:approval-settled" && typeof message.tabId === "number") {
@@ -122,21 +131,7 @@ chrome.runtime.onMessage.addListener((raw, sender, respond) => {
   }
   if (message?.type !== "vibewaiting:browser-operation" || typeof message.tabId !== "number") return false;
   const tabId = message.tabId;
-  let grant: string | undefined;
-  if (message.grant !== undefined) {
-    const offer = typeof message.grant === "string" ? grantOffers.get(message.grant) : undefined;
-    if (typeof message.grant === "string") grantOffers.delete(message.grant);
-    if (!offer || offer.tabId !== tabId) {
-      respond({
-        ok: false,
-        operation: typeof (message.call as { operation?: unknown } | null)?.operation === "string"
-          ? (message.call as { operation: string }).operation : "browser.status",
-        error: { code: "APPROVAL_REQUIRED", message: "The approval is no longer valid, so nothing ran." },
-      });
-      return false;
-    }
-    grant = offer.key;
-  }
+  const grant = typeof message.grant === "string" ? message.grant : undefined;
   const reply = new MessageChannel();
   reply.port1.onmessage = (event) => {
     respond(event.data as BrowserOperationResult);

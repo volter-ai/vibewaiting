@@ -2,10 +2,14 @@
  * Vibewaiting's policy for an agent's actions in the person's own tab, after
  * Claude in Chrome's per-site permissions: every action that can change the
  * page or send it input asks the person, unless they allowed the tab's
- * current origin for this agent task. Reading never asks (snapshots, queries,
- * waits, hovering, moving the mouse). Some actions ask even on an allowed
- * origin, and can only be allowed once: scripts, and fills into a sensitive
- * field (a password, one-time code or card field, or a file input).
+ * current origin for this agent task (the Playwright host applies that
+ * allowance). Reading never asks (snapshots, queries, waits, hovering, moving
+ * the mouse). Some actions ask even on an allowed origin, and can only be
+ * allowed once: JavaScript run in the page; typing into a sensitive field (a
+ * password, one-time code or card field, or a file input, or a field that was
+ * one earlier on this document); raw pointer input whose target cannot be
+ * identified; and anything on a page without a real origin (about:, data:,
+ * file:, blob:).
  *
  * Whether to ask never depends on what an element is called. The words on
  * the page only shape the card ("may submit, pay or delete"); on the in-page
@@ -32,6 +36,16 @@ export interface BrowserApproval {
   origin: string;
   /** Asks even on an allowed origin, and can only be allowed once. */
   onceOnly: boolean;
+}
+
+/** Pages without a real origin: an allowance could never name them. */
+function opaque(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return ["about:", "data:", "file:", "blob:", "javascript:"].includes(parsed.protocol) || parsed.origin === "null";
+  } catch {
+    return true;
+  }
 }
 
 /** Longer scripts are refused outright: a person cannot review them in a card. */
@@ -93,19 +107,36 @@ function warning(target: GuardedTarget): string {
   return words.some((word) => CONSEQUENTIAL.test(word)) ? " — may submit, pay or delete" : "";
 }
 
-/** A sensitive field a fill writes into: password (as the field is now), one-time code, card, or file. */
-function sensitiveField(target: GuardedTarget): string | null {
+/**
+ * The nodes of a target that are sensitive fields now: the Playwright host
+ * remembers them, so a field stays sensitive on its document after it
+ * changes (a "Show password" toggle).
+ */
+export function sensitiveNodeIds(target: GuardedTarget): number[] {
+  return target.nodes.filter((node) => sensitiveKind(node) !== null).map((node) => node.backendNodeId);
+}
+
+function sensitiveKind(node: GuardedNode): string | null {
+  if (node.tag !== "input" && node.tag !== "textarea") return null;
+  const type = (node.attributes.type ?? "").toLowerCase();
+  const autocomplete = (node.attributes.autocomplete ?? "").toLowerCase();
+  if (type === "password" || /\bpassword\b/.test(autocomplete)) return "password";
+  if (/\bone-time-code\b/.test(autocomplete)) return "one-time code";
+  if (/\bcc-[a-z-]+\b/.test(autocomplete)) return "card";
+  if (type === "file") return "file";
+  return null;
+}
+
+/** A sensitive field typing goes into: as it is now, or as it was earlier on this document. */
+function sensitiveField(target: GuardedTarget, known: ReadonlySet<number>): string | null {
   for (const node of target.nodes) {
-    if (node.tag !== "input" && node.tag !== "textarea") continue;
-    const type = (node.attributes.type ?? "").toLowerCase();
-    const autocomplete = (node.attributes.autocomplete ?? "").toLowerCase();
-    if (type === "password" || /\bpassword\b/.test(autocomplete)) return "password";
-    if (/\bone-time-code\b/.test(autocomplete)) return "one-time code";
-    if (/\bcc-[a-z-]+\b/.test(autocomplete)) return "card";
-    if (type === "file") return "file";
+    const kind = sensitiveKind(node);
+    if (kind) return kind;
+    if (known.has(node.backendNodeId)) return "password";
   }
   return null;
 }
+
 
 /**
  * The key Playwright sends for a key string: modifiers stripped, aliases
@@ -136,52 +167,49 @@ const POINTER_VERBS: Record<string, string> = {
   drag: "Drag the mouse",
 };
 
-const SCRIPT_NOTE =
-  "While it runs (at most 9 seconds) the script has Playwright's full control of this tab: it can read and change the page, click, type, navigate, and read anything the page can. It is cancelled when its time is up, and whatever it installed (routes, exposed functions, init scripts, listeners) is removed before the next action.";
+const PAGE_SCRIPT_NOTE =
+  "It runs as the page itself, in the page's own JavaScript, and can do anything the page can: read and change the page, read what the page stores, and send requests as the page. It cannot reach Vibewaiting or other tabs.";
+
+/** An action on a page without a real origin, or with a target that cannot be identified, is allowed once each. */
+function onceOnlyWhy(url: string, target?: GuardedTarget): string | null {
+  if (opaque(url)) return "This page has no real origin, so each action on it needs the person's approval, once each.";
+  if (target?.unidentified !== undefined)
+    return "What is under the pointer cannot be identified, so the person approves each such action, once each.";
+  return null;
+}
 
 /**
- * The approval this action needs, or null when the agent may act. `inPage`:
- * the page described the target itself (the AlmostCDP path). `allowed`: the
- * origins the person allowed for this task on this tab.
+ * The approval this action asks for, or null when it never asks (reading).
+ * `inPage`: the page described the target itself (the AlmostCDP path).
+ * `known`: nodes that were sensitive fields earlier on this document.
  */
 export function approvalFor(
   request: PlaywrightAction,
   pageUrl: string,
   inPage: boolean,
-  allowed: readonly string[],
+  known: ReadonlySet<number>,
 ): BrowserApproval | null {
   const byPage = inPage ? " (as described by the page)" : "";
-  if (request.action === "script") {
-    if (request.source.length > MAX_SCRIPT_LENGTH)
-      throw new BrowserActionRefusal(
-        "INVALID_INPUT",
-        `Scripts longer than ${MAX_SCRIPT_LENGTH.toLocaleString("en-US")} characters are refused: the person could not review them.`,
-      );
-    const args = JSON.stringify(request.args ?? {}, null, 2);
-    return {
-      key: JSON.stringify(["script", pageUrl, request.source, args]),
-      summary: `Run a script on ${pagePlace(pageUrl)}${byPage}`,
-      reason: "Scripts always need the person's approval, once each.",
-      detail: `${request.source}\n\n// args\n${args}`,
-      note: SCRIPT_NOTE,
-      origin: originOf(pageUrl),
-      onceOnly: true,
-    };
-  }
+  if (request.action === "script")
+    // Playwright code never runs in Vibewaiting's extension (browser.script
+    // is answered as JavaScript in the page, playwright.ts); this refuses the
+    // executor's own script path should anything reach it.
+    throw new BrowserActionRefusal("UNSUPPORTED",
+      "Vibewaiting does not run Playwright scripts; browser.script runs its source as JavaScript in the page.");
   if (!("target" in request)) {
     const origin = originOf(request.url);
-    if (allowed.includes(origin)) return null;
     const place = pagePlace(request.url);
     const direction = (request.value as { direction?: string } | undefined)?.direction;
+    const once = onceOnlyWhy(request.url);
     return {
       key: JSON.stringify([request.action, request.url, request.value ?? null]),
       summary: request.action === "back" ? `Go back from ${place}${byPage}`
         : request.action === "forward" ? `Go forward from ${place}${byPage}`
           : request.action === "reload" ? `Reload ${place}${byPage}`
             : `Scroll ${direction ?? ""} on ${place}${byPage}`.replace("  ", " "),
-      reason: `Changing a page needs the person's approval unless they allowed ${origin} for this task.`,
+      reason: once ?? `Changing a page needs the person's approval unless they allowed ${origin} for this task.`,
       origin,
-      onceOnly: false,
+      onceOnly: once !== null,
     };
   }
   const { action, target, value } = request;
@@ -191,12 +219,13 @@ export function approvalFor(
   const place = pagePlace(target.url);
   const identity = target.nodes.map((node) => node.backendNodeId).sort((a, b) => a - b);
   const key = JSON.stringify([action, target.url, identity, target.point ?? null, value ?? null]);
-  const sensitive = action === "fill" ? sensitiveField(target) : null;
-  if (!sensitive && allowed.includes(origin)) return null;
+  const typing = action === "fill" || action === "press";
+  const sensitive = typing ? sensitiveField(target, known) : null;
+  const once = onceOnlyWhy(target.url, request.pointer ? target : undefined);
   const reason = sensitive
-    ? `Filling a ${sensitive} field always needs the person's approval, once each.`
-    : `Acting on a page needs the person's approval unless they allowed ${origin} for this task.`;
-  const ask = (summary: string): BrowserApproval => ({ key, summary, reason, origin, onceOnly: sensitive !== null });
+    ? `Typing into a ${sensitive} field always needs the person's approval, once each.`
+    : once ?? `Acting on a page needs the person's approval unless they allowed ${origin} for this task.`;
+  const ask = (summary: string): BrowserApproval => ({ key, summary, reason, origin, onceOnly: sensitive !== null || once !== null });
   const named = nameOf(target) ?? "an element";
 
   if (request.pointer) {
@@ -206,7 +235,7 @@ export function approvalFor(
     const drag = action === "drag" ? value as { to?: { x: number; y: number }; drop?: GuardedTarget } | undefined : undefined;
     const drop = drag?.drop ? nameOf(drag.drop) : null;
     return ask(`${POINTER_VERBS[action] ?? action} at ${at}` +
-      (over ? ` over ${over}` : target.unidentified ? " over an element that could not be identified" : "") +
+      (over ? ` over ${over}` : target.unidentified ? " over an element that could not be identified (it may be inside a frame)" : "") +
       (drag?.to ? ` to (${Math.round(drag.to.x)}, ${Math.round(drag.to.y)})${drop ? ` over ${drop}` : ""}` : "") +
       ` on ${place}${byPage}${warning(target)}`);
   }
@@ -217,6 +246,7 @@ export function approvalFor(
   if (action === "press") {
     const { key: pressed, modifiers } = keyOf(String(value));
     const shown = [...modifiers, pressed].join("+");
+    if (sensitive) return ask(`Press ${shown} in ${sensitive} field ${named} on ${place}${byPage}`);
     const submits = pressed === "Enter" && textField(target) && inForm(target) ? " — may submit its form" : "";
     return ask(`Press ${shown} in ${named} on ${place}${byPage}${submits || warning(target)}`);
   }
@@ -229,4 +259,26 @@ export function approvalFor(
   }
   const verbs: Record<string, string> = { click: "Click", check: "Check", uncheck: "Uncheck", focus: "Focus" };
   return ask(`${verbs[action] ?? action} ${named} on ${place}${byPage}${warning(target)}`);
+}
+
+/**
+ * The approval JavaScript run in the page asks for: always, once each. The
+ * source runs as the page, never in the extension.
+ */
+export function pageScriptApproval(source: string, args: unknown, pageUrl: string, inPage: boolean): BrowserApproval {
+  if (source.length > MAX_SCRIPT_LENGTH)
+    throw new BrowserActionRefusal(
+      "INVALID_INPUT",
+      `Scripts longer than ${MAX_SCRIPT_LENGTH.toLocaleString("en-US")} characters are refused: the person could not review them.`,
+    );
+  const shownArgs = JSON.stringify(args ?? {}, null, 2);
+  return {
+    key: JSON.stringify(["page-script", pageUrl, source, shownArgs]),
+    summary: `Run JavaScript in the page on ${pagePlace(pageUrl)}${inPage ? " (as described by the page)" : ""}`,
+    reason: "JavaScript in the page always needs the person's approval, once each.",
+    detail: `${source}\n\n// args\n${shownArgs}`,
+    note: PAGE_SCRIPT_NOTE,
+    origin: originOf(pageUrl),
+    onceOnly: true,
+  };
 }

@@ -34,7 +34,7 @@ the complete generated notes and downloadable artifacts for each version.
   agent's call stays open while the person decides (Supercode `pending` lines: needs a
   Supercode CLI with `BROWSER_PERSON_TIMEOUT`). Targets are described from the browser
   side, and a script's routes, bindings, init scripts and listeners are removed when it
-  ends (Supercode browser-playwright 0.2.0).
+  ends (Supercode browser-playwright 0.2.1).
 
 ### Fixed
 

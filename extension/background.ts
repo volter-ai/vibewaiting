@@ -643,6 +643,7 @@ async function runBrowserOperation(
   } finally {
     debuggerIdle(tabId);
   }
+  allowanceUsed(task, tabId, raw);
   const approval = grant === null ? approvalRequest(raw) : null;
   const pending = pendingAgentBrowserRequests.get(id);
   // The Playwright host holds the tab for a decision once it refuses; it is
@@ -671,16 +672,28 @@ async function runBrowserOperation(
 
 /**
  * Origins the person allowed, per agent task and tab ("Allow on <origin> for
- * this task"). An allowance covers exactly that origin on that tab for that
- * task: a task id is never reused, so it ends with the task, and it goes with
- * the tab.
+ * this task"), with when each last let an action through. An allowance covers
+ * exactly that origin on that tab for that task; it ends when the task does
+ * (a task id is never reused), when the tab closes, and after
+ * ALLOWANCE_IDLE_MS without use. Allowances live only in this worker's memory.
  */
-const allowances = new Map<string, Set<string>>();
+const ALLOWANCE_IDLE_MS = 15 * 60_000;
+const allowances = new Map<string, Map<string, number>>();
 function allowanceKey(task: string, tabId: number): string {
   return `${tabId}\n${task}`;
 }
 function allowedOrigins(task: string | null, tabId: number): string[] {
-  return task === null ? [] : [...allowances.get(allowanceKey(task, tabId)) ?? []];
+  if (task === null) return [];
+  const origins = allowances.get(allowanceKey(task, tabId));
+  if (!origins) return [];
+  const now = Date.now();
+  for (const [origin, used] of origins) if (now - used > ALLOWANCE_IDLE_MS) origins.delete(origin);
+  return [...origins.keys()];
+}
+function allowanceUsed(task: string | null, tabId: number, raw: unknown): void {
+  const origin = record(raw)?.allowanceUsed;
+  const origins = task === null ? undefined : allowances.get(allowanceKey(task, tabId));
+  if (typeof origin === "string" && origins?.has(origin)) origins.set(origin, Date.now());
 }
 
 function releaseTab(tabId: number): void {
@@ -783,8 +796,8 @@ function settleApproval(
       post(port, { type: "browser-approval-settled", id, decision });
   if (decision === "allow-origin" && approval.task !== null && !approval.onceOnly) {
     const key = allowanceKey(approval.task, approval.tabId);
-    const origins = allowances.get(key) ?? new Set<string>();
-    origins.add(approval.origin);
+    const origins = allowances.get(key) ?? new Map<string, number>();
+    origins.set(approval.origin, Date.now());
     allowances.set(key, origins);
   }
   if (decision === "approve" || decision === "allow-origin") {
@@ -1440,8 +1453,18 @@ chrome.runtime.onConnect.addListener((port) => {
   void ensureNative();
 });
 
-chrome.runtime.onMessage.addListener((raw) => {
+chrome.runtime.onMessage.addListener((raw, sender, respond) => {
   const message = record(raw);
+  if (message?.type === "vibewaiting:tab-state" && typeof message.tabId === "number") {
+    // The Playwright host's last check before input, relayed by the offscreen
+    // document: the tab as Chrome sees it.
+    if (sender.tab || sender.url !== chrome.runtime.getURL("offscreen.html")) return;
+    void chrome.tabs.get(message.tabId).then(
+      (tab) => respond({ url: tab.url, ...(tab.pendingUrl ? { pendingUrl: tab.pendingUrl } : {}) }),
+      () => respond(null),
+    );
+    return true;
+  }
   if (message?.type === "settings-changed") {
     disconnectNative();
     void ensureNative();

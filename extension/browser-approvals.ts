@@ -8,10 +8,12 @@
  * Against clickjacking, an Allow button works only when the card has been
  * fully visible and still for a second (IntersectionObserver v2, restarted by
  * any move or resize of the card or of the messenger frame) and the pointer
- * has rested on that button for half a second (restarted whenever it enters
- * or leaves the button and by any move of the frame, and started only by the
- * pointer moving on the button). Both are measured
- * inside the extension's own frame.
+ * has rested on that button for half a second: the half second starts when
+ * the pointer, having moved onto the button, stops moving; any movement of
+ * 3 px or more, leaving or re-entering the button, and any move of the frame
+ * restart it. Both are measured inside the extension's own frame, where a
+ * change in `screenX - clientX` (or its Y twin) between pointer events is a
+ * move of the frame itself.
  */
 
 export interface BrowserApprovalCard {
@@ -38,6 +40,8 @@ export interface BrowserApprovals {
 const VISIBLE_BEFORE_APPROVE_MS = 1_000;
 /** ... and the pointer has rested on that button this long. */
 const REST_BEFORE_APPROVE_MS = 500;
+/** Pointer movement at least this far (px) restarts the rest. */
+const REST_TOLERANCE_PX = 3;
 
 interface VisibilityEntry extends IntersectionObserverEntry {
   /** Intersection Observer v2: true only when nothing covers, fades or distorts the element. */
@@ -131,17 +135,32 @@ export function createBrowserApprovals(
         allow.dataset.armed = String(armed);
       }
     };
-    // The rest starts with the pointer moving on the button, so a button that
-    // appears (or is moved) under a pointer that is not moving never arms.
+    // The rest starts where the pointer, having moved on the button, is; a
+    // button that appears (or is moved) under a pointer that is not moving
+    // never arms, and moving 3 px or more starts it again.
+    const anchors = new Map<HTMLButtonElement, { x: number; y: number }>();
     const rest = (allow: HTMLButtonElement): void => {
       clearTimeout(restTimers.get(allow));
       restTimers.delete(allow);
+      anchors.delete(allow);
       rested.set(allow, false);
       render();
     };
-    const moved = (allow: HTMLButtonElement): void => {
-      if (!hovered.has(allow) || rested.get(allow) || restTimers.has(allow)) return;
+    const moved = (allow: HTMLButtonElement, event: PointerEvent): void => {
+      if (!hovered.has(allow)) return;
+      const anchor = anchors.get(allow);
+      if (anchor && Math.hypot(event.clientX - anchor.x, event.clientY - anchor.y) < REST_TOLERANCE_PX) return;
+      rest(allow);
+      anchors.set(allow, { x: event.clientX, y: event.clientY });
       restTimers.set(allow, setTimeout(() => { restTimers.delete(allow); rested.set(allow, true); render(); }, REST_BEFORE_APPROVE_MS));
+    };
+    // The frame's place on the screen, as pointer events report it.
+    let frameAt: string | null = null;
+    const frameMoved = (event: PointerEvent): boolean => {
+      const now = `${event.screenX - event.clientX},${event.screenY - event.clientY}`;
+      const changed = frameAt !== null && now !== frameAt;
+      frameAt = now;
+      return changed;
     };
     const restart = (): void => {
       clearTimeout(visibleTimer);
@@ -151,9 +170,16 @@ export function createBrowserApprovals(
       for (const allow of allows) rest(allow);
     };
     for (const allow of allows) {
-      allow.addEventListener("pointerenter", () => { hovered.add(allow); rest(allow); });
-      allow.addEventListener("pointerleave", () => { hovered.delete(allow); rest(allow); });
-      allow.addEventListener("pointermove", () => { hovered.add(allow); moved(allow); });
+      allow.addEventListener("pointerenter", (event) => { hovered.add(allow); if (frameMoved(event)) restart(); rest(allow); });
+      allow.addEventListener("pointerleave", (event) => { hovered.delete(allow); frameMoved(event); rest(allow); });
+      allow.addEventListener("pointermove", (event) => {
+        hovered.add(allow);
+        if (frameMoved(event)) {
+          restart();
+          return;
+        }
+        moved(allow, event);
+      });
     }
     const observer = new IntersectionObserver((entries) => {
       const entry = entries[entries.length - 1] as VisibilityEntry | undefined;
