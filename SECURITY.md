@@ -17,10 +17,15 @@ the agent processes it controls.
   when the workspace-scoped provider receives a call. Snapshots and query results are
   bounded. Every action that can change a page or send it input (click, fill, press,
   focus, check, select, scroll, back, forward, reload, raw mouse presses, wheel, drag,
-  and `browser.script`, which is Playwright with the page including `page.evaluate`)
+  and `browser.script`, which runs its source as JavaScript in the page, as the page)
   runs only after the person allows it in the messenger, once or for the tab's current
-  origin for the agent's task; reading never asks. Scripts and fills into password,
-  one-time-code, card or file fields are allowed once each, even on an allowed origin.
+  origin for the agent's task (ended by the task, the tab closing, or 15 minutes without
+  use); reading never asks, though hovering scrolls its element into view. Scripts,
+  typing into password, one-time-code, card or file fields (or fields that were one on
+  this document), raw input whose target cannot be identified, and pages without a
+  real origin are allowed once each, even on an allowed origin. No agent code runs in
+  the extension; input is sent only to the document that was checked, and a navigation
+  in flight refuses it.
   Denial, no answer in 90 s, or a changed page refuses the action.
 - Whether to ask never depends on what an element is called; those words only shape
   the card. What the cards say comes from the browser on the debugger path; on the

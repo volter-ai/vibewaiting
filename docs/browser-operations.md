@@ -60,19 +60,31 @@ per-site permissions (`extension/browser-policy.ts`):
 - **Asks:** every action that can change the page or send it input: click, fill,
   press (with or without a locator), focus, check, uncheck, select, scroll, back,
   forward, reload, every raw mouse down, up and click, wheel, drag, and every
-  `browser.script` (Playwright with the real `page`, including `page.evaluate`).
+  `browser.script`.
 - **Never asks:** reading: status, snapshot, query, wait, box, hover, and moving the
-  mouse.
+  mouse. Hovering moves the mouse over the element and scrolls it into view, without
+  asking.
 - **Allowing a site:** a card offers **Deny**, **Allow once** and **Allow on
   &lt;origin&gt; for this task**. The allowance covers that exact origin, in that tab,
-  for the agent task that asked, and ends with the task: `supercode mcp serve` gives
-  its calls one task id for its lifetime, and a CLI call carries `SUPERCODE_TASK_ID`
-  when it is set (without one, a card offers only Allow once). Navigating to another
-  origin asks again.
-- **Always asks, once only:** scripts, and fills into a sensitive field: an input
-  whose `type` is `password` or `file` when the fill is about to run, or whose
-  `autocomplete` names a password, a one-time code or a card (`cc-*`). These cards
-  offer only Allow once, even on an allowed origin.
+  for the agent task that asked. It ends when the task ends, when the tab closes, or
+  after 15 minutes in which it let no action through, and it lives only in the
+  extension's memory. `supercode mcp serve` gives its calls its own random task id for
+  its lifetime (an environment variable cannot replace it); a one-shot CLI call carries
+  `SUPERCODE_TASK_ID` when it is set, and without a task a card offers only Allow once.
+  Navigating to another origin asks again. Pages without a real origin (about:, data:,
+  file:, blob:) never get the site option.
+- **Always asks, once only:** `browser.script`; typing (fill or press) into a sensitive
+  field: an input whose `type` is `password` or `file`, or whose `autocomplete` names a
+  password, a one-time code or a card (`cc-*`), or a field that was one of these when
+  the guard saw it earlier on this document (a "Show password" toggle does not make it
+  ordinary); raw pointer input whose target cannot be identified (a point inside a
+  frame); and any action on a page without a real origin. These cards offer only Allow
+  once, even on an allowed origin.
+
+`browser.script` runs its source as JavaScript in the page: the body of an async
+function of `args`, evaluated by the page itself, with the page's own power and
+nothing more. It cannot reach Vibewaiting or other tabs; no agent code runs in the
+extension. Its card shows the source and arguments and says it runs as the page.
 
 Whether to ask never depends on what an element is called. The words on and around
 the element only shape the card: "may submit, pay or delete" when they include words
@@ -81,8 +93,7 @@ form" for Enter in a text field inside a form. A card names the key Playwright
 actually sends (modifiers kept, `NumpadEnter` shown as Enter), a select's chosen
 options by label and value, a drag's element at the drop point, and a raw pointer
 action's point and the element under it. A script card shows the full source and
-arguments and what the script can reach while it runs; scripts over 20,000 characters
-are refused.
+arguments and says it runs as the page; scripts over 20,000 characters are refused.
 
 What the card describes comes from Supercode's executor, which describes each target
 from the browser side: a locator is resolved once (waiting up to 5 s) and the action
@@ -108,9 +119,17 @@ against: an agent's mistakes, on pages that describe themselves honestly. A host
 can mislabel its own elements on the in-page path, and nothing an agent types is secret
 from the page it types into.
 
-A script holds the page through a membrane: when it ends, or its 9 seconds run out, the
-membrane closes, so every later call it makes throws, and the routes, exposed bindings
-and functions, init scripts and listeners it installed are removed before the next call.
+Input goes only to the document that was checked. Just before any input is sent, the
+executor confirms the main frame still holds the document the action was checked on
+(its loader id and URL) with no navigation requested or loading, and Vibewaiting asks
+Chrome for the tab: a navigation in flight (`pendingUrl`), another origin than the one
+checked, or, on the in-page path, a page-reported URL that differs from the tab's
+refuses the action with `STALE_PAGE`, and nothing is sent.
+
+The Playwright host takes messages only from the offscreen document that holds it
+(trusted `postMessage` events from its parent), and an approved re-run only by a
+single-use nonce the background issued for that tab; the approved action's key never
+travels with an operation.
 
 When an operation asks, the messenger in that tab opens with the card and the agent's
 call stays open: the native companion writes Supercode `pending` lines, and Supercode
@@ -122,9 +141,11 @@ when it is routed and again when a call queued earlier starts to run.
 Against clickjacking, measured inside the extension's frame: an Allow button arms only
 after the card has been fully visible and still for a second (IntersectionObserver v2:
 not covered, faded or transformed; any move or resize of the card or of the messenger
-frame restarts it) and the pointer has moved onto that button and rested there for half
-a second (leaving or re-entering the button, or the frame moving, restarts it; a button
-that appears under a pointer that is not moving does not arm). The card never takes
+frame restarts it) and the pointer, having moved onto that button, has rested there for
+half a second: movement of 3 px or more, leaving or re-entering the button, or the frame
+moving restarts it, and inside the frame a change in `screenX - clientX` (or its Y twin)
+between pointer events counts as the frame moving. A button that appears under a
+pointer that is not moving does not arm. The card never takes
 focus, so a keystroke meant for the page cannot answer it.
 
 - **Allow once** and **Allow on &lt;origin&gt;** re-run that one operation with a
