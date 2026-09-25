@@ -338,7 +338,8 @@ export async function approvalFor(
     }
     case "browser_press_key": {
       // Shift, Control or Meta with Enter or Space opens a link in another tab or window.
-      if (/(^|\+)(Shift|Control|Meta|ControlOrMeta)\+/.test(String(args.key ?? "")) && /\+(Enter|NumpadEnter| |Space)$/.test(String(args.key ?? "")))
+      // Playwright takes physical names too (ShiftLeft, ControlRight, MetaLeft).
+      if (/(^|\+)(Shift|Control|Meta|ControlOrMeta)(Left|Right)?\+/.test(String(args.key ?? "")) && /\+(Enter|NumpadEnter| |Space)$/.test(String(args.key ?? "")))
         throw new BrowserRefusal("Enter or Space held with Shift, Control or Meta can open another tab or window; Vibewaiting drives only this tab.");
       const focused = await describeFocused(page, approvedFocus(approvedKey));
       if (focused) elements.push(focused);
