@@ -25,7 +25,11 @@ the agent processes it controls.
   this document), raw input whose target cannot be identified, and pages without a
   real origin are allowed once each, even on an allowed origin. No agent code runs in
   the extension; input is sent only to the document that was checked, and a navigation
-  in flight refuses it.
+  in flight refuses it (except a back/forward-cache restore on the debugger path that
+  completes between the last check and the dispatch). Each tab's in-page connection is
+  bound to the tab Chrome names for its port, so a page cannot claim another tab's
+  connection. Allowances end after 15 minutes unused, when the tab closes, or when the
+  agent's MCP session ends.
   Denial, no answer in 90 s, or a changed page refuses the action.
 - Whether to ask never depends on what an element is called; those words only shape
   the card. What the cards say comes from the browser on the debugger path; on the

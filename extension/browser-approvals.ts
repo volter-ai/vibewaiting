@@ -100,7 +100,7 @@ export function createBrowserApprovals(
     }
     const scope = document.createElement("p");
     scope.textContent = card.allowOrigin
-      ? `Allow once runs only this action. Allowing ${card.allowOrigin} lets the agent act on that site in this tab without asking until its task ends (except passwords, codes, card numbers, files and scripts).`
+      ? `Allow once runs only this action. Allowing ${card.allowOrigin} lets the agent act on that site in this tab without asking until 15 minutes pass unused, the tab closes or the agent's session ends (except passwords, codes, card numbers, files and scripts).`
       : "Allow once runs only this action. The agent asks again next time.";
     element.append(scope);
 

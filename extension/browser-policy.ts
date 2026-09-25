@@ -168,7 +168,7 @@ const POINTER_VERBS: Record<string, string> = {
 };
 
 const PAGE_SCRIPT_NOTE =
-  "It runs as the page itself, in the page's own JavaScript, and can do anything the page can: read and change the page, read what the page stores, and send requests as the page. It cannot reach Vibewaiting or other tabs.";
+  "It runs as the page itself, in the page's own JavaScript, and can do anything the page can: read and change the page, read what the page stores, send requests as the page, and reach the windows the page can reach. It cannot reach Vibewaiting or the agent.";
 
 /** An action on a page without a real origin, or with a target that cannot be identified, is allowed once each. */
 function onceOnlyWhy(url: string, target?: GuardedTarget): string | null {

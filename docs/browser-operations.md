@@ -66,11 +66,14 @@ per-site permissions (`extension/browser-policy.ts`):
   asking.
 - **Allowing a site:** a card offers **Deny**, **Allow once** and **Allow on
   &lt;origin&gt; for this task**. The allowance covers that exact origin, in that tab,
-  for the agent task that asked. It ends when the task ends, when the tab closes, or
-  after 15 minutes in which it let no action through, and it lives only in the
-  extension's memory. `supercode mcp serve` gives its calls its own random task id for
-  its lifetime (an environment variable cannot replace it); a one-shot CLI call carries
-  `SUPERCODE_TASK_ID` when it is set, and without a task a card offers only Allow once.
+  for the agent task that asked, and lives only in the extension's memory. It ends
+  after 15 minutes in which it let no action through, when the tab closes, or, for an
+  agent connected through `supercode mcp serve`, when that server (the agent's session)
+  ends: its random task id dies with it and is never reused. A one-shot CLI call carries
+  `SUPERCODE_TASK_ID` when it is set; Vibewaiting cannot see such a task end, so only the
+  idle limit and the tab end its allowance. Without a task a card offers only Allow once.
+  `supercode mcp serve` always uses its own task id (an environment variable cannot
+  replace it).
   Navigating to another origin asks again. Pages without a real origin (about:, data:,
   file:, blob:) never get the site option.
 - **Always asks, once only:** `browser.script`; typing (fill or press) into a sensitive
@@ -83,8 +86,11 @@ per-site permissions (`extension/browser-policy.ts`):
 
 `browser.script` runs its source as JavaScript in the page: the body of an async
 function of `args`, evaluated by the page itself, with the page's own power and
-nothing more. It cannot reach Vibewaiting or other tabs; no agent code runs in the
-extension. Its card shows the source and arguments and says it runs as the page.
+nothing more: it can do whatever the page itself can, including reaching other windows
+and tabs the page can reach (its opener, windows it opens, same-site tabs through
+storage or `BroadcastChannel`). It cannot reach Vibewaiting's extension or the agent;
+no agent code runs in the extension. Its card shows the source and arguments and says
+it runs as the page.
 
 Whether to ask never depends on what an element is called. The words on and around
 the element only shape the card: "may submit, pay or delete" when they include words
@@ -119,12 +125,21 @@ against: an agent's mistakes, on pages that describe themselves honestly. A host
 can mislabel its own elements on the in-page path, and nothing an agent types is secret
 from the page it types into.
 
+Each tab's in-page connection is bound to that tab by Chrome: the offscreen document
+takes the tab from the extension port's own sender, never from the page, and the
+Playwright host refuses a connection that claims any other tab's target (a page that
+recorded another tab's id and succession token cannot use them). Succession tokens are
+issued per document.
+
 Input goes only to the document that was checked. Just before any input is sent, the
 executor confirms the main frame still holds the document the action was checked on
 (its loader id and URL) with no navigation requested or loading, and Vibewaiting asks
 Chrome for the tab: a navigation in flight (`pendingUrl`), another origin than the one
 checked, or, on the in-page path, a page-reported URL that differs from the tab's
-refuses the action with `STALE_PAGE`, and nothing is sent.
+refuses the action with `STALE_PAGE`, and nothing is sent. One race remains: on the
+debugger path, a back/forward navigation served from the back/forward cache can
+complete between the last check and the dispatch of the input, and the input then
+reaches the restored page.
 
 The Playwright host takes messages only from the offscreen document that holds it
 (trusted `postMessage` events from its parent), and an approved re-run only by a
@@ -141,11 +156,14 @@ when it is routed and again when a call queued earlier starts to run.
 Against clickjacking, measured inside the extension's frame: an Allow button arms only
 after the card has been fully visible and still for a second (IntersectionObserver v2:
 not covered, faded or transformed; any move or resize of the card or of the messenger
-frame restarts it) and the pointer, having moved onto that button, has rested there for
-half a second: movement of 3 px or more, leaving or re-entering the button, or the frame
-moving restarts it, and inside the frame a change in `screenX - clientX` (or its Y twin)
+frame restarts it) and the pointer, having moved onto that button, had rested there for
+half a second when the button is pressed: movement of 3 px or more, leaving or
+re-entering the button, or the frame moving restarts it, movement between press and
+release is ignored, and inside the frame a change in `screenX - clientX` (or its Y twin)
 between pointer events counts as the frame moving. A button that appears under a
-pointer that is not moving does not arm. The card never takes
+pointer that is not moving does not arm. An unarmed button reads "Hold still to allow",
+and pressing it says so instead of doing nothing silently. A keyboard press on a
+focused Allow button needs only the visibility gate. The card never takes
 focus, so a keystroke meant for the page cannot answer it.
 
 - **Allow once** and **Allow on &lt;origin&gt;** re-run that one operation with a

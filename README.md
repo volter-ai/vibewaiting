@@ -90,7 +90,8 @@ When you invoke a local browser operation, its bounded result crosses the compan
 that local caller. Anything an agent does that can change a page or send it input
 (clicking, typing, pressing keys, selecting, scrolling, navigating, mouse presses and
 scripts) asks you first in the messenger, unless you allowed that site for the agent's
-task (until the task ends, the tab closes, or 15 minutes pass unused); reading the
+task (until 15 minutes pass unused, the tab closes, or the agent's MCP session ends);
+reading the
 page never asks. Scripts, which run as JavaScript in the page with the page's own power,
 and typing into password, one-time-code, card or file fields ask every time. See [Browser operations](docs/browser-operations.md) for
 the exact operations and trust boundary.

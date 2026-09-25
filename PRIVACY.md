@@ -36,7 +36,8 @@ activity described above. Before a browser tool changes a page or sends it input
 (clicking, typing, pressing keys, selecting, scrolling, navigating, mouse presses,
 scripts), the messenger asks you, naming the action and page. **Allow once** runs only
 that action; **Allow on <origin> for this task** lets the agent act on that site in that
-tab until its task ends; **Deny**, or no answer within 90 seconds, refuses it. Scripts
+tab until 15 minutes pass without use, the tab closes, or the agent's session ends;
+**Deny**, or no answer within 90 seconds, refuses it. Scripts
 and fills into password, one-time-code, card or file fields ask every time. Allowances
 live only in the extension's memory and are never stored. Page text, selections, links, and images do not cross into the
 local companion unless you use **Attach** or invoke a browser snapshot/query operation. URLs are
