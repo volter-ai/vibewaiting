@@ -194,9 +194,12 @@ export function createBrowserApprovals(
     }, { threshold: [1], trackVisibility: true, delay: 100 } as IntersectionObserverInit);
     let place = "";
     let tracking = 0;
+    // The card's place in the frame. Its size follows its own content (a
+    // button's label, a hint); the frame's own size and place are watched by
+    // the page's content script and by the pointer's screen offset.
     const track = (): void => {
       const rect = element.getBoundingClientRect();
-      const now = `${rect.x},${rect.y},${rect.width},${rect.height}`;
+      const now = `${rect.x},${rect.y}`;
       if (place && now !== place) restart();
       place = now;
       tracking = requestAnimationFrame(track);
@@ -251,6 +254,16 @@ export function createBrowserApprovals(
     cards.set(card.id, { element, stop, restart });
     // No focus move: a keystroke meant for the page never answers the card.
     node.append(element);
+    // A button keeps one width whichever label it shows, so arming never
+    // moves what is under the pointer.
+    for (const allow of allows) {
+      const widths = [allow.dataset.label ?? "", "Hold still to allow"].map((text) => {
+        allow.textContent = text;
+        return allow.getBoundingClientRect().width;
+      });
+      allow.style.minWidth = `${Math.ceil(Math.max(...widths))}px`;
+      allow.textContent = allow.dataset.label ?? "";
+    }
     observer.observe(element);
   };
 
