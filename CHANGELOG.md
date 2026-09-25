@@ -20,12 +20,16 @@ the complete generated notes and downloadable artifacts for each version.
   leave out Vibewaiting's own messenger and launcher. Firefox remains unsupported: it
   does not install the extension.
 - Browser approvals in the messenger. Before an agent fills a password or file field,
-  activates a consequential control, or runs a script, the messenger opens with a card
-  naming the exact action and page. Approve once re-runs that one operation with a
-  one-time grant bound to its operation id, tab and target; Deny, no answer within 90
-  seconds, or closing the tab refuses it with the reason. The agent's call stays open
-  while the person decides (Supercode `pending` lines, which need a Supercode CLI
-  with `BROWSER_PERSON_TIMEOUT`).
+  activates a consequential control (by locator or by coordinates), or runs a script,
+  the messenger opens with a card naming the exact action and page, with a script's
+  full source and arguments. Approve once re-runs that one operation with a
+  single-use, nonce-bound grant for its operation id, tab and target, and becomes
+  clickable only after the card has been visible for a continuous second. Deny, no
+  answer within 90 seconds, closing the tab, or the agent's call ending refuses it
+  with the reason; while a card is open, nothing else runs on that tab. The agent's
+  call stays open while the person decides (Supercode `pending` lines: needs a
+  Supercode CLI with `BROWSER_PERSON_TIMEOUT`). The guard reads each target from the
+  browser side (Supercode browser-playwright 0.2.0).
 
 ### Fixed
 
@@ -37,8 +41,9 @@ the complete generated notes and downloadable artifacts for each version.
 
 - Supercode provider discovery is loopback-only with random-token, owner-only
   discovery. Nothing an agent does in the tab is approved standing, the approval card
-  never takes keyboard focus, and revoking website access removes the executor and
-  detaches the debugger.
+  never takes keyboard focus, a point on Vibewaiting's own interface is refused, scripts
+  over 20,000 characters are refused, and revoking website access removes the executor
+  and detaches the debugger.
 - The store listing and privacy policy explain the `debugger` permission: used only on
   pages that block the in-page executor, only on the tab an agent drives, and only
   while it drives it.

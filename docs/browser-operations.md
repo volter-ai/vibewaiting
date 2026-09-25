@@ -57,27 +57,53 @@ page, so a screen reader still reads them.
 Filling a password or file field, activating a control likely to submit, purchase,
 publish, send, transfer or delete, and every `browser.script` need the person's
 approval. Vibewaiting's guard (`extension/browser-policy.ts`) is asked before each
-locator action and before each script; a script runs the agent's Playwright source
-with the real `page`, including `page.evaluate`, and its own locator calls do not pass
-the guard, so the script itself is what the person approves.
+locator action, each coordinate action (`browser.mouse`, `browser.drag`,
+`browser.wheel`) and each script; a script runs the agent's Playwright source with
+the real `page`, including `page.evaluate`, and its own locator calls do not pass the
+guard, so the script itself is what the person approves.
+
+The guard reads the target as Supercode's executor describes it from the browser
+side: a locator is resolved once (waiting up to 5 s, so a control that renders late
+is guarded rather than skipped) and the action runs on that same element; a
+coordinate action is guarded on the element at the point, and a point on
+Vibewaiting's own messenger or launcher is refused. The element is found in an
+isolated world and described over CDP (tag, attributes, accessible role and name,
+and the controls it sits in), so a page cannot change what the guard reads by
+overriding DOM functions. On the AlmostCDP path the CDP endpoint itself runs in the
+page, so there the description is only as trustworthy as the page's world; on the
+debugger path it is Chrome's. A target that cannot be described (inside an embedded
+frame or a closed shadow root) is refused.
 
 When the guard stops an operation, the messenger in that tab opens with an approval
 card naming the exact action and page ("Fill password field on github.com/login",
-"Run script on example.com", with the script's source shown). The agent's call stays
-open meanwhile: the native companion writes Supercode `pending` lines, and Supercode
-waits up to 120 s after each.
+"Run script on example.com", with the script's full source and arguments shown;
+scripts over 20,000 characters are refused outright). The agent's call stays open
+meanwhile: the native companion writes Supercode `pending` lines, and Supercode waits
+up to 120 s after each, never past 10 minutes. A caller that does not declare it can
+wait is refused at once and the person is not asked. While a card is open, every
+other browser operation on that tab is refused with the pending decision named.
+
+Approve becomes clickable only after the card has been continuously visible on
+screen for one second, as the browser itself judges it (IntersectionObserver v2:
+not covered, faded or transformed); covering or hiding the card starts the count
+again. The card never takes focus, so a keystroke meant for the page cannot answer
+it.
 
 - **Approve once** re-runs that one operation with a one-time grant bound to the
   operation's id, its tab and the exact action the card named (the action, the page
-  URL and the element). The grant lets that single action through and ends with the
-  operation; the agent receives the operation's own result. If the page changed so the
-  action no longer matches, nothing runs and the agent is told so.
+  URL and the element, or the script's source and arguments). The background mints a
+  single-use nonce per card, and the Playwright host's offscreen document honours the
+  grant only with that nonce, for that tab, from the background. The grant lets that
+  single action through and ends with the operation; the agent receives the
+  operation's own result. If the page changed so the action no longer matches, nothing
+  runs and the agent is told so.
 - **Deny** returns `APPROVAL_REQUIRED` with "The person denied this in Vibewaiting: …
   Nothing ran."
 - No answer in 90 seconds, or closing the tab, refuses the same way and says why.
+- If the agent's call ends first (it stopped waiting), the card says "The agent
+  stopped waiting. Nothing ran." and can no longer approve anything.
 
-Nothing is approved standing: the same action later asks again. The card never takes
-focus, so a keystroke meant for the page cannot answer it.
+Nothing is approved standing: the same action later asks again.
 
 ## Permissions
 
