@@ -70,13 +70,18 @@ function quoted(name: string): string {
 /** Every name the browser gives a node: its accessible name and the attributes that label it. */
 function namesOf(node: GuardedNode): string[] {
   const { attributes } = node;
-  return [node.name, attributes["aria-label"], attributes.title, attributes.value, attributes.alt]
+  return [node.name, attributes["aria-label"], attributes.title, attributes.value, attributes.alt, node.text]
     .filter((value): value is string => typeof value === "string" && value.trim() !== "");
 }
 
-/** What the element is called, from itself or the controls it sits in (never the document). */
+/** The controls an element sits in: its accessibility ancestors, never the document itself. */
+function controlsOf(target: GuardedTarget): GuardedNode[] {
+  return target.ancestors.filter((node) => !/^(RootWebArea|WebArea)$/.test(node.role));
+}
+
+/** What the element is called, from itself or the controls it sits in. */
 function nameOf(target: GuardedTarget): string | null {
-  const controls = target.ancestors.filter((node) => !/^(RootWebArea|WebArea)$/.test(node.role));
+  const controls = controlsOf(target);
   const name = [...target.nodes, ...controls].flatMap(namesOf)[0];
   if (name) return quoted(name);
   return target.nodes[0]?.tag ? `a <${target.nodes[0].tag}> element` : null;
@@ -84,7 +89,7 @@ function nameOf(target: GuardedTarget): string | null {
 
 /** The card's warning, from the words on and around the element. */
 function warning(target: GuardedTarget): string {
-  const words = [...target.nodes, ...target.ancestors].flatMap(namesOf);
+  const words = [...target.nodes, ...controlsOf(target)].flatMap(namesOf);
   return words.some((word) => CONSEQUENTIAL.test(word)) ? " — may submit, pay or delete" : "";
 }
 

@@ -9,7 +9,8 @@
  * fully visible and still for a second (IntersectionObserver v2, restarted by
  * any move or resize of the card or of the messenger frame) and the pointer
  * has rested on that button for half a second (restarted whenever it enters
- * or leaves the button, and by any move of the frame). Both are measured
+ * or leaves the button and by any move of the frame, and started only by the
+ * pointer moving on the button). Both are measured
  * inside the extension's own frame.
  */
 
@@ -130,12 +131,17 @@ export function createBrowserApprovals(
         allow.dataset.armed = String(armed);
       }
     };
+    // The rest starts with the pointer moving on the button, so a button that
+    // appears (or is moved) under a pointer that is not moving never arms.
     const rest = (allow: HTMLButtonElement): void => {
       clearTimeout(restTimers.get(allow));
+      restTimers.delete(allow);
       rested.set(allow, false);
-      if (hovered.has(allow))
-        restTimers.set(allow, setTimeout(() => { rested.set(allow, true); render(); }, REST_BEFORE_APPROVE_MS));
       render();
+    };
+    const moved = (allow: HTMLButtonElement): void => {
+      if (!hovered.has(allow) || rested.get(allow) || restTimers.has(allow)) return;
+      restTimers.set(allow, setTimeout(() => { restTimers.delete(allow); rested.set(allow, true); render(); }, REST_BEFORE_APPROVE_MS));
     };
     const restart = (): void => {
       clearTimeout(visibleTimer);
@@ -147,6 +153,7 @@ export function createBrowserApprovals(
     for (const allow of allows) {
       allow.addEventListener("pointerenter", () => { hovered.add(allow); rest(allow); });
       allow.addEventListener("pointerleave", () => { hovered.delete(allow); rest(allow); });
+      allow.addEventListener("pointermove", () => { hovered.add(allow); moved(allow); });
     }
     const observer = new IntersectionObserver((entries) => {
       const entry = entries[entries.length - 1] as VisibilityEntry | undefined;
