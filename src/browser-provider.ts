@@ -93,8 +93,10 @@ export class BrowserProviderBroker {
         name: "Vibewaiting active tab",
         fidelity: {
           target: "active-or-leased-http-page",
-          implementation: "playwright-core 1.63.0 over AlmostCDP",
-          transport: "almostcdp",
+          // A page whose CSP forbids eval is driven over chrome.debugger with
+          // Chrome's own input; browser.status reports each page's own.
+          implementation: "playwright-core 1.63.0 over AlmostCDP, or over chrome.debugger where the page forbids eval",
+          transport: "almostcdp or chrome.debugger",
           accessibility: "playwright-aria-snapshot",
           syntheticEvents: true,
           trustedInput: false,

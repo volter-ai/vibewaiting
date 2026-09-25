@@ -5,6 +5,8 @@ interface ExtensionEvent<T> {
 interface ExtensionPort {
   name: string;
   sender?: {
+    id?: string;
+    url?: string;
     tab?: { id?: number; windowId?: number };
     frameId?: number;
   };
@@ -12,6 +14,11 @@ interface ExtensionPort {
   disconnect(): void;
   onMessage: ExtensionEvent<(message: unknown) => void>;
   onDisconnect: ExtensionEvent<() => void>;
+}
+
+interface DebuggerTarget {
+  tabId?: number;
+  sessionId?: string;
 }
 
 declare const chrome: {
@@ -54,8 +61,21 @@ declare const chrome: {
       target: { tabId: number };
       world?: "ISOLATED" | "MAIN";
     }): Promise<unknown[]>;
+    executeScript<T>(injection: {
+      func: () => T;
+      target: { tabId: number };
+      world?: "ISOLATED" | "MAIN";
+    }): Promise<Array<{ result?: T }>>;
   };
-  offscreen: {
+  debugger: {
+    attach(target: DebuggerTarget, requiredVersion: string): Promise<void>;
+    detach(target: DebuggerTarget): Promise<void>;
+    sendCommand(target: DebuggerTarget, method: string, params?: unknown): Promise<unknown>;
+    onEvent: ExtensionEvent<(source: DebuggerTarget, method: string, params?: unknown) => void>;
+    onDetach: ExtensionEvent<(source: DebuggerTarget, reason: string) => void>;
+  };
+  /** Absent in Firefox. */
+  offscreen?: {
     createDocument(parameters: { url: string; reasons: Array<"IFRAME_SCRIPTING">; justification: string }): Promise<void>;
     hasDocument(): Promise<boolean>;
   };

@@ -4,11 +4,13 @@
  * page functions). It serves one AlmostCDP endpoint that each driven tab's
  * main-world surface attaches to, connects unmodified Playwright to it, and
  * answers the agent's `browser.*` operations with Supercode's Playwright
- * executor. The offscreen document (offscreen.ts) is its only caller.
+ * executor. A tab whose page forbids eval is instead its own Playwright
+ * connection over Chrome's DevTools protocol, relayed from `chrome.debugger`
+ * by the background. The offscreen document (offscreen.ts) is its only caller.
  */
 import { createSocketEndpoint } from "@volter/almostcdp/socket";
 import { MessagePortTransport } from "@volter/almostcdp/message-port";
-import { connectPlaywright, pageFor, type Browser, type Page } from "@volter/almostcdp/playwright";
+import { connectPlaywright, messagePortTransport, pageFor, type Browser, type Page } from "@volter/almostcdp/playwright";
 import { PlaywrightOperationExecutor } from "@volter-ai-dev/supercode-browser-playwright/executor";
 import {
   BROWSER_OPERATION_NAMES,
@@ -17,8 +19,13 @@ import {
 } from "@volter-ai-dev/supercode-browser-playwright/protocol";
 import { guardBrowserAction } from "./browser-policy.js";
 
+/** Vibewaiting's own overlay in the page, which snapshots leave out. */
+const OWN_OVERLAY = '[data-widget-shell-id="vibewaiting"]';
+
 const endpoint = createSocketEndpoint({ address: "vibewaiting.extension" });
 let browser: Promise<Browser> | undefined;
+/** Tabs driven over Chrome's debugger, by `debugger:<tabId>`: one browser each, holding that one page. */
+const debuggerBrowsers = new Map<string, Promise<Browser>>();
 const executors = new WeakMap<Page, PlaywrightOperationExecutor>();
 // Operations on one page never interleave.
 const queues = new Map<string, Promise<unknown>>();
@@ -42,9 +49,10 @@ function operationOf(call: unknown): BrowserOperationName {
 async function execute(target: string, call: unknown): Promise<BrowserOperationResult> {
   let page: Page;
   let connection: Browser;
+  const viaDebugger = debuggerBrowsers.get(target);
   try {
-    connection = await connected();
-    page = await pageFor(connection, target);
+    connection = await (viaDebugger ?? connected());
+    page = await pageFor(connection, viaDebugger ? undefined : target);
   } catch (error) {
     return {
       ok: false,
@@ -55,9 +63,10 @@ async function execute(target: string, call: unknown): Promise<BrowserOperationR
   let executor = executors.get(page);
   if (!executor) {
     executor = new PlaywrightOperationExecutor(page, {
-      syntheticEvents: true,
-      endpoint: connection.version(),
+      syntheticEvents: !viaDebugger,
+      endpoint: viaDebugger ? `Chrome ${connection.version()} (chrome.debugger)` : connection.version(),
       actionGuard: guardBrowserAction,
+      snapshotExclude: OWN_OVERLAY,
     });
     executors.set(page, executor);
   }
@@ -71,6 +80,16 @@ window.addEventListener("message", (event) => {
   if (!port) return;
   if (message?.type === "surface") {
     endpoint.attachSurface(new MessagePortTransport(port));
+    return;
+  }
+  if (message?.type === "debugger" && typeof message.target === "string") {
+    const target = message.target;
+    const connection = connectPlaywright(messagePortTransport(port)).then((opened) => {
+      opened.on("disconnected", () => { if (debuggerBrowsers.get(target) === connection) debuggerBrowsers.delete(target); });
+      return opened;
+    });
+    debuggerBrowsers.set(target, connection);
+    connection.catch(() => { if (debuggerBrowsers.get(target) === connection) debuggerBrowsers.delete(target); });
     return;
   }
   if (message?.type === "operation" && typeof message.target === "string") {

@@ -13,7 +13,7 @@
   "browser_specific_settings": {
     "gecko": { "id": "vibewaiting@volter.ai" }
   },
-  "permissions": ["contextMenus", "nativeMessaging", "offscreen", "scripting", "storage"],
+  "permissions": ["contextMenus", "debugger", "nativeMessaging", "offscreen", "scripting", "storage"],
   "optional_host_permissions": ["http://*/*", "https://*/*"],
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' ws://127.0.0.1:*"

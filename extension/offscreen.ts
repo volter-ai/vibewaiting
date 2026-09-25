@@ -2,7 +2,8 @@
  * The offscreen document that keeps the Playwright host (playwright.html, a
  * sandboxed page without extension APIs) alive across the tabs' navigations,
  * and connects it to them: each driven tab's surface port, relayed by the
- * tab's content script, and the background's operation requests.
+ * tab's content script, a tab's debugger relay from the background, and the
+ * background's operation requests.
  */
 import type { BrowserOperationResult } from "@volter-ai-dev/supercode-browser-playwright/protocol";
 
@@ -51,15 +52,56 @@ chrome.runtime.onConnect.addListener((port) => {
   });
 });
 
+/**
+ * A tab driven over Chrome's debugger (the background's relay, reached by a
+ * runtime port) is its own Playwright connection in the host, named by
+ * `debugger:<tabId>`.
+ */
+const debuggerTabs = new Map<number, string>();
+function debuggerTarget(host: Window, tabId: number): string {
+  let target = debuggerTabs.get(tabId);
+  if (target) return target;
+  target = `debugger:${tabId}`;
+  debuggerTabs.set(tabId, target);
+  const relay = chrome.runtime.connect({ name: "vibewaiting:cdp" });
+  relay.postMessage({ type: "attach", tabId });
+  const channel = new MessageChannel();
+  const close = (): void => {
+    if (debuggerTabs.get(tabId) !== target) return;
+    debuggerTabs.delete(tabId);
+    channel.port1.postMessage({ type: "close" });
+    channel.port1.close();
+  };
+  channel.port1.onmessage = (event) => {
+    const message = event.data as { type?: unknown } | null;
+    if (message?.type === "close") {
+      relay.disconnect();
+      close();
+      return;
+    }
+    try { relay.postMessage(event.data); } catch { close(); }
+  };
+  relay.onMessage.addListener((message) => {
+    if ((message as { type?: unknown } | null)?.type === "close") close();
+    else channel.port1.postMessage(message);
+  });
+  relay.onDisconnect.addListener(close);
+  host.postMessage({ type: "debugger", target }, "*", [channel.port2]);
+  return target;
+}
+
 chrome.runtime.onMessage.addListener((raw, _sender, respond) => {
   const message = typeof raw === "object" && raw !== null ? raw as Record<string, unknown> : null;
   if (message?.type !== "vibewaiting:browser-operation" || typeof message.tabId !== "number") return false;
-  const target = surfaceOf(message.tabId).id;
+  const tabId = message.tabId;
   const reply = new MessageChannel();
   reply.port1.onmessage = (event) => {
     respond(event.data as BrowserOperationResult);
     reply.port1.close();
   };
-  void ready.then((host) => host.postMessage({ type: "operation", target, call: message.call }, "*", [reply.port2]));
+  void ready.then((host) => {
+    const target = message.via === "debugger" ? debuggerTarget(host, tabId) : surfaceOf(tabId).id;
+    host.postMessage({ type: "operation", target, call: message.call }, "*", [reply.port2]);
+  });
   return true;
 });

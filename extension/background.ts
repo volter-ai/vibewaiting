@@ -180,6 +180,7 @@ function syncSiteAccess(injectExisting = false): Promise<void> {
       } else if (!allowed && active.length) {
         for (const port of contentPorts)
           post(port, { type: "site-access-revoked" });
+        for (const relay of [...debuggerRelays.values()]) closeRelay(relay, true);
         await chrome.scripting.unregisterContentScripts({ ids: active });
       }
       if (allowed) installContextMenus();
@@ -488,6 +489,17 @@ async function routeBrowserOperation(
   id: string,
   call: BrowserOperationCall,
 ): Promise<void> {
+  const offscreen = chrome.offscreen;
+  if (!offscreen) {
+    sendAgentBrowserResponse(
+      id,
+      unavailableBrowserResult(
+        call.operation,
+        "Browser operations need Chrome: in Firefox, Vibewaiting cannot run Playwright for the tab (Firefox has no offscreen documents or debugger API for extensions).",
+      ),
+    );
+    return;
+  }
   const requestedPage =
     typeof call.input.page === "string" ? call.input.page : undefined;
   const tabId = requestedPage
@@ -530,10 +542,13 @@ async function routeBrowserOperation(
   pendingAgentBrowserRequests.set(id, { tabId, operation: call.operation, timer });
   let raw: unknown;
   try {
-    await ensurePlaywrightHost();
-    drivenTabs.add(tabId);
-    post(content, { type: "surface-connect" });
-    raw = await chrome.runtime.sendMessage({ type: "vibewaiting:browser-operation", tabId, call });
+    await ensurePlaywrightHost(offscreen);
+    const via = await driverFor(tabId);
+    if (via === "surface") {
+      drivenTabs.add(tabId);
+      post(content, { type: "surface-connect" });
+    }
+    raw = await chrome.runtime.sendMessage({ type: "vibewaiting:browser-operation", tabId, via, call });
   } catch (error) {
     raw = {
       ok: false,
@@ -546,14 +561,166 @@ async function routeBrowserOperation(
 
 let playwrightHost: Promise<void> | null = null;
 /** The offscreen document hosting Playwright (offscreen.html → playwright.html). */
-async function ensurePlaywrightHost(): Promise<void> {
-  if (await chrome.offscreen.hasDocument()) return;
-  playwrightHost ??= chrome.offscreen.createDocument({
+async function ensurePlaywrightHost(offscreen: NonNullable<typeof chrome.offscreen>): Promise<void> {
+  if (await offscreen.hasDocument()) return;
+  playwrightHost ??= offscreen.createDocument({
     url: "offscreen.html",
     reasons: ["IFRAME_SCRIPTING"],
     justification: "Runs Playwright in a sandboxed frame to answer an agent's browser operations on the tab the person shares.",
   }).finally(() => { playwrightHost = null; });
   await playwrightHost;
+}
+
+/**
+ * How Playwright reaches a tab. A page whose Content-Security-Policy forbids
+ * eval cannot answer Playwright's evaluations through the main-world AlmostCDP
+ * surface, so such a tab is driven over Chrome's own DevTools protocol through
+ * `chrome.debugger` (Chrome shows its "started debugging this browser" bar on
+ * it) until the debugger detaches: the person cancels the bar, the tab closes,
+ * or website access is revoked.
+ */
+async function driverFor(tabId: number): Promise<"surface" | "debugger"> {
+  if (debuggerRelays.has(tabId)) return "debugger";
+  const [probe] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    func: () => {
+      try {
+        new Function("return 0");
+        return true;
+      } catch {
+        return false;
+      }
+    },
+  }).catch(() => [] as Array<{ result?: boolean }>);
+  return probe?.result === false ? "debugger" : "surface";
+}
+
+/**
+ * One tab driven over `chrome.debugger`, presented to Playwright as a browser
+ * holding that one page (the shape of Playwright's own extension relay): the
+ * browser-level commands Playwright's connect sends are answered here, the
+ * tab's own and its child sessions' commands go to the tab's debugger.
+ */
+interface DebuggerRelay {
+  tabId: number;
+  port: ExtensionPort;
+  sessionId: string;
+  targetInfo: Record<string, unknown> | null;
+  attach: Promise<void> | null;
+  children: Set<string>;
+}
+const debuggerRelays = new Map<number, DebuggerRelay>();
+
+function relaySend(relay: DebuggerRelay, message: unknown): void {
+  try {
+    relay.port.postMessage({ type: "data", data: JSON.stringify(message) });
+  } catch { /* The Playwright host went away; its disconnect closes the relay. */ }
+}
+
+function attachRelay(relay: DebuggerRelay): Promise<void> {
+  relay.attach ??= (async () => {
+    await chrome.debugger.attach({ tabId: relay.tabId }, "1.3");
+    const info = await chrome.debugger.sendCommand({ tabId: relay.tabId }, "Target.getTargetInfo") as
+      { targetInfo?: Record<string, unknown> } | undefined;
+    relay.targetInfo = info?.targetInfo ?? null;
+    relaySend(relay, {
+      method: "Target.attachedToTarget",
+      params: { sessionId: relay.sessionId, targetInfo: { ...relay.targetInfo, attached: true }, waitingForDebugger: false },
+    });
+  })();
+  return relay.attach;
+}
+
+async function relayCommand(relay: DebuggerRelay, method: string, params: unknown, sessionId: string | undefined): Promise<unknown> {
+  const tab = { tabId: relay.tabId };
+  if (sessionId === undefined) {
+    if (method === "Browser.getVersion") {
+      const version = /Chrome\/([\d.]+)/.exec(navigator.userAgent)?.[1] ?? "0";
+      return { protocolVersion: "1.3", product: `Chrome/${version}`, revision: "", userAgent: navigator.userAgent, jsVersion: "" };
+    }
+    if (method === "Browser.setDownloadBehavior") return {};
+    if (method === "Target.setAutoAttach") {
+      await attachRelay(relay);
+      return {};
+    }
+    if (method === "Target.getTargetInfo") return { targetInfo: relay.targetInfo };
+    if (method === "Target.createTarget" || method === "Target.closeTarget" || method === "Target.createBrowserContext")
+      throw new Error("Vibewaiting drives only the tab the person shares.");
+    await attachRelay(relay);
+    return await chrome.debugger.sendCommand(tab, method, params);
+  }
+  if (sessionId === relay.sessionId) return await chrome.debugger.sendCommand(tab, method, params);
+  if (relay.children.has(sessionId)) return await chrome.debugger.sendCommand({ ...tab, sessionId }, method, params);
+  throw new Error(`No session ${sessionId} in this tab.`);
+}
+
+function closeRelay(relay: DebuggerRelay, detach: boolean): void {
+  if (debuggerRelays.get(relay.tabId) !== relay) return;
+  debuggerRelays.delete(relay.tabId);
+  if (detach && relay.attach) void chrome.debugger.detach({ tabId: relay.tabId }).catch(() => undefined);
+  try {
+    relay.port.postMessage({ type: "close", code: 1000, reason: "The tab's debugger detached" });
+    relay.port.disconnect();
+  } catch { /* Already gone. */ }
+}
+
+chrome.debugger?.onEvent.addListener((source, method, params) => {
+  const relay = source.tabId === undefined ? undefined : debuggerRelays.get(source.tabId);
+  if (!relay) return;
+  const child = (params as { sessionId?: unknown } | undefined)?.sessionId;
+  if (typeof child === "string" && method === "Target.attachedToTarget") relay.children.add(child);
+  if (typeof child === "string" && method === "Target.detachedFromTarget") relay.children.delete(child);
+  relaySend(relay, { sessionId: source.sessionId ?? relay.sessionId, method, params });
+});
+chrome.debugger?.onDetach.addListener((source) => {
+  const relay = source.tabId === undefined ? undefined : debuggerRelays.get(source.tabId);
+  if (!relay) return;
+  relaySend(relay, { method: "Target.detachedFromTarget", params: { sessionId: relay.sessionId, targetId: relay.targetInfo?.targetId } });
+  closeRelay(relay, false);
+});
+chrome.tabs.onRemoved.addListener((tabId) => {
+  const relay = debuggerRelays.get(tabId);
+  if (relay) closeRelay(relay, false);
+});
+
+/** The Playwright host's CDP connection to one tab's debugger (offscreen.ts). */
+function acceptDebuggerPort(port: ExtensionPort): void {
+  if (port.sender?.tab || port.sender?.id !== chrome.runtime.id) {
+    port.disconnect();
+    return;
+  }
+  let relay: DebuggerRelay | null = null;
+  port.onMessage.addListener((raw) => {
+    const message = record(raw);
+    if (!message) return;
+    if (!relay) {
+      const tabId = message.tabId;
+      if (message.type !== "attach" || typeof tabId !== "number" || debuggerRelays.has(tabId)) {
+        port.disconnect();
+        return;
+      }
+      relay = { tabId, port, sessionId: `vibewaiting-tab-${tabId}`, targetInfo: null, attach: null, children: new Set() };
+      debuggerRelays.set(tabId, relay);
+      return;
+    }
+    if (message.type === "close") {
+      closeRelay(relay, true);
+      return;
+    }
+    if (message.type !== "data" || typeof message.data !== "string") return;
+    const current = relay;
+    const command = JSON.parse(message.data) as { id: number; method: string; params?: unknown; sessionId?: string };
+    void relayCommand(current, command.method, command.params, command.sessionId).then(
+      (result) => relaySend(current, { id: command.id, ...(command.sessionId ? { sessionId: command.sessionId } : {}), result: result ?? {} }),
+      (error: unknown) => relaySend(current, {
+        id: command.id,
+        ...(command.sessionId ? { sessionId: command.sessionId } : {}),
+        error: { message: error instanceof Error ? error.message : String(error) },
+      }),
+    );
+  });
+  port.onDisconnect.addListener(() => { if (relay) closeRelay(relay, true); });
 }
 
 function finishAgentBrowserRequest(id: string, tabId: number, raw: unknown): void {
@@ -804,6 +971,10 @@ function handleBrowserRequest(
 }
 
 chrome.runtime.onConnect.addListener((port) => {
+  if (port.name === "vibewaiting:cdp") {
+    acceptDebuggerPort(port);
+    return;
+  }
   if (port.name === "vibewaiting:options") {
     optionsPorts.add(port);
     post(port, { type: "status", ...lastStatus });

@@ -43,8 +43,10 @@ Attach context crosses into the extension only after an explicit attach action a
 normalized and bounded before native messaging. Separately, Vibewaiting can register
 an active-tab provider for Supercode's canonical browser capability, answered by
 Playwright in a sandboxed extension page against an AlmostCDP surface in the page's
-main world ([browser operations](browser-operations.md)). Events are synthetic; it does
-not claim trusted input, downloads, network interception, or hidden-tab selection.
+main world, or through `chrome.debugger` on a page whose Content-Security-Policy
+forbids eval ([browser operations](browser-operations.md)). On the AlmostCDP path
+events are synthetic; it does not claim downloads, network interception, or
+hidden-tab selection.
 
 HTTP and HTTPS access is optional rather than an install-time host grant. Onboarding
 discloses the page-facing behavior before requesting access. The background worker

@@ -11,13 +11,18 @@ the complete generated notes and downloadable artifacts for each version.
   Supercode owns the shared SDK, CLI, MCP operation registry, and policy surface;
   Vibewaiting answers all 21 operations with unmodified Playwright running in a
   sandboxed extension page against an AlmostCDP surface in the tab, including
-  `browser.script`, and keeps the tab across navigations.
+  `browser.script`, and keeps the tab across navigations. A page whose
+  Content-Security-Policy forbids eval (GitHub) is driven through Chrome's debugger
+  instead, with Chrome's debugging bar shown on that tab only. Snapshots leave out
+  Vibewaiting's own messenger and launcher. In Firefox the operations report that
+  they are unavailable.
 
 ### Security
 
 - Supercode provider discovery is loopback-only with random-token, owner-only
-  discovery. Password/file fields and consequential controls fail closed with
-  `APPROVAL_REQUIRED`, and revoking website access removes the executor.
+  discovery. Password/file fields, consequential controls and every `browser.script`
+  fail closed with `APPROVAL_REQUIRED`, and revoking website access removes the
+  executor and detaches the debugger.
 
 ## [0.1.2] - 2026-08-26
 

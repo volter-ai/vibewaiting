@@ -25,6 +25,7 @@ the tunnel provider you choose to a paired device.
 | Native messaging | Chrome cannot read local coding-agent transcripts, process state, or terminals. This connects the extension-owned messenger to the on-device Vibewaiting companion that can bridge those existing Claude Code and Codex sessions. |
 | Storage | Remember the selected workspace and local UI preferences. |
 | Offscreen document | Keep the extension's Playwright host running while an invoked browser tool drives a tab across its navigations. It has no page access of its own. |
+| Debugger | Operate a page whose Content-Security-Policy forbids the in-page executor (GitHub, for example) when an invoked browser tool drives it. Only that tab is attached, and Chrome shows its debugging bar there until you cancel it, close the tab, or revoke website access. |
 | Context menus | Offer a precise fallback for attaching a link. |
 
 The page-facing content script receives only enough coding-agent state to render the

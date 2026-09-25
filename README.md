@@ -28,7 +28,8 @@ switch the same conversation into a familiar terminal.
   Hacker News item, or the visible page without copying it by hand.
 - **Let Supercode agents use the tab you are already in.** Vibewaiting hosts
   Playwright itself, running inside the extension against the page—without a
-  second automation browser or the `debugger` permission.
+  second automation browser. A page that forbids eval, such as GitHub, is driven
+  through Chrome's debugger, and Chrome shows its debugging bar on that tab.
 
 ## Try the alpha
 
