@@ -996,6 +996,10 @@ chrome.debugger?.onEvent.addListener((source, method, params) => {
   if (typeof child === "string" && method === "Target.attachedToTarget") relay.children.add(child);
   if (typeof child === "string" && method === "Target.detachedFromTarget") relay.children.delete(child);
   relaySend(relay, { sessionId: source.sessionId ?? relay.sessionId, method, params });
+  // The tab's own events also reach every further session opened on it
+  // (Supercode's guard watches navigations through one).
+  if (source.sessionId === undefined)
+    for (const alias of relay.aliases) relaySend(relay, { sessionId: alias, method, params });
 });
 chrome.debugger?.onDetach.addListener((source) => {
   const relay = source.tabId === undefined ? undefined : debuggerRelays.get(source.tabId);
