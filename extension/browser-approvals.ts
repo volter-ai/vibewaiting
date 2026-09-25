@@ -16,6 +16,8 @@ export interface BrowserApprovals {
   readonly node: HTMLElement;
   show(card: BrowserApprovalCard): void;
   settle(id: string, decision: string): void;
+  /** The messenger frame moved or resized: every Approve waits a fresh second. */
+  restart(): void;
 }
 
 /** Approve stays disabled until the card has been continuously visible this long. */
@@ -42,7 +44,7 @@ export function createBrowserApprovals(
   node.className = "vw-approvals";
   node.setAttribute("role", "region");
   node.setAttribute("aria-label", "Browser actions waiting for your approval");
-  const cards = new Map<string, { element: HTMLElement; stop(): void }>();
+  const cards = new Map<string, { element: HTMLElement; stop(): void; restart(): void }>();
 
   const show = (card: BrowserApprovalCard): void => {
     if (cards.has(card.id)) return;
@@ -78,20 +80,38 @@ export function createBrowserApprovals(
     approve.textContent = "Approve once";
     // Clickjacking: Approve works only after the card has been fully visible
     // on screen (not covered, faded or transformed, as the browser itself
-    // judges it) for a continuous second; hiding it starts the count again.
+    // judges it) and still for a continuous second. Hiding it, moving or
+    // resizing it (or the messenger frame, reported by the page's content
+    // script through `restart`) starts the count again.
     approve.disabled = true;
     let visibleTimer: ReturnType<typeof setTimeout> | undefined;
     let answered = false;
-    const observer = new IntersectionObserver((entries) => {
-      const entry = entries[entries.length - 1] as VisibilityEntry | undefined;
+    let visible = false;
+    let place = "";
+    let tracking = 0;
+    const restart = (): void => {
       clearTimeout(visibleTimer);
       if (answered) return;
       approve.disabled = true;
-      if (entry?.isIntersecting && entry.isVisible === true)
+      if (visible)
         visibleTimer = setTimeout(() => { if (!answered) approve.disabled = false; }, VISIBLE_BEFORE_APPROVE_MS);
+    };
+    const observer = new IntersectionObserver((entries) => {
+      const entry = entries[entries.length - 1] as VisibilityEntry | undefined;
+      visible = entry?.isIntersecting === true && entry.isVisible === true;
+      restart();
     }, { threshold: [1], trackVisibility: true, delay: 100 } as IntersectionObserverInit);
+    const track = (): void => {
+      const rect = element.getBoundingClientRect();
+      const now = `${rect.x},${rect.y},${rect.width},${rect.height}`;
+      if (place && now !== place) restart();
+      place = now;
+      tracking = requestAnimationFrame(track);
+    };
+    tracking = requestAnimationFrame(track);
     const stop = (): void => {
       clearTimeout(visibleTimer);
+      cancelAnimationFrame(tracking);
       observer.disconnect();
     };
     const answer = (decision: "approve" | "deny"): void => {
@@ -106,7 +126,7 @@ export function createBrowserApprovals(
     approve.addEventListener("click", () => answer("approve"));
     actions.append(deny, approve);
     element.append(actions);
-    cards.set(card.id, { element, stop });
+    cards.set(card.id, { element, stop, restart });
     // No focus move: a keystroke meant for the page never answers the card.
     node.append(element);
     observer.observe(element);
@@ -146,5 +166,9 @@ export function createBrowserApprovals(
     setTimeout(() => element.remove(), 2_500);
   };
 
-  return { node, show, settle };
+  const restart = (): void => {
+    for (const card of cards.values()) card.restart();
+  };
+
+  return { node, show, settle, restart };
 }

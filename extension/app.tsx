@@ -89,6 +89,10 @@ port.onMessage.addListener((raw) => {
     if (card) approvals.show(card);
     return;
   }
+  if (message.type === "browser-approval-moved") {
+    approvals.restart();
+    return;
+  }
   if (
     message.type === "browser-approval-settled" &&
     typeof message.id === "string" &&

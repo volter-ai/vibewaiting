@@ -55,12 +55,18 @@ page, so a screen reader still reads them.
 ## Approvals
 
 Filling a password or file field, activating a control likely to submit, purchase,
-publish, send, transfer or delete, and every `browser.script` need the person's
-approval. Vibewaiting's guard (`extension/browser-policy.ts`) is asked before each
+publish, send, transfer or delete, all raw pointer input (a mouse press, release or
+click, a wheel, a drag, from coordinates or from a locator), and every
+`browser.script` need the person's approval; moving the mouse does not. On the
+in-page (AlmostCDP) path every fill and key press needs approval too, because nothing
+there can check the target outside the page. Vibewaiting's guard (`extension/browser-policy.ts`) is asked before each
 locator action, each coordinate action (`browser.mouse`, `browser.drag`,
 `browser.wheel`) and each script; a script runs the agent's Playwright source with
 the real `page`, including `page.evaluate`, and its own locator calls do not pass the
-guard, so the script itself is what the person approves.
+guard, so the script itself is what the person approves. A raw pointer card names the
+point and the element under it as best known ("Press the mouse at (590, 90) on
+example.com, over “Pay”"); a page can change what is under the pointer before it
+presses, which is why pointer input is asked every time.
 
 The guard reads the target as Supercode's executor describes it from the browser
 side: a locator is resolved once (waiting up to 5 s, so a control that renders late
@@ -72,7 +78,13 @@ and the controls it sits in), so a page cannot change what the guard reads by
 overriding DOM functions. On the AlmostCDP path the CDP endpoint itself runs in the
 page, so there the description is only as trustworthy as the page's world; on the
 debugger path it is Chrome's. A target that cannot be described (inside an embedded
-frame or a closed shadow root) is refused.
+frame or a closed shadow root), a target that is itself an embedded frame, a box more
+than eight elements share, and a key press while focus is inside a frame are refused.
+For an element in a `<label>`, the guard also classifies the control the label forwards
+to, which is what Playwright fills or clicks. What this protects: an agent's mistakes on
+honest pages. On the in-page path a hostile page can mislabel its own elements (cards
+there say "(as described by the page)"), and nothing an agent types is secret from the
+page it types into.
 
 When the guard stops an operation, the messenger in that tab opens with an approval
 card naming the exact action and page ("Fill password field on github.com/login",
@@ -81,12 +93,13 @@ scripts over 20,000 characters are refused outright). The agent's call stays ope
 meanwhile: the native companion writes Supercode `pending` lines, and Supercode waits
 up to 120 s after each, never past 10 minutes. A caller that does not declare it can
 wait is refused at once and the person is not asked. While a card is open, every
-other browser operation on that tab is refused with the pending decision named.
+other browser operation on that tab is refused with the pending decision named, both
+when it is routed and again when a call queued earlier starts to run.
 
 Approve becomes clickable only after the card has been continuously visible on
 screen for one second, as the browser itself judges it (IntersectionObserver v2:
-not covered, faded or transformed); covering or hiding the card starts the count
-again. The card never takes focus, so a keystroke meant for the page cannot answer
+not covered, faded or transformed) and still; covering, hiding, moving or resizing the
+card or the messenger frame starts the count again. The card never takes focus, so a keystroke meant for the page cannot answer
 it.
 
 - **Approve once** re-runs that one operation with a one-time grant bound to the

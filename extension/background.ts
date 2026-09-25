@@ -635,6 +635,10 @@ async function runBrowserOperation(
   }
   const approval = grant === null ? approvalRequest(raw) : null;
   const pending = pendingAgentBrowserRequests.get(id);
+  // The Playwright host holds the tab for a decision once it refuses; it is
+  // released unless this refusal becomes a card, and after an approved re-run.
+  if (grant !== null || (approval && !(pending?.tabId === tabId && pending.acceptsPending)))
+    releaseTab(tabId);
   if (approval && pending?.tabId === tabId && pending.acceptsPending) {
     pendingAgentBrowserRequests.delete(id);
     clearTimeout(pending.timer);
@@ -653,6 +657,10 @@ async function runBrowserOperation(
     };
   }
   finishAgentBrowserRequest(id, tabId, raw);
+}
+
+function releaseTab(tabId: number): void {
+  void chrome.runtime.sendMessage({ type: "vibewaiting:approval-settled", tabId }).catch(() => undefined);
 }
 
 /** The approval a refused operation asks for (playwright.ts attaches it to an `APPROVAL_REQUIRED` result). */
@@ -722,6 +730,10 @@ function settleApproval(
   pendingApprovals.delete(id);
   clearTimeout(approval.timer);
   debuggerIdle(approval.tabId);
+  if (![...pendingApprovals.values()].some((other) => other.tabId === approval.tabId)) {
+    const content = contentPortsByTab.get(approval.tabId);
+    if (content) post(content, { type: "browser-approval-watch", active: false });
+  }
   for (const [port, guest] of guestPorts)
     if (guest.tabId === approval.tabId)
       post(port, { type: "browser-approval-settled", id, decision });
@@ -730,6 +742,7 @@ function settleApproval(
     return;
   }
   void chrome.runtime.sendMessage({ type: "vibewaiting:grant-revoke", nonce: approval.nonce }).catch(() => undefined);
+  releaseTab(approval.tabId);
   // The agent stopped waiting: there is no one to answer.
   if (decision === "abandoned") return;
   sendAgentBrowserResponse(approval.requestId, {
@@ -1109,6 +1122,11 @@ function handleContentMessage(
 ): void {
   const message = record(raw);
   if (!message) return;
+  if (message.type === "approval-frame-moved") {
+    for (const [guestPort, guest] of guestPorts)
+      if (guest.tabId === tabId) post(guestPort, { type: "browser-approval-moved" });
+    return;
+  }
   if (message.type === "remote-access-open") {
     let delivered = false;
     for (const [guestPort, guest] of guestPorts)

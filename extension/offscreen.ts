@@ -114,6 +114,12 @@ chrome.runtime.onMessage.addListener((raw, sender, respond) => {
     grantOffers.delete(message.nonce);
     return false;
   }
+  if (message?.type === "vibewaiting:approval-settled" && typeof message.tabId === "number") {
+    // The person answered (or no one will): calls on the tab may run again.
+    const tabId = message.tabId;
+    void ready.then((host) => host.postMessage({ type: "settled", tabId }, "*"));
+    return false;
+  }
   if (message?.type !== "vibewaiting:browser-operation" || typeof message.tabId !== "number") return false;
   const tabId = message.tabId;
   let grant: string | undefined;
@@ -138,7 +144,7 @@ chrome.runtime.onMessage.addListener((raw, sender, respond) => {
   };
   void ready.then((host) => {
     const target = message.via === "debugger" ? debuggerTarget(host, tabId) : surfaceOf(tabId).id;
-    host.postMessage({ type: "operation", target, call: message.call, grant }, "*", [reply.port2]);
+    host.postMessage({ type: "operation", target, tabId, call: message.call, grant }, "*", [reply.port2]);
   });
   return true;
 });

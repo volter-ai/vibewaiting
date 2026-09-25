@@ -87,9 +87,16 @@ credentials, tmux handles, and execution policy never enter page content.
 Remote access is off until you enable it.
 
 When you invoke a local browser operation, its bounded result crosses the companion to
-that local caller. Password/file fields, consequential controls and scripts wait for
-your one-time approval in the messenger. See
+that local caller. Password/file fields, consequential controls, raw mouse presses and
+scripts wait for your one-time approval in the messenger. See
 [Browser operations](docs/browser-operations.md) for the exact operations and trust boundary.
+
+What the approvals protect against, plainly: the classifier catches an agent's mistakes
+on honest pages. On most pages Vibewaiting drives the tab from inside the page, and
+there a hostile page can mislabel its own elements (call a password box "Search", a
+Pay button "Next"); that is why every fill, key press and raw mouse press there asks
+you, and cards say "(as described by the page)". Nothing an agent types is secret
+from the page it types into.
 
 Read the plain-language [privacy policy](PRIVACY.md), [security model](SECURITY.md),
 and [architecture](docs/architecture.md) before granting access.

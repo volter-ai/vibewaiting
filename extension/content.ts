@@ -90,10 +90,31 @@ function mountVibewaitingContent(): void {
     theme: { radius: VIBEWAITING_RADIUS, surface: "transparent" },
   });
 
+  // While a card waits, the messenger frame's place on the page is watched:
+  // the card's Approve waits for a second of stillness after any move or
+  // resize (browser-approvals.ts), so a page cannot slide it under a click.
+  let watching = 0;
+  const watchFrame = (active: boolean): void => {
+    cancelAnimationFrame(watching);
+    watching = 0;
+    if (!active) return;
+    let last = "";
+    const look = (): void => {
+      const frame = document.querySelector('[data-widget-shell-id="vibewaiting"]')?.shadowRoot?.querySelector("iframe");
+      const rect = frame?.getBoundingClientRect();
+      const now = rect ? `${rect.x},${rect.y},${rect.width},${rect.height}` : "";
+      if (last && now !== last) contentPort.postMessage({ type: "approval-frame-moved" });
+      last = now;
+      watching = requestAnimationFrame(look);
+    };
+    watching = requestAnimationFrame(look);
+  };
+
   let destroyed = false;
   const destroy = (): void => {
     if (destroyed) return;
     destroyed = true;
+    watchFrame(false);
     contentGlobal.__vibewaitingContentMounted = false;
     surfacePort?.disconnect();
     remoteAccess.destroy();
@@ -110,6 +131,11 @@ function mountVibewaitingContent(): void {
     if (message.type === "browser-approval-open") {
       // An agent's action waits for the person: the messenger shows the approval card.
       overlay.open();
+      watchFrame(true);
+      return;
+    }
+    if (message.type === "browser-approval-watch") {
+      watchFrame(message.active === true);
       return;
     }
     if (message.type === "surface-connect") {

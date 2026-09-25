@@ -15,10 +15,16 @@ the agent processes it controls.
 - The content script remembers the latest pointed or focused element reference for
   Attach. It also executes Supercode's closed, structured browser-operation protocol
   when the workspace-scoped provider receives a call. Snapshots and query results are
-  bounded. Filling password/file fields, consequential controls and every
-  `browser.script` (Playwright with the page, including `page.evaluate`) run only after
-  the person approves that one action in the messenger; denial, no answer in 90 s, or a
-  changed page refuses it. Credential-like URL
+  bounded. Filling password/file fields, consequential controls, every raw pointer
+  press, click, wheel or drag, and every `browser.script` (Playwright with the page,
+  including `page.evaluate`) run only after the person approves that one action in the
+  messenger; denial, no answer in 90 s, or a changed page refuses it. On the in-page
+  (AlmostCDP) path every fill and key press is approved too.
+- Limits of the approvals: the classifier catches an agent's mistakes on honest pages.
+  On the in-page path the page itself describes its elements to the guard, so a hostile
+  page can mislabel them; cards there say "(as described by the page)". On the
+  debugger path the description is Chrome's. Nothing an agent types is secret from the
+  page it types into. Credential-like URL
   parameters and tracking parameters are removed from Attach payloads.
 - Browser-provider discovery files are owner-only under Supercode's configuration
   directory; every native-host process binds a random-token-protected server to loopback

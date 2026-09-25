@@ -20,11 +20,14 @@ the complete generated notes and downloadable artifacts for each version.
   leave out Vibewaiting's own messenger and launcher. Firefox remains unsupported: it
   does not install the extension.
 - Browser approvals in the messenger. Before an agent fills a password or file field,
-  activates a consequential control (by locator or by coordinates), or runs a script,
-  the messenger opens with a card naming the exact action and page, with a script's
-  full source and arguments. Approve once re-runs that one operation with a
+  activates a consequential control, presses, clicks, scrolls or drags with the raw
+  mouse (always, whatever is under it), or runs a script, the messenger opens with a
+  card naming the exact action and page, with a script's full source and arguments.
+  On the in-page path every fill and key press is asked too, and cards say the page
+  described the element. The classifier catches an agent's mistakes on honest pages; a
+  hostile page can mislabel its own elements on the in-page path. Approve once re-runs that one operation with a
   single-use, nonce-bound grant for its operation id, tab and target, and becomes
-  clickable only after the card has been visible for a continuous second. Deny, no
+  clickable only after the card has been visible and still for a continuous second. Deny, no
   answer within 90 seconds, closing the tab, or the agent's call ending refuses it
   with the reason; while a card is open, nothing else runs on that tab. The agent's
   call stays open while the person decides (Supercode `pending` lines: needs a

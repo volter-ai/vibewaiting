@@ -43,8 +43,17 @@ interface Grant { key: string; used: boolean }
 interface Running { grant: Grant | null; approval: BrowserApproval | null }
 const running = new WeakMap<Page, Running>();
 
-async function guard(page: Page, request: PlaywrightAction): Promise<void> {
-  const approval = approvalFor(request, page.url());
+/**
+ * Tabs with an approval the person has not answered, by tab id: the refused
+ * action's summary. A call that starts on such a tab without the grant is
+ * refused, even one queued before the card appeared; the background clears the
+ * mark when the card is answered (`settled`), and the approved re-run clears
+ * it as it starts.
+ */
+const awaiting = new Map<number, string>();
+
+async function guard(page: Page, request: PlaywrightAction, inPage: boolean): Promise<void> {
+  const approval = approvalFor(request, page.url(), inPage);
   if (!approval) return;
   const call = running.get(page);
   if (call?.grant && !call.grant.used && call.grant.key === approval.key) {
@@ -78,9 +87,21 @@ function operationOf(call: unknown): BrowserOperationName {
 
 async function execute(
   target: string,
+  tabId: number,
   call: unknown,
   grant: string | null,
 ): Promise<BrowserOperationResult & { approval?: BrowserApproval }> {
+  if (grant !== null) awaiting.delete(tabId);
+  const deciding = awaiting.get(tabId);
+  if (deciding !== undefined)
+    return {
+      ok: false,
+      operation: operationOf(call),
+      error: {
+        code: "APPROVAL_REQUIRED",
+        message: `Waiting for the person's decision on “${deciding}” in Vibewaiting; no other browser operation runs on this tab until they answer.`,
+      },
+    };
   let page: Page;
   let connection: Browser;
   const viaDebugger = debuggerBrowsers.get(target);
@@ -99,7 +120,7 @@ async function execute(
     executor = new PlaywrightOperationExecutor(page, {
       syntheticEvents: !viaDebugger,
       endpoint: viaDebugger ? `Chrome ${connection.version()} (chrome.debugger)` : connection.version(),
-      actionGuard: (request) => guard(page, request),
+      actionGuard: (request) => guard(page, request, !viaDebugger),
       snapshotExclude: OWN_OVERLAY,
     });
     executors.set(page, executor);
@@ -109,9 +130,11 @@ async function execute(
   try {
     const result = await executor.execute(call);
     // A refusal on an approved re-run is final: the person is not asked twice for one call.
-    return !result.ok && result.error.code === "APPROVAL_REQUIRED" && state.approval && !state.grant
-      ? { ...result, approval: state.approval }
-      : result;
+    if (!result.ok && result.error.code === "APPROVAL_REQUIRED" && state.approval && !state.grant) {
+      awaiting.set(tabId, state.approval.summary);
+      return { ...result, approval: state.approval };
+    }
+    return result;
   } finally {
     if (running.get(page) === state) running.delete(page);
   }
@@ -119,7 +142,11 @@ async function execute(
 
 window.addEventListener("message", (event) => {
   if (event.source !== window.parent) return;
-  const message = event.data as { type?: unknown; target?: unknown; call?: unknown; grant?: unknown } | null;
+  const message = event.data as { type?: unknown; target?: unknown; call?: unknown; grant?: unknown; tabId?: unknown } | null;
+  if (message?.type === "settled" && typeof message.tabId === "number") {
+    awaiting.delete(message.tabId);
+    return;
+  }
   const port = event.ports[0];
   if (!port) return;
   if (message?.type === "surface") {
@@ -136,10 +163,11 @@ window.addEventListener("message", (event) => {
     connection.catch(() => { if (debuggerBrowsers.get(target) === connection) debuggerBrowsers.delete(target); });
     return;
   }
-  if (message?.type === "operation" && typeof message.target === "string") {
+  if (message?.type === "operation" && typeof message.target === "string" && typeof message.tabId === "number") {
     const target = message.target;
+    const tabId = message.tabId;
     const grant = typeof message.grant === "string" ? message.grant : null;
-    const run = (queues.get(target) ?? Promise.resolve()).then(() => execute(target, message.call, grant));
+    const run = (queues.get(target) ?? Promise.resolve()).then(() => execute(target, tabId, message.call, grant));
     const settled = run.catch(() => undefined);
     queues.set(target, settled);
     void settled.then(() => { if (queues.get(target) === settled) queues.delete(target); });
