@@ -1,6 +1,5 @@
 # Vibewaiting
 
-[![CI](https://github.com/volter-ai/vibewaiting/actions/workflows/ci.yml/badge.svg)](https://github.com/volter-ai/vibewaiting/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-2f3136.svg)](LICENSE)
 [![Node.js 22.12+ LTS](https://img.shields.io/badge/node-22.12%2B%20LTS-2f3136.svg)](package.json)
 [![Status: alpha](https://img.shields.io/badge/status-alpha-2f3136.svg)](ROADMAP.md)
