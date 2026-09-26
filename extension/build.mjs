@@ -5,7 +5,17 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { PANEL_CSS } from "../widget/styles.mjs";
-import { createMobileIconPng } from "../mobile/icon-assets.mjs";
+
+// The Vibewaiting logo comes from the brand service at build time; brand art is
+// never committed here. A failed fetch fails the build.
+async function fetchLogoPng(size) {
+  const url = `https://brand.volter.ai/logo/vibewaiting/png?size=${size}`;
+  const response = await fetch(url);
+  const type = response.headers.get("content-type") ?? "";
+  if (!response.ok || !type.startsWith("image/png"))
+    throw new Error(`${url} answered ${response.status} ${type}`);
+  return Buffer.from(await response.arrayBuffer());
+}
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const source = fileURLToPath(new URL("./", import.meta.url));
@@ -77,13 +87,13 @@ await cp(join(root, "mobile/index.html"), join(mobileOutput, "index.html"));
 await cp(join(root, "mobile/install-metadata.html"), join(mobileOutput, "install-metadata.html"));
 await cp(join(root, "mobile/manifest.webmanifest"), join(mobileOutput, "manifest.webmanifest"));
 await cp(join(root, "mobile/service-worker.js"), join(mobileOutput, "service-worker.js"));
-await writeFile(join(mobileOutput, "icon-192.png"), createMobileIconPng(192));
-await writeFile(join(mobileOutput, "icon-512.png"), createMobileIconPng(512));
+await writeFile(join(mobileOutput, "icon-192.png"), await fetchLogoPng(192));
+await writeFile(join(mobileOutput, "icon-512.png"), await fetchLogoPng(512));
 for (const name of ["manifest.json", "app.html", "offscreen.html", "options.html", "options.css", "playwright.html"]) {
   await cp(join(source, name), join(output, name));
 }
 for (const size of [16, 32, 48, 128])
-  await writeFile(join(output, `icon-${size}.png`), createMobileIconPng(size));
+  await writeFile(join(output, `icon-${size}.png`), await fetchLogoPng(size));
 
 const assetNames = [
   "background.js",
