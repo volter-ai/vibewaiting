@@ -9,8 +9,8 @@ import { PANEL_CSS } from "../widget/styles.mjs";
 
 // The Vibewaiting logo comes from the brand service at build time; brand art is
 // never committed here. A failed fetch fails the build.
-async function fetchLogoPng(size) {
-  const url = `https://brand.volter.ai/logo/vibewaiting/png?size=${size}`;
+async function fetchLogoPng(size, variant = "") {
+  const url = `https://brand.volter.ai/logo/vibewaiting/png?size=${size}${variant ? `&variant=${variant}` : ""}`;
   const response = await fetch(url);
   const type = response.headers.get("content-type") ?? "";
   if (!response.ok || !type.startsWith("image/png"))
@@ -97,6 +97,8 @@ for (const name of ["manifest.json", "app.html", "offscreen.html", "options.html
 }
 for (const size of [16, 32, 48, 128])
   await writeFile(join(output, `icon-${size}.png`), await fetchLogoPng(size));
+// The options page follows the OS scheme; on a dark page it shows the dark-ground logo.
+await writeFile(join(output, "icon-128-dark.png"), await fetchLogoPng(128, "dark"));
 
 const assetNames = [
   "background.js",
@@ -111,6 +113,7 @@ const assetNames = [
   "icon-32.png",
   "icon-48.png",
   "icon-128.png",
+  "icon-128-dark.png",
 ];
 const assetContents = await Promise.all(assetNames.map((name) => readFile(join(output, name))));
 const mobileAssetNames = [
