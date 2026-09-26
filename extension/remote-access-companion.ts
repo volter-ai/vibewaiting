@@ -1,4 +1,5 @@
 import qrcode from "qrcode-generator";
+import { BRAND_FONT, BRAND_LIGHT, BRAND_SHADOW, brandProperties, type BrandRole } from "../src/brand.js";
 import type {
   RemoteAccessConfiguration,
   RemoteAccessProvider,
@@ -148,60 +149,49 @@ export function createRemoteAccessCompanion(options: {
 
   const style = document.createElement("style");
   style.textContent = `
-    .vw-remote-access { position: relative; font: 14px/1.4 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color-scheme: light dark; }
+    ${brandProperties(".vw-remote-access", REMOTE_ROLES)}
+    .vw-remote-access { position: relative; font: 14px/1.4 ${BRAND_FONT.ui}; color-scheme: light dark; }
     .vw-remote-access[data-embedded="true"] { position:fixed; z-index:1000; top:0; left:0; width:0; height:0; pointer-events:none; }
     .vw-remote-access[data-embedded="true"] .vw-remote-trigger { display:none; }
     .vw-remote-access[data-embedded="true"] .vw-remote-panel { position:fixed; right:16px; bottom:16px; pointer-events:auto; }
-    .vw-remote-trigger { position: relative; display:grid; width:48px; height:48px; padding:0; place-items:center; border:1px solid rgba(20,20,28,.15); border-radius:14px; color:#24242a; background:color-mix(in srgb,#fff 90%,transparent); box-shadow:0 5px 18px rgba(16,18,30,.13); cursor:pointer; }
-    .vw-remote-trigger:hover { background:#fff; box-shadow:0 7px 22px rgba(16,18,30,.17); }
-    .vw-remote-trigger:focus-visible,.vw-remote-close:focus-visible,.vw-remote-button:focus-visible,.vw-remote-link:focus-visible,.vw-remote-provider select:focus-visible { outline:3px solid rgba(36,36,42,.28); outline-offset:2px; }
+    .vw-remote-trigger { position: relative; display:grid; width:48px; height:48px; padding:0; place-items:center; border:1px solid var(--vw-border); border-radius:14px; color:var(--vw-fg); background:color-mix(in srgb,var(--vw-surface) 90%,transparent); box-shadow:${BRAND_SHADOW.floating}; cursor:pointer; }
+    .vw-remote-trigger:hover { background:var(--vw-surface); }
+    .vw-remote-trigger:focus-visible,.vw-remote-close:focus-visible,.vw-remote-button:focus-visible,.vw-remote-link:focus-visible,.vw-remote-provider select:focus-visible { outline:3px solid color-mix(in srgb,var(--vw-fg) 28%,transparent); outline-offset:2px; }
     .vw-remote-trigger svg { width:24px; height:24px; fill:none; stroke:currentColor; stroke-width:1.65; stroke-linecap:round; stroke-linejoin:round; }
-    .vw-remote-state { position:absolute; right:5px; bottom:5px; width:9px; height:9px; border:2px solid #fff; border-radius:50%; background:#2e9b58; }
-    .vw-remote-trigger[data-status="starting"] .vw-remote-state,.vw-remote-trigger[data-status="reconnecting"] .vw-remote-state { background:#b87918; }
+    .vw-remote-state { position:absolute; right:5px; bottom:5px; width:9px; height:9px; border:2px solid var(--vw-surface); border-radius:50%; background:var(--vw-live); }
+    .vw-remote-trigger[data-status="starting"] .vw-remote-state,.vw-remote-trigger[data-status="reconnecting"] .vw-remote-state { background:var(--vw-attention); }
     .vw-remote-trigger[data-status="off"] .vw-remote-state,.vw-remote-trigger[data-status="error"] .vw-remote-state { display:none; }
-    .vw-remote-panel { position:absolute; z-index:8; right:calc(100% + 12px); bottom:0; width:316px; padding:18px; border:1px solid rgba(20,20,28,.14); border-radius:16px; color:#202026; background:#fff; box-shadow:0 18px 60px rgba(16,18,30,.2),0 3px 12px rgba(16,18,30,.1); }
+    .vw-remote-panel { position:absolute; z-index:8; right:calc(100% + 12px); bottom:0; width:316px; padding:18px; border:1px solid var(--vw-border); border-radius:16px; color:var(--vw-fg); background:var(--vw-surface); box-shadow:${BRAND_SHADOW.floating}; }
     .vw-remote-panel[hidden] { display:none; }
     .vw-remote-heading { display:flex; gap:12px; align-items:flex-start; justify-content:space-between; }
     .vw-remote-heading strong { display:block; font-size:16px; line-height:1.25; }
-    .vw-remote-heading p,.vw-remote-detail { margin:5px 0 0; color:#6a6a74; font-size:12px; }
-    .vw-remote-close { display:grid; flex:0 0 auto; width:30px; height:30px; padding:0; place-items:center; border:0; border-radius:9px; color:#676771; background:transparent; cursor:pointer; }
-    .vw-remote-close:hover { background:#f1f1f4; }
+    .vw-remote-heading p,.vw-remote-detail { margin:5px 0 0; color:var(--vw-muted); font-size:12px; }
+    .vw-remote-close { display:grid; flex:0 0 auto; width:30px; height:30px; padding:0; place-items:center; border:0; border-radius:9px; color:var(--vw-muted); background:transparent; cursor:pointer; }
+    .vw-remote-close:hover { background:var(--vw-fill-hover); }
     .vw-remote-close svg { width:18px; height:18px; fill:none; stroke:currentColor; stroke-width:1.7; stroke-linecap:round; }
-    .vw-remote-provider { display:grid; grid-template-columns:auto minmax(0,1fr); gap:8px 12px; margin-top:16px; align-items:center; color:#5f5f68; font-size:12px; }
-    .vw-remote-provider select { min-width:0; height:34px; padding:0 30px 0 10px; border:1px solid #d7d7dc; border-radius:9px; color:#29292f; background:#f7f7f8; font:600 12px/1 ui-sans-serif,-apple-system,sans-serif; }
-    .vw-remote-provider small { grid-column:1/-1; color:#6a6a74; font-size:11px; }
-    .vw-remote-progress { display:flex; gap:10px; min-height:86px; align-items:center; color:#5f5f68; }
-    .vw-remote-spinner { width:18px; height:18px; flex:0 0 auto; border:2px solid #d6d6dc; border-top-color:#34343a; border-radius:50%; animation:vw-remote-spin .85s linear infinite; }
+    .vw-remote-provider { display:grid; grid-template-columns:auto minmax(0,1fr); gap:8px 12px; margin-top:16px; align-items:center; color:var(--vw-muted); font-size:12px; }
+    .vw-remote-provider select { min-width:0; height:34px; padding:0 30px 0 10px; border:1px solid var(--vw-border-strong); border-radius:9px; color:var(--vw-fg); background:var(--vw-fill); font:600 12px/1 ${BRAND_FONT.ui}; }
+    .vw-remote-provider small { grid-column:1/-1; color:var(--vw-muted); font-size:11px; }
+    .vw-remote-progress { display:flex; gap:10px; min-height:86px; align-items:center; color:var(--vw-muted); }
+    .vw-remote-spinner { width:18px; height:18px; flex:0 0 auto; border:2px solid var(--vw-border-strong); border-top-color:var(--vw-fg); border-radius:50%; animation:vw-remote-spin .85s linear infinite; }
     .vw-remote-handoff { display:grid; grid-template-columns:112px minmax(0,1fr); gap:14px; margin-top:16px; align-items:start; }
-    .vw-remote-qr { display:block; width:112px; height:112px; border:1px solid #e0e0e4; border-radius:10px; background:white; }
-    .vw-remote-scan-label { display:block; margin:1px 0 12px; color:#35353c; font-size:12px; font-weight:650; }
-    .vw-remote-code-label { display:block; color:#6a6a74; font-size:11px; }
-    .vw-remote-code { display:block; margin:3px 0 8px; color:#202026; font:700 22px/1.15 ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing:.04em; }
-    .vw-remote-link { display:block; overflow:hidden; color:#35353c; font-size:11px; text-decoration:underline; text-overflow:ellipsis; white-space:nowrap; }
-    .vw-remote-devices { display:flex; min-height:28px; margin-top:14px; align-items:center; justify-content:space-between; gap:10px; color:#5f5f68; font-size:12px; }
-    .vw-remote-disconnect { padding:4px 0; border:0; color:#555560; background:transparent; font:600 11px/1.2 ui-sans-serif,-apple-system,sans-serif; text-decoration:underline; cursor:pointer; }
+    .vw-remote-qr { display:block; width:112px; height:112px; border:1px solid var(--vw-border); border-radius:10px; background:${BRAND_LIGHT["surface.raised"]}; }
+    .vw-remote-scan-label { display:block; margin:1px 0 12px; color:var(--vw-fg); font-size:12px; font-weight:650; }
+    .vw-remote-code-label { display:block; color:var(--vw-muted); font-size:11px; }
+    .vw-remote-code { display:block; margin:3px 0 8px; color:var(--vw-fg); font:700 22px/1.15 ${BRAND_FONT.data}; letter-spacing:.04em; }
+    .vw-remote-link { display:block; overflow:hidden; color:var(--vw-fg); font-size:11px; text-decoration:underline; text-overflow:ellipsis; white-space:nowrap; }
+    .vw-remote-devices { display:flex; min-height:28px; margin-top:14px; align-items:center; justify-content:space-between; gap:10px; color:var(--vw-muted); font-size:12px; }
+    .vw-remote-disconnect { padding:4px 0; border:0; color:var(--vw-muted); background:transparent; font:600 11px/1.2 ${BRAND_FONT.ui}; text-decoration:underline; cursor:pointer; }
     .vw-remote-actions { display:flex; gap:8px; margin-top:16px; }
-    .vw-remote-button { min-height:36px; padding:0 12px; border:1px solid #d7d7dc; border-radius:10px; color:#29292f; background:#f7f7f8; font:600 12px/1 ui-sans-serif,-apple-system,sans-serif; cursor:pointer; }
-    .vw-remote-button:hover { background:#ededf0; }
-    .vw-remote-button[data-kind="stop"] { margin-left:auto; color:#a53232; background:transparent; }
-    .vw-remote-error { margin:14px 0 0; color:#a53232; font-size:12px; }
-    @media (prefers-color-scheme:dark) {
-      .vw-remote-trigger { border-color:rgba(255,255,255,.16); color:#f4f4f5; background:rgba(27,27,31,.92); }
-      .vw-remote-trigger:hover { background:#25252a; }
-      .vw-remote-state { border-color:#202025; }
-      .vw-remote-panel { border-color:rgba(255,255,255,.14); color:#f1f1f3; background:#202025; }
-      .vw-remote-heading p,.vw-remote-detail,.vw-remote-progress,.vw-remote-code-label { color:#aaaab3; }
-      .vw-remote-scan-label { color:#e0e0e4; }
-      .vw-remote-devices { color:#aaaab3; }.vw-remote-disconnect { color:#c9c9cf; }
-      .vw-remote-close { color:#b8b8c0; }.vw-remote-close:hover { background:#303036; }
-      .vw-remote-provider { color:#aaaab3; }.vw-remote-provider select { border-color:#494950; color:#eeeef0; background:#2c2c31; }.vw-remote-provider small { color:#aaaab3; }
-      .vw-remote-code { color:#f1f1f3; }.vw-remote-link { color:#d0d0d5; }
-      .vw-remote-button { border-color:#494950; color:#eeeef0; background:#2c2c31; }.vw-remote-button:hover { background:#36363c; }
-    }
+    .vw-remote-button { min-height:36px; padding:0 12px; border:1px solid var(--vw-border-strong); border-radius:10px; color:var(--vw-fg); background:var(--vw-fill); font:600 12px/1 ${BRAND_FONT.ui}; cursor:pointer; }
+    .vw-remote-button:hover { background:var(--vw-fill-hover); }
+    .vw-remote-button[data-kind="stop"] { margin-left:auto; color:var(--vw-danger); background:transparent; }
+    .vw-remote-error { margin:14px 0 0; color:var(--vw-danger); font-size:12px; }
     @media (max-width:760px) { .vw-remote-panel { position:fixed; right:16px; bottom:80px; left:16px; width:auto; } }
-    @media (prefers-reduced-motion:reduce) { .vw-remote-spinner { animation:none; border-top-color:#d6d6dc; } }
+    @media (prefers-reduced-motion:reduce) { .vw-remote-spinner { animation:none; border-top-color:var(--vw-border-strong); } }
     @keyframes vw-remote-spin { to { transform:rotate(360deg); } }
   `;
+
 
   const trigger = document.createElement("button");
   trigger.type = "button";
@@ -553,22 +543,38 @@ export function createRemoteAccessCompanion(options: {
   };
 }
 
+// The companion and its launcher are injected into third-party pages, so their
+// colours are the brand's roles resolved at build, switched by the OS scheme.
+const REMOTE_ROLES: Record<string, BrandRole> = {
+  "--vw-surface": "surface.raised",
+  "--vw-fill": "surface.subtle",
+  "--vw-fill-hover": "surface.inset",
+  "--vw-fg": "text.primary",
+  "--vw-muted": "text.muted",
+  "--vw-border": "border.default",
+  "--vw-border-strong": "border.strong",
+  "--vw-live": "status.live.base",
+  "--vw-attention": "status.attention.base",
+  "--vw-danger": "status.danger.text",
+};
+
 export function createRemoteAccessLauncher(options: {
   open(): void;
 }): RemoteAccessLauncher {
   const root = document.createElement("div");
   const style = document.createElement("style");
   style.textContent = `
-    .vw-remote-launcher { position:relative; font:14px/1 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
-    .vw-remote-launcher button { position:relative; display:grid; width:48px; height:48px; padding:0; place-items:center; border:1px solid rgba(20,20,28,.15); border-radius:14px; color:#24242a; background:color-mix(in srgb,#fff 90%,transparent); box-shadow:0 5px 18px rgba(16,18,30,.13); cursor:pointer; }
-    .vw-remote-launcher button:hover { background:#fff; box-shadow:0 7px 22px rgba(16,18,30,.17); }
-    .vw-remote-launcher button:focus-visible { outline:3px solid rgba(36,36,42,.28); outline-offset:2px; }
+    ${brandProperties(".vw-remote-launcher", REMOTE_ROLES)}
+    .vw-remote-launcher { position:relative; font:14px/1 ${BRAND_FONT.ui}; }
+    .vw-remote-launcher button { position:relative; display:grid; width:48px; height:48px; padding:0; place-items:center; border:1px solid var(--vw-border); border-radius:14px; color:var(--vw-fg); background:color-mix(in srgb,var(--vw-surface) 90%,transparent); box-shadow:${BRAND_SHADOW.floating}; cursor:pointer; }
+    .vw-remote-launcher button:hover { background:var(--vw-surface); }
+    .vw-remote-launcher button:focus-visible { outline:3px solid color-mix(in srgb,var(--vw-fg) 28%,transparent); outline-offset:2px; }
     .vw-remote-launcher svg { width:24px; height:24px; fill:none; stroke:currentColor; stroke-width:1.65; stroke-linecap:round; stroke-linejoin:round; }
-    .vw-remote-launcher-state { position:absolute; right:5px; bottom:5px; width:9px; height:9px; border:2px solid #fff; border-radius:50%; background:#2e9b58; }
-    .vw-remote-launcher button[data-status="starting"] .vw-remote-launcher-state,.vw-remote-launcher button[data-status="reconnecting"] .vw-remote-launcher-state { background:#b87918; }
+    .vw-remote-launcher-state { position:absolute; right:5px; bottom:5px; width:9px; height:9px; border:2px solid var(--vw-surface); border-radius:50%; background:var(--vw-live); }
+    .vw-remote-launcher button[data-status="starting"] .vw-remote-launcher-state,.vw-remote-launcher button[data-status="reconnecting"] .vw-remote-launcher-state { background:var(--vw-attention); }
     .vw-remote-launcher button[data-status="off"] .vw-remote-launcher-state,.vw-remote-launcher button[data-status="error"] .vw-remote-launcher-state { display:none; }
-    @media (prefers-color-scheme:dark) { .vw-remote-launcher button { border-color:rgba(255,255,255,.16); color:#f4f4f5; background:rgba(27,27,31,.92); }.vw-remote-launcher button:hover { background:#25252a; }.vw-remote-launcher-state { border-color:#202025; } }
   `;
+
   root.className = "vw-remote-launcher";
   const trigger = document.createElement("button");
   trigger.type = "button";

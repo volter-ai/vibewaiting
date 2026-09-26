@@ -6,6 +6,7 @@ import {
 } from "../src/extension-protocol.js";
 import { parseRemoteAccessConfiguration } from "../src/extension-protocol.js";
 import { parseBrowserContextAttachments } from "../src/browser-context.js";
+import { BRAND_LIGHT } from "../src/brand.js";
 import { VIBEWAITING_NEUTRAL } from "../src/theme.js";
 import {
   browserToolError,
@@ -288,9 +289,9 @@ function broadcastStatus(): void {
           : "";
   const color =
     lastStatus.phase === "error"
-      ? "#c44141"
+      ? BRAND_LIGHT["status.danger.base"]
       : lastStatus.phase === "setup"
-        ? "#a06b1f"
+        ? BRAND_LIGHT["status.attention.base"]
         : VIBEWAITING_NEUTRAL;
   const title =
     lastStatus.phase === "ready"

@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
+import { brandCss, brandHtml } from "../scripts/brand.mjs";
 import { PANEL_CSS } from "../widget/styles.mjs";
 
 // The Vibewaiting logo comes from the brand service at build time; brand art is
@@ -81,15 +82,17 @@ const supercodeCss = await readFile(fileURLToPath(import.meta.resolve("@volter-a
 const xtermCss = await readFile(fileURLToPath(import.meta.resolve("@xterm/xterm/css/xterm.css")), "utf8");
 const terminalCss = await readFile(fileURLToPath(import.meta.resolve("@volter-ai-dev/supercode-terminal/ui/styles.css")), "utf8");
 await writeFile(join(output, "app.css"), `${supercodeCss}\n${xtermCss}\n${terminalCss}\n${PANEL_CSS}`, "utf8");
-const mobileCss = await readFile(join(root, "mobile/styles.css"), "utf8");
+// Stylesheet sources name the Volter brand's roles; the shipped copies carry resolved values only.
+const mobileCss = brandCss(await readFile(join(root, "mobile/styles.css"), "utf8"));
 await writeFile(join(mobileOutput, "app.css"), `${supercodeCss}\n${xtermCss}\n${terminalCss}\n${PANEL_CSS}\n${mobileCss}`, "utf8");
-await cp(join(root, "mobile/index.html"), join(mobileOutput, "index.html"));
+await writeFile(join(mobileOutput, "index.html"), brandHtml(await readFile(join(root, "mobile/index.html"), "utf8")), "utf8");
 await cp(join(root, "mobile/install-metadata.html"), join(mobileOutput, "install-metadata.html"));
 await cp(join(root, "mobile/manifest.webmanifest"), join(mobileOutput, "manifest.webmanifest"));
 await cp(join(root, "mobile/service-worker.js"), join(mobileOutput, "service-worker.js"));
 await writeFile(join(mobileOutput, "icon-192.png"), await fetchLogoPng(192));
 await writeFile(join(mobileOutput, "icon-512.png"), await fetchLogoPng(512));
-for (const name of ["manifest.json", "app.html", "offscreen.html", "options.html", "options.css", "playwright.html"]) {
+await writeFile(join(output, "options.css"), brandCss(await readFile(join(source, "options.css"), "utf8")), "utf8");
+for (const name of ["manifest.json", "app.html", "offscreen.html", "options.html", "playwright.html"]) {
   await cp(join(source, name), join(output, name));
 }
 for (const size of [16, 32, 48, 128])

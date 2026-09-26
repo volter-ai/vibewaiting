@@ -9,6 +9,7 @@ import {
   SingleUsePairingGrants,
 } from "@volter-ai-dev/supercode-remote-access";
 import type { RemoteDeviceSnapshot } from "@volter-ai-dev/supercode-remote-access/client";
+import { BRAND_FONT, brandProperties, type BrandRole } from "./brand.js";
 
 const MAX_LOGIN_BYTES = 2_048;
 const MAX_SOCKET_MESSAGE_BYTES = 1_048_576;
@@ -641,9 +642,21 @@ function respond(
   response.end(body);
 }
 
+// The pairing page's colours: the brand's roles, resolved at build.
+const LOGIN_ROLES: Record<string, BrandRole> = {
+  "--vw-page": "surface.page",
+  "--vw-field": "surface.raised",
+  "--vw-fg": "text.primary",
+  "--vw-muted": "text.muted",
+  "--vw-faint": "text.tertiary",
+  "--vw-border": "border.strong",
+  "--vw-action": "action.default",
+  "--vw-action-fg": "text.onStrong",
+};
+
 const LOGIN_HTML = `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="dark light"><title>Vibewaiting</title><style>
-:root{color-scheme:dark light;font:15px/1.45 system-ui,sans-serif;background:#111318;color:#f4f5f7}body{min-height:100dvh;margin:0;display:grid;place-items:center}main{box-sizing:border-box;width:min(92vw,360px);padding:24px}h1{margin:0 0 5px;font-size:24px}p{margin:0 0 20px;color:#a9adba}form{display:grid;gap:12px}form[hidden]{display:none}label{display:grid;gap:7px;font-weight:650}input,button{box-sizing:border-box;width:100%;min-height:46px;border:1px solid #3a3e49;border-radius:10px;background:#1a1d24;color:inherit;font:inherit;padding:10px 12px}input{font:650 20px/1 ui-monospace,monospace;letter-spacing:.15em;text-align:center}button{cursor:pointer;background:#f0f1f3;color:#16171a;border-color:#f0f1f3;font-weight:700}small{color:#7f8490}</style><script src="/pair.js" defer></script></head><body><main><h1>Vibewaiting</h1><p id="pairing-status">Enter the access code shown on your computer.</p><form method="post" action="/login"><label>Access code<input name="code" inputmode="numeric" pattern="[0-9 ]{6,7}" maxlength="7" autocomplete="one-time-code" autofocus required></label><button type="submit">Open chats</button></form><small>This code expires when the local bridge stops.</small></main></body></html>`;
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><title>Vibewaiting</title><style>
+${brandProperties(":root", LOGIN_ROLES)}:root{color-scheme:light dark;font:15px/1.45 ${BRAND_FONT.ui};background:var(--vw-page);color:var(--vw-fg)}body{min-height:100dvh;margin:0;display:grid;place-items:center}main{box-sizing:border-box;width:min(92vw,360px);padding:24px}h1{margin:0 0 5px;font-size:24px}p{margin:0 0 20px;color:var(--vw-muted)}form{display:grid;gap:12px}form[hidden]{display:none}label{display:grid;gap:7px;font-weight:650}input,button{box-sizing:border-box;width:100%;min-height:46px;border:1px solid var(--vw-border);border-radius:10px;background:var(--vw-field);color:inherit;font:inherit;padding:10px 12px}input{font:650 20px/1 ${BRAND_FONT.data};letter-spacing:.15em;text-align:center}button{cursor:pointer;background:var(--vw-action);color:var(--vw-action-fg);border-color:var(--vw-action);font-weight:700}small{color:var(--vw-faint)}</style><script src="/pair.js" defer></script></head><body><main><h1>Vibewaiting</h1><p id="pairing-status">Enter the access code shown on your computer.</p><form method="post" action="/login"><label>Access code<input name="code" inputmode="numeric" pattern="[0-9 ]{6,7}" maxlength="7" autocomplete="one-time-code" autofocus required></label><button type="submit">Open chats</button></form><small>This code expires when the local bridge stops.</small></main></body></html>`;
 
 const PAIRING_JAVASCRIPT = `(() => {
   const parameters = new URLSearchParams(location.hash.slice(1));
