@@ -33,9 +33,9 @@ body:
       description: Where should reusable functionality live?
       options:
         - Vibewaiting browser/mobile composition
-        - Supercode agent/session semantics or UI
+        - Volter Harness agent/session semantics or UI
         - Widget Shell overlay runtime
-        - Lucarne browser attachment
+        - Volter Browsers attachment
         - Unsure
     validations:
       required: true

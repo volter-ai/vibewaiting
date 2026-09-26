@@ -595,11 +595,11 @@ if (await exists(localSourceMarker)) {
     if (!(await exists(localBinaryMarker))) scheduleLocalStackRebuild();
   }, 1_000);
   localStackWatchdog.unref?.();
-  process.stdout.write(`local Supercode source: ${localSource}\n`);
+  process.stdout.write(`local Volter Harness source: ${localSource}\n`);
 }
 
 process.stdout.write(
-  `watching extension, messenger, host, and remembered local Supercode sources\n` +
+  `watching extension, messenger, host, and remembered local Volter Harness sources\n` +
     `open ${startUrl}; future successful builds reload automatically\n`,
 );
 

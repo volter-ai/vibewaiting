@@ -7,32 +7,32 @@ attachment, and tunnels.
 ```text
 ordinary web page
   └─ content script: launcher + page context + structured browser executor
-       └─ extension-owned iframe: full Supercode messenger UI
+       └─ extension-owned iframe: full Volter Harness messenger UI
             └─ browser native messaging (bounded, chunked protocol)
                  └─ Vibewaiting native host
                       ├─ browser broker for `vibewaiting mcp` (Playwright's tools on the active tab)
-                      ├─ Supercode controller: discovery, resume, input, settings
+                      ├─ Volter Harness controller: discovery, resume, input, settings
                       ├─ local terminal service: opaque short-lived attachment grants
                       ├─ local persistence: drafts, unread state, presentation memory
                       └─ remote messenger: authenticated mobile chat/terminal relay
-                           └─ Supercode remote-access provider
+                           └─ Volter Harness remote-access provider
 ```
 
 ## Ownership boundaries
 
 | Concern | Owner |
 | --- | --- |
-| Session discovery, harness capabilities, continuation semantics | Supercode client and harness SDK |
-| Chat components, transcripts, logos, intent schema | Supercode UI |
-| Terminal transport and viewer | Supercode Terminal |
+| Session discovery, harness capabilities, continuation semantics | Volter Harness client and harness SDK |
+| Chat components, transcripts, logos, intent schema | Volter Harness UI |
+| Terminal transport and viewer | Volter Harness Terminal |
 | Overlay lifecycle, geometry, iframe isolation | Widget Shell |
-| Optional managed/headless browser attachment | Lucarne |
-| Stable or temporary public transport | Supercode Remote Access and Volter Tunnel |
+| Optional managed/headless browser attachment | Volter Browsers |
+| Stable or temporary public transport | Volter Harness Remote Access and Volter Tunnel |
 | Browser permissions, context capture, the browser tools' MCP server and approval policy, native messaging, product composition | Vibewaiting |
 | Browser tools and their schemas | Playwright (`playwright-core`'s MCP tool backend) |
 | Playwright in the browser, the in-page CDP surface | AlmostCDP |
 
-If a change is useful to another Supercode frontend or overlay application without
+If a change is useful to another Volter Harness frontend or overlay application without
 Vibewaiting's browser-companion workflow, it likely belongs upstream.
 
 ## Browser isolation

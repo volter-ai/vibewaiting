@@ -17,7 +17,7 @@ const source = candidates.find((candidate) =>
   && existsSync(join(candidate, "sdk/typescript/package.json")));
 
 if (!source) {
-  throw new Error("Local Supercode checkout not found. Pass its root directory or set SUPERCODE_DIR.");
+  throw new Error("Local Volter Harness checkout not found. Pass its root directory or set SUPERCODE_DIR.");
 }
 
 const packages = [
@@ -117,7 +117,7 @@ if (!process.env.SUPERCODE_BINARY && (!existsSync(binary) || statSync(binary).mt
 } else if (process.env.SUPERCODE_BINARY && !existsSync(binary)) {
   throw new Error(`SUPERCODE_BINARY does not exist: ${binary}`);
 } else {
-  process.stdout.write("local Supercode binary is current; skipping Rust rebuild\n");
+  process.stdout.write("local Volter Harness binary is current; skipping Rust rebuild\n");
 }
 run("npm", ["run", "build"], { cwd: join(source, "sdk/ui") });
 if (terminalSource) {
@@ -154,7 +154,7 @@ try {
   writeChanged(marker, `${binary}\n`);
   writeChanged(sourceMarker, `${source}\n`);
   process.stdout.write(
-    `local Supercode stack synced from ${source} in ${Math.round(performance.now() - startedAt)}ms\n`
+    `local Volter Harness stack synced from ${source} in ${Math.round(performance.now() - startedAt)}ms\n`
       + installed.map(([name, version]) => `  ${name}@${version}`).join("\n") + "\n",
   );
 } finally {

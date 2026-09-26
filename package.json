@@ -2,7 +2,7 @@
   "name": "vibewaiting",
   "version": "0.2.0",
   "private": true,
-  "description": "Vibe code without leaving your browser: a messenger overlay wired to local coding-agent sessions through Supercode.",
+  "description": "Vibe code without leaving your browser: a messenger overlay wired to local coding-agent sessions through Volter Harness.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/volter-ai/vibewaiting.git"

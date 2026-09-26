@@ -73,5 +73,5 @@ npm run build
 node dist/cli.js native install --browser chrome
 ```
 
-Load `dist/extension` as the unpacked extension. Source development and local Supercode
+Load `dist/extension` as the unpacked extension. Source development and local Volter Harness
 workflows are covered in [CONTRIBUTING.md](../CONTRIBUTING.md).

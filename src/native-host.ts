@@ -257,7 +257,7 @@ async function localSupercodeCommand(): Promise<string | undefined> {
     .catch(() => "");
   if (configuredSource) {
     throw new Error(
-      `Local Supercode is configured from ${configuredSource}, but its synced binary marker is missing. Run npm run sync:local before starting Vibewaiting.`,
+      `Local Volter Harness is configured from ${configuredSource}, but its synced binary marker is missing. Run npm run sync:local before starting Vibewaiting.`,
     );
   }
   return undefined;

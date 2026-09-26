@@ -18,7 +18,7 @@ Requirements:
 - Node.js 22.12 or newer on an LTS release line (22, 24, and later) and npm
 - macOS or Linux for native-host development
 - Chrome, Chromium, or Brave for extension validation
-- a locally installed coding harness supported by Supercode
+- a locally installed coding harness supported by Volter Harness
 
 ```sh
 git clone https://github.com/volter-ai/vibewaiting.git
@@ -43,19 +43,19 @@ relevant sources, and reloads only after a successful build. See
 [the development guide](docs/development.md) before pointing it at a non-default
 checkout.
 
-Contributors working on Supercode and Vibewaiting together can run `npm run sync:local`
-to install a coherent adjacent Supercode build into this checkout without modifying the
+Contributors working on Volter Harness and Vibewaiting together can run `npm run sync:local`
+to install a coherent adjacent Volter Harness build into this checkout without modifying the
 lockfile, or use `npm run dev:extension:local` for the initial sync and development launch.
 
-Vibewaiting consumes published Supercode packages in a normal checkout. Contributors
-can build and test this repository without Supercode source access; changes to agent
-semantics or shared UI require coordination with the Supercode maintainers until that
+Vibewaiting consumes published Volter Harness packages in a normal checkout. Contributors
+can build and test this repository without Volter Harness source access; changes to agent
+semantics or shared UI require coordination with the Volter Harness maintainers until that
 repository is publicly available.
 
 ## Scope and design rules
 
 - Keep Vibewaiting a thin browser/mobile companion. Harness semantics and reusable chat
-  components belong in Supercode packages; generic overlay geometry belongs in Widget
+  components belong in Volter Harness packages; generic overlay geometry belongs in Widget
   Shell.
 - Preserve the browser/native boundary. Never send locators, filesystem recovery paths,
   tmux handles, credentials, or execution policy into ordinary page content.

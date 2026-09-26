@@ -45,12 +45,12 @@ Options
   --workspace <dir>   project directory the coding agent runs in (default: cwd)
   --harness <name>    claude-code | codex
                       (default: first one ready)
-  --session <id>      attach to an existing lucarne session instead of creating one
+  --session <id>      attach to an existing Volter Browsers session instead of creating one
   --policy <name>     execution policy for the agent: default | yolo (default: the controller's)
   -h, --help          print this
 
 Environment
-  LUCARNE_URL         lucarne daemon base URL (default ${DEFAULT_ENGINE_URL})
+  LUCARNE_URL         Volter Browsers daemon base URL (default ${DEFAULT_ENGINE_URL})
   LUCARNE_TOKEN       bearer token, when the daemon requires one
 
 The widget mounts on every page of the attached browser. Keep using that browser normally; the
@@ -281,7 +281,7 @@ async function main(): Promise<void> {
     }
   } catch (e) {
     throw new Error(
-      `cannot reach the lucarne daemon at ${baseUrl} (${(e as Error)?.message ?? e}) — start one with \`npx lucarne serve\``,
+      `cannot reach the Volter Browsers daemon at ${baseUrl} (${(e as Error)?.message ?? e}) — start one with \`npx lucarne serve\``,
     );
   }
 

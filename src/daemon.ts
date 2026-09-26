@@ -1491,7 +1491,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       actionError = null;
       try {
         if (!authentication) {
-          throw new Error("This Supercode service does not support native harness sign-in.");
+          throw new Error("This Volter Harness service does not support native harness sign-in.");
         }
         const flow = authentication.authenticate(uiIntent.harness, {
           environment: intent.source === "remote" ? "headless" : "local_browser",
@@ -1834,7 +1834,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           throw new Error("open a persisted read-only conversation before reducing it");
         }
         if (!snapshot.availableActions.reduce) {
-          throw new Error("this Supercode service cannot create a verified reversible continuation");
+          throw new Error("this Volter Harness service cannot create a verified reversible continuation");
         }
         const target = uiIntent.targetHarness ?? null;
         if (target !== null && !SESSION_FORMATS.has(target)) {
@@ -1847,7 +1847,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         await dispatchControllerIntent(foreign.controller, uiIntent);
         const receipt = foreign.controller.getSnapshot().reductionReceipt;
         if (!receipt?.verified || !receipt.reversible) {
-          throw new Error("Supercode started no verified reversible reduction");
+          throw new Error("Volter Harness started no verified reversible reduction");
         }
         log(
           `reduced ${snapshot.activeHarness ?? "coding agent"} conversation${target ? ` into ${target}` : ""} ` +

@@ -1,3 +1,5 @@
+<p align="center"><img src="https://brand.volter.ai/logo/vibewaiting/svg?size=96" alt="Vibewaiting"></p>
+
 # Vibewaiting
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-2f3136.svg)](LICENSE)
@@ -25,7 +27,7 @@ switch the same conversation into a familiar terminal.
   temporary tunnel or a stable relay you configure.
 - **Attach the page in one action.** Send a selection, link, image, GitHub object,
   Hacker News item, or the visible page without copying it by hand.
-- **Let Supercode agents use the tab you are already in.** Vibewaiting hosts
+- **Let Volter Harness agents use the tab you are already in.** Vibewaiting hosts
   Playwright itself, running inside the extension against the page—without a
   second automation browser. A page that forbids eval, such as GitHub, is driven
   through Chrome's debugger while the agent drives it, and Chrome shows its
@@ -70,7 +72,7 @@ the terminal surface. A local extension click lets the native CLI open its brows
 a paired remote Codex click uses device code instead. Claude Code currently exposes no
 verified browserless flag, so remote Claude sign-in fails clearly rather than pretending
 the local browser flow is portable. Credentials remain owned by Claude Code or Codex and
-never pass through Vibewaiting or Supercode.
+never pass through Vibewaiting or Volter Harness.
 
 Keyboard shortcuts open and focus the composer (`⌥⇧V` / `Alt+Shift+V`), attach the
 current browser context (`⌥⇧A`), and move between conversations (`⌥⇧←` / `⌥⇧→`). All
@@ -113,7 +115,7 @@ messenger and page-context listener from ordinary sites.
 
 Vibewaiting itself is MIT-licensed. Release archives include exact third-party notices,
 a CycloneDX SBOM, checksums, and public provenance. Its shared agent semantics and
-messenger components arrive as versioned, source-readable Supercode packages under MIT
+messenger components arrive as versioned, source-readable Volter Harness packages under MIT
 or Apache-2.0; their upstream repository is not yet public. That means this checkout is
 fully buildable and auditable as shipped, but changes inside those shared packages must
 currently be coordinated upstream. See [Dependency transparency](docs/dependency-transparency.md)
@@ -128,7 +130,7 @@ for the exact boundary rather than assuming every dependency lives in this repos
 | Chrome, Chromium, Brave | Supported through the unpacked extension |
 | macOS, Linux | Supported native-companion platforms |
 | Mobile browser | Supported through authenticated remote access; installable only on a configured stable origin |
-| Gemini, Goose, OpenCode, Pi, Grok | Supercode can model them, but Vibewaiting does not yet claim a verified UI lane |
+| Gemini, Goose, OpenCode, Pi, Grok | Volter Harness can model them, but Vibewaiting does not yet claim a verified UI lane |
 | Firefox, Windows | Not release-supported yet |
 
 Unsupported capabilities stay hidden. A fallback harness identity or action is treated
@@ -138,11 +140,11 @@ as a bug, not a convenience.
 
 Vibewaiting is a deliberately thin product composition:
 
-- [Supercode packages](https://www.npmjs.com/package/@volter-ai-dev/supercode-client) own coding-agent session
+- [Volter Harness packages](https://www.npmjs.com/package/@volter-ai-dev/supercode-client) own coding-agent session
   discovery, capabilities, continuation semantics, UI components, and terminal grants.
 - [Widget Shell](https://github.com/volter-ai/widget-shell) owns the isolated overlay,
   responsive geometry, and visual lifecycle.
-- [Lucarne](https://github.com/volter-ai/lucarne) is optional for managed or headless
+- [Volter Browsers](https://github.com/volter-ai/lucarne) is optional for managed or headless
   browser attachment; ordinary extension use does not require it.
 - [Volter Tunnel](https://github.com/volter-ai/volter-tunnel) supplies stable and
   temporary remote transport.

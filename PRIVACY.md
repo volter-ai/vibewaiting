@@ -52,7 +52,7 @@ it does not sell the data, use it for advertising, or allow humans to read it.
 
 ## Data on your computer
 
-Vibewaiting reads agent sessions through Supercode and stores local drafts, unread
+Vibewaiting reads agent sessions through Volter Harness and stores local drafts, unread
 boundaries, presentation choices, and remote-device state. Native paths, credentials,
 tmux handles, and execution policy are not exposed to ordinary web pages. Removing the
 extension removes browser-local settings. Run

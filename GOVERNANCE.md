@@ -24,6 +24,6 @@ security risk, or Code of Conduct violations after a private discussion when pra
 
 ## Scope
 
-Vibewaiting is a thin browser and mobile companion for Supercode-backed coding-agent
+Vibewaiting is a thin browser and mobile companion for Volter Harness-backed coding-agent
 sessions. It does not aim to become a coding harness, IDE, hosted execution service, or
 general remote-desktop product. See [ROADMAP.md](ROADMAP.md).

@@ -60,7 +60,7 @@ bundle. `argparse` includes its complete Python license history in
 `node_modules/argparse/LICENSE`. The remaining packages that supply license files keep
 them in their own directories.
 
-The Supercode packages are distributed here under their MIT option:
+The Volter Harness packages (`@volter-ai-dev/supercode-*`) are distributed here under their MIT option:
 
 > MIT License
 >

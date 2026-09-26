@@ -8,7 +8,7 @@ and contribute—not merely that GitHub visibility changed.
 
 - Confirm the maintainer name, copyright holder, security/conduct email, and Chrome Web
   Store publisher identity.
-- Decide whether Supercode source will be public at launch. Vibewaiting can be built
+- Decide whether Volter Harness source will be public at launch. Vibewaiting can be built
   from its public packages, but contributors cannot independently change or audit its
   shared agent semantics and UI while that repository is private.
 - Decide whether the first announcement targets developer alpha users who will load an
@@ -46,8 +46,8 @@ and contribute—not merely that GitHub visibility changed.
 
 - Upload a real, sanitized product recording or screenshot as the GitHub social preview;
   do not use private sessions, paths, terminal output, or generated fake UI.
-- Confirm the first screen says what the product does before naming Supercode, Widget
-  Shell, Lucarne, or tunnel internals.
+- Confirm the first screen says what the product does before naming Volter Harness, Widget
+  Shell, Volter Browsers, or tunnel internals.
 - Follow [the Chrome Web Store checklist](chrome-web-store.md) for listing disclosures,
   screenshots, support information, and permission review.
 - Test the announcement link while logged out and from a phone.

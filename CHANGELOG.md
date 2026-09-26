@@ -7,6 +7,8 @@ the complete generated notes and downloadable artifacts for each version.
 
 ### Changed
 
+- Documentation, CLI help and error text name Supercode as Volter Harness and Lucarne
+  as Volter Browsers; package names, commands and environment variables are unchanged.
 - An agent drives the shared tab through `vibewaiting mcp`, a stdio MCP server its
   harness registers like any other (`claude mcp add vibewaiting -- vibewaiting mcp`).
   It serves Playwright's own browser tools with the schemas `@playwright/mcp`

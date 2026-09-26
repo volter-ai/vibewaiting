@@ -123,14 +123,14 @@ export async function installNativeHost(
     browser === "firefox"
       ? {
           name: NATIVE_HOST_NAME,
-          description: "Vibewaiting local Supercode bridge",
+          description: "Vibewaiting local Volter Harness bridge",
           path: launcherPath,
           type: "stdio",
           allowed_extensions: [extensionId],
         }
       : {
           name: NATIVE_HOST_NAME,
-          description: "Vibewaiting local Supercode bridge",
+          description: "Vibewaiting local Volter Harness bridge",
           path: launcherPath,
           type: "stdio",
           allowed_origins: [`chrome-extension://${extensionId}/`],
