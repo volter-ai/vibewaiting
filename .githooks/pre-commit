@@ -1,0 +1,36 @@
+#!/bin/sh
+# Product styles are the Volter brand's roles: these sources name a CSS token,
+# a brand(<role>) placeholder (resolved at build) or a role from
+# src/brand-colours.generated.ts, never a literal colour. Lines inside a
+# "vendor marks: their own colours" block are exempt. Only lines this commit
+# adds are checked; experiments/ is not covered.
+files=$(git diff --cached --name-only --diff-filter=ACMR -- extension/options.css extension/remote-access-companion.ts extension/background.ts mobile/styles.css mobile/index.html src/remote-messenger.ts src/theme.ts src/brand.ts widget/styles.mjs)
+[ -z "$files" ] && exit 0
+exec node - $files <<'JS'
+const { execFileSync } = require('node:child_process');
+const git = (...args) => execFileSync('git', args, { encoding: 'utf8', maxBuffer: 1 << 26 });
+const literal = /#[0-9a-fA-F]{3,8}(?![0-9A-Za-z_-])|\brgba?\(|\bhsla?\(/;
+let failed = false;
+for (const file of process.argv.slice(2)) {
+  const added = new Set();
+  let line = 0;
+  for (const row of git('diff', '--cached', '-U0', '--', file).split('\n')) {
+    const hunk = row.match(/^@@ -\S+ \+(\d+)/);
+    if (hunk) line = Number(hunk[1]);
+    else if (row.startsWith('+') && !row.startsWith('+++')) added.add(line++);
+  }
+  let vendor = false;
+  const bad = [];
+  git('show', `:${file}`).split('\n').forEach((text, index) => {
+    if (text.includes('vendor marks: their own colours')) { vendor = true; return; }
+    if (text.includes('end vendor marks')) { vendor = false; return; }
+    if (!vendor && added.has(index + 1) && literal.test(text)) bad.push(`  ${index + 1}: ${text.trim().slice(0, 160)}`);
+  });
+  if (bad.length) {
+    failed = true;
+    console.error(`pre-commit: literal colour in ${file}; use a token or brand(<role>) (roles: https://brand.volter.ai/tokens)`);
+    console.error(bad.join('\n'));
+  }
+}
+process.exit(failed ? 1 : 0);
+JS

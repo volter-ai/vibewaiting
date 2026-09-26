@@ -37,7 +37,8 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/build-browser-tools.mjs && node widget/build.mjs && node extension/build.mjs",
+    "prepare": "git config core.hooksPath .githooks || true",
+    "build": "node scripts/build-brand-colours.mjs && tsc -p tsconfig.json && node scripts/build-browser-tools.mjs && node widget/build.mjs && node extension/build.mjs",
     "build:widget": "node widget/build.mjs",
     "build:extension": "node extension/build.mjs",
     "dev:almostnode": "vite --config experiments/almostnode/vite.config.ts",
