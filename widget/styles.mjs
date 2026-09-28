@@ -11,7 +11,7 @@ body { background:transparent }
 
 .vw-dialog { --scui-bg:brand(surface.page); --scui-bg-raised:brand(surface.raised); --scui-fill:brand(surface.subtle); --scui-fill-strong:brand(surface.inset); --scui-fg:brand(text.primary);
   --scui-muted:brand(text.muted); --scui-border:brand(border.default); --scui-border-strong:brand(border.strong); --scui-danger:brand(status.danger.base);
-  --sctui-terminal-background:brand(surface.media);
+  --sctui-terminal-background:brand(terminal.background);
   --scui-font:brand(font.ui);
   position:relative; width:100%; height:100%; outline:0 }
 .vw-messenger-layer { width:100%; height:100% }
@@ -46,7 +46,7 @@ body { background:transparent }
 .vw-native-move button:disabled { opacity:.45; cursor:default }
 
 .vw-terminal-surface { position:absolute; z-index:11; top:49px; right:0; bottom:0; left:0; display:flex; min-width:0; min-height:0;
-  box-sizing:border-box; padding:5px 7px 7px; background:var(--sctui-terminal-background); color:brand(terminal.white); color-scheme:dark }
+  box-sizing:border-box; padding:5px 7px 7px; background:var(--sctui-terminal-background); color:brand(terminal.foreground); color-scheme:light dark }
 .vw-terminal-surface > .sctui-viewer { min-width:0; min-height:0; flex:1 }
 
 .vw-shortcut-help { width:min(300px,calc(100vw - 28px)); margin:auto; padding:16px; border:1px solid var(--scui-border-strong);

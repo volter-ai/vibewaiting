@@ -73,10 +73,10 @@ body { position:fixed; inset:0; overscroll-behavior:none; background:brand(surfa
     overflow-x:auto;
     overscroll-behavior-x:contain;
     scrollbar-width:none;
-    /* Part of the terminal surface, which is dark in either scheme. */
-    color-scheme:dark;
+    /* Part of the terminal surface: Terminal.app's Basic profile, which follows the system's appearance. */
+    color-scheme:light dark;
     border-top:1px solid brand(border.default);
-    background:brand(surface.media);
+    background:brand(terminal.background);
   }
   .vw-mobile-terminal-keys::-webkit-scrollbar { display:none }
   .vw-mobile-terminal-keys button {
