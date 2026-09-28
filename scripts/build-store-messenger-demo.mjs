@@ -26,7 +26,7 @@ await build({
 });
 
 const supercodeCss = await readFile(
-  new URL(import.meta.resolve("@volter-ai-dev/supercode-ui/styles.css")),
+  new URL(import.meta.resolve("@volter/supercode-ui/styles.css")),
   "utf8",
 );
 await writeFile(join(output, "app.css"), `${supercodeCss}\n${PANEL_CSS}`, "utf8");

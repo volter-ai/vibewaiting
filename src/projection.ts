@@ -5,13 +5,13 @@ import {
   createClientProjection,
   projectClientSnapshot,
   type ClientProjectionOptions,
-} from "@volter-ai-dev/supercode-ui/controller";
+} from "@volter/supercode-ui/controller";
 import type {
   SessionAttention as SupercodeSessionAttention,
   StartupPhase as SupercodeStartupPhase,
   SupercodeUiState,
-} from "@volter-ai-dev/supercode-ui";
-import type { SupercodeClientSnapshot } from "@volter-ai-dev/supercode-client";
+} from "@volter/supercode-ui";
+import type { SupercodeClientSnapshot } from "@volter/supercode-client";
 
 export type WidgetState = SupercodeUiState;
 export type SessionAttention = SupercodeSessionAttention;

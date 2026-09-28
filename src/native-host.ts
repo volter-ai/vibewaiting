@@ -4,16 +4,16 @@ import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { SupercodeHarnessClient } from "@volter-ai-dev/supercode-harness-sdk";
-import type { HarnessId } from "@volter-ai-dev/supercode-harness-sdk";
+import { SupercodeHarnessClient } from "@volter/supercode-harness-sdk";
+import type { HarnessId } from "@volter/supercode-harness-sdk";
 import {
   createRemoteAccessController,
   inspectRemoteAccessCapabilities,
   type RemoteAccessController,
   type RemoteAccessCapability,
   type RemoteAccessSnapshot,
-} from "@volter-ai-dev/supercode-remote-access";
-import { SupercodeTerminalController } from "@volter-ai-dev/supercode-terminal";
+} from "@volter/supercode-remote-access";
+import { SupercodeTerminalController } from "@volter/supercode-terminal";
 import { startDaemon, type Daemon, type WidgetBridge } from "./daemon.js";
 import {
   parseNativeHostCommand,
@@ -28,8 +28,8 @@ import {
 } from "./native-messaging.js";
 import { FileMessengerPersistence } from "./persistence.js";
 import { RemoteMessengerServer } from "./remote-messenger.js";
-import type { RemoteDeviceSnapshot } from "@volter-ai-dev/supercode-remote-access/client";
-import { formatWorkspacePath } from "@volter-ai-dev/supercode-ui/controller";
+import type { RemoteDeviceSnapshot } from "@volter/supercode-remote-access/client";
+import { formatWorkspacePath } from "@volter/supercode-ui/controller";
 import { BrowserBroker } from "./browser-broker.js";
 import { browserToolError, type BrowserToolResult } from "./browser-tools.js";
 

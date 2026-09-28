@@ -20,8 +20,8 @@ import {
   SessionFamilyInspector,
   SupercodeSessionCatalog,
   SupercodeController,
-} from "@volter-ai-dev/supercode-client";
-import { sessionReconnectIdentitySync as sessionKey } from "@volter-ai-dev/supercode-client/node";
+} from "@volter/supercode-client";
+import { sessionReconnectIdentitySync as sessionKey } from "@volter/supercode-client/node";
 import type {
   FrontendHarness,
   HarnessClientAdapter,
@@ -29,11 +29,11 @@ import type {
   SupercodeSessionCatalogSnapshot,
   SupercodeClientAction,
   SupercodeClientSnapshot,
-} from "@volter-ai-dev/supercode-client";
-import { createNativeInteractiveStart } from "@volter-ai-dev/supercode-harness-sdk";
-import type { HarnessId, SessionArtifact, SessionDescriptor, SessionFormat, StructuredLaunch } from "@volter-ai-dev/supercode-harness-sdk";
-import type { ContinuationMode } from "@volter-ai-dev/supercode-ui";
-import { normalizeUiState, parseSupercodeUiIntent } from "@volter-ai-dev/supercode-ui/core";
+} from "@volter/supercode-client";
+import { createNativeInteractiveStart } from "@volter/supercode-harness-sdk";
+import type { HarnessId, SessionArtifact, SessionDescriptor, SessionFormat, StructuredLaunch } from "@volter/supercode-harness-sdk";
+import type { ContinuationMode } from "@volter/supercode-ui";
+import { normalizeUiState, parseSupercodeUiIntent } from "@volter/supercode-ui/core";
 import {
   dispatchControllerIntent,
   matchesSessionRef as matchesActive,
@@ -43,11 +43,11 @@ import {
   projectSubagentTranscript,
   sessionDescriptorRuntimeStatus as sessionRuntimeStatus,
   type ActiveSessionRef,
-} from "@volter-ai-dev/supercode-ui/controller";
+} from "@volter/supercode-ui/controller";
 import {
   createNativeMessengerState,
   normalizeNativeMessengerState,
-} from "@volter-ai-dev/supercode-ui/host";
+} from "@volter/supercode-ui/host";
 import { createLucarneInjector } from "@volter-ai-dev/widget-shell/lucarne";
 import { WidgetHost } from "lucarne/widget/host";
 import {
@@ -70,7 +70,7 @@ import {
   VIBEWAITING_PRESENTATION,
   VIBEWAITING_PRESENTATIONS,
 } from "./presentations.js";
-import type { SupercodeTerminalSnapshot as TerminalServiceSnapshot } from "@volter-ai-dev/supercode-terminal";
+import type { SupercodeTerminalSnapshot as TerminalServiceSnapshot } from "@volter/supercode-terminal";
 
 /** Namespaces every page global / element id / sticky-injection id the widget mints (see `lucarne/widget/ns`). */
 export const WIDGET_NS = "vibewaiting";

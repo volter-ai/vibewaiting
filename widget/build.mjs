@@ -12,7 +12,7 @@ import { PANEL_CSS } from "./styles.mjs";
 export const WIDGET_HTML_PATH = fileURLToPath(new URL("../dist/widget.html", import.meta.url));
 
 export async function buildWidget({ outFile = WIDGET_HTML_PATH, minify = true } = {}) {
-  const supercodeUiCss = await readFile(fileURLToPath(import.meta.resolve("@volter-ai-dev/supercode-ui/styles.css")), "utf8");
+  const supercodeUiCss = await readFile(fileURLToPath(import.meta.resolve("@volter/supercode-ui/styles.css")), "utf8");
   const { html } = await buildSrcdoc({
     entryPoints: fileURLToPath(new URL("./entry.tsx", import.meta.url)),
     css: `${supercodeUiCss}\n${PANEL_CSS}`,

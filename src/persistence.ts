@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import {
   normalizeNativeMessengerState,
   type NativeMessengerStateSnapshot,
-} from "@volter-ai-dev/supercode-ui/host";
+} from "@volter/supercode-ui/host";
 
 export type PersistedMessengerState = NativeMessengerStateSnapshot;
 

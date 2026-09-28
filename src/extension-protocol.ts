@@ -1,7 +1,7 @@
 import type {
   RemoteDeviceSnapshot,
   RemotePairingHandoff,
-} from "@volter-ai-dev/supercode-remote-access/client";
+} from "@volter/supercode-remote-access/client";
 import {
   parseBrowserToolResult,
   type BrowserToolCall,
@@ -11,7 +11,7 @@ import {
 export type {
   RemoteDeviceSnapshot,
   RemotePairingHandoff,
-} from "@volter-ai-dev/supercode-remote-access/client";
+} from "@volter/supercode-remote-access/client";
 
 export const VIBEWAITING_EXTENSION_PROTOCOL =
   "vibewaiting/extension-v2" as const;

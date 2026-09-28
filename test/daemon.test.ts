@@ -11,13 +11,13 @@ import {
   type TerminalService,
   type WidgetBridge,
 } from "../src/daemon.js";
-import type { SupercodeTerminalSnapshot as TerminalServiceSnapshot } from "@volter-ai-dev/supercode-terminal";
+import type { SupercodeTerminalSnapshot as TerminalServiceSnapshot } from "@volter/supercode-terminal";
 import { DEFAULT_MAX_ENTRIES, DEFAULT_MAX_ENTRY_CHARS } from "../src/projection.js";
 import type { ExportReceipt, WidgetState } from "../src/projection.js";
 import type { MessengerPersistence, PersistedMessengerState } from "../src/persistence.js";
-import { sessionReconnectIdentitySync as sessionKey } from "@volter-ai-dev/supercode-client/node";
-import { SupercodeController, type SupercodeClientSnapshot } from "@volter-ai-dev/supercode-client";
-import type { SessionArtifact } from "@volter-ai-dev/supercode-harness-sdk";
+import { sessionReconnectIdentitySync as sessionKey } from "@volter/supercode-client/node";
+import { SupercodeController, type SupercodeClientSnapshot } from "@volter/supercode-client";
+import type { SessionArtifact } from "@volter/supercode-harness-sdk";
 import { FakeHarnessClient, FakeWidgetHost, descriptor, localHarness, waitFor } from "./fakes.js";
 
 const running: Daemon[] = [];
@@ -160,6 +160,7 @@ class RecordingTerminalService implements TerminalService {
         id: "opaque-session-id",
         label: harness,
         owned: true,
+        rootPid: null,
         size: { columns: 80, rows: 24 },
       }],
     };

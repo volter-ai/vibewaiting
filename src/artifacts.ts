@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
-import type { SessionArtifact } from "@volter-ai-dev/supercode-harness-sdk";
+import type { SessionArtifact } from "@volter/supercode-harness-sdk";
 import type { ExportReceipt } from "./projection.js";
 
 /** Artifact paths come from a harness. Keep their hierarchy, but never let it escape our bundle. */

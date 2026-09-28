@@ -1,4 +1,4 @@
-import { harnessLogoDataUrl } from "@volter-ai-dev/supercode-ui/preact/logo";
+import { harnessLogoDataUrl } from "@volter/supercode-ui/preact/logo";
 import {
   createExtensionGeometryPersistence,
   createExtensionIframeContent,

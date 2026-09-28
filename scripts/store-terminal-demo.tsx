@@ -1,6 +1,6 @@
 // Deliberately sanitized store-artwork fixture. This mounts the production messenger and terminal
 // components; it is not shipped in the extension or exercised in merge CI.
-import { TerminalViewer } from "@volter-ai-dev/supercode-terminal/ui";
+import { TerminalViewer } from "@volter/supercode-terminal/ui";
 import type { JSX } from "preact";
 import {
   mountMessenger,

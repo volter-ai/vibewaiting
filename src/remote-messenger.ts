@@ -7,8 +7,8 @@ import {
   type PairingGrant,
   RemoteSessionTokens,
   SingleUsePairingGrants,
-} from "@volter-ai-dev/supercode-remote-access";
-import type { RemoteDeviceSnapshot } from "@volter-ai-dev/supercode-remote-access/client";
+} from "@volter/supercode-remote-access";
+import type { RemoteDeviceSnapshot } from "@volter/supercode-remote-access/client";
 import { BRAND_FONT, brandProperties, type BrandRole } from "./brand.js";
 
 const MAX_LOGIN_BYTES = 2_048;

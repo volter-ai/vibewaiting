@@ -7,8 +7,8 @@
 // with `--session` is left running, because the human is probably still browsing in it.
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { SupercodeHarnessClient } from "@volter-ai-dev/supercode-harness-sdk";
-import type { HarnessId } from "@volter-ai-dev/supercode-harness-sdk";
+import { SupercodeHarnessClient } from "@volter/supercode-harness-sdk";
+import type { HarnessId } from "@volter/supercode-harness-sdk";
 import { LucarneClient } from "lucarne";
 import type { Session } from "lucarne";
 import { startDaemon, type Daemon } from "./daemon.js";

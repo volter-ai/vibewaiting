@@ -1,14 +1,14 @@
 // Vibewaiting is intentionally only the composition seam between a browser delivery transport and
 // Supercode's reusable default UI. Agent semantics, components, transcript presentation, logos,
-// continuation controls, and presentation memory live in @volter-ai-dev/supercode-ui. This file
+// continuation controls, and presentation memory live in @volter/supercode-ui. This file
 // owns only transport intents and the host/guest adaptation required by Widget Shell.
-import { SupercodeMessenger } from "@volter-ai-dev/supercode-ui/preact/messenger";
+import { SupercodeMessenger } from "@volter/supercode-ui/preact/messenger";
 import {
   harnessLogoDataUrl,
   hasHarnessLogo,
-} from "@volter-ai-dev/supercode-ui/preact/logo";
-import { UiIcon } from "@volter-ai-dev/supercode-ui/preact/icon";
-import { normalizeUiState } from "@volter-ai-dev/supercode-ui/core";
+} from "@volter/supercode-ui/preact/logo";
+import { UiIcon } from "@volter/supercode-ui/preact/icon";
+import { normalizeUiState } from "@volter/supercode-ui/core";
 import type {
   MessengerComposerCommand,
   MessengerNavigation,
@@ -17,11 +17,11 @@ import type {
   TranscriptAttachment,
   TranscriptImage,
   UiAdapter,
-} from "@volter-ai-dev/supercode-ui";
+} from "@volter/supercode-ui";
 import {
   normalizeTerminalUiState,
   type TerminalUiState,
-} from "@volter-ai-dev/supercode-terminal/ui";
+} from "@volter/supercode-terminal/ui";
 import { render as renderPreact } from "preact";
 import type { ComponentType, JSX } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";

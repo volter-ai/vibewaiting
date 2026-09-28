@@ -78,9 +78,9 @@ await build({
   splitting: true,
 });
 
-const supercodeCss = await readFile(fileURLToPath(import.meta.resolve("@volter-ai-dev/supercode-ui/styles.css")), "utf8");
+const supercodeCss = await readFile(fileURLToPath(import.meta.resolve("@volter/supercode-ui/styles.css")), "utf8");
 const xtermCss = await readFile(fileURLToPath(import.meta.resolve("@xterm/xterm/css/xterm.css")), "utf8");
-const terminalCss = await readFile(fileURLToPath(import.meta.resolve("@volter-ai-dev/supercode-terminal/ui/styles.css")), "utf8");
+const terminalCss = await readFile(fileURLToPath(import.meta.resolve("@volter/supercode-terminal/ui/styles.css")), "utf8");
 await writeFile(join(output, "app.css"), `${supercodeCss}\n${xtermCss}\n${terminalCss}\n${PANEL_CSS}`, "utf8");
 // Stylesheet sources name the Volter brand's roles; the shipped copies carry resolved values only.
 const mobileCss = brandCss(await readFile(join(root, "mobile/styles.css"), "utf8"));

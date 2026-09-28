@@ -21,12 +21,12 @@ if (!source) {
 }
 
 const packages = [
-  [join(source, "sdk/typescript"), "@volter-ai-dev/supercode-harness-sdk"],
-  [join(source, "sdk/client"), "@volter-ai-dev/supercode-client"],
-  [join(source, "sdk/ui"), "@volter-ai-dev/supercode-ui"],
+  [join(source, "sdk/typescript"), "@volter/supercode-harness-sdk"],
+  [join(source, "sdk/client"), "@volter/supercode-client"],
+  [join(source, "sdk/ui"), "@volter/supercode-ui"],
 ];
 if (existsSync(join(source, "sdk/remote-access/package.json"))) {
-  packages.push([join(source, "sdk/remote-access"), "@volter-ai-dev/supercode-remote-access"]);
+  packages.push([join(source, "sdk/remote-access"), "@volter/supercode-remote-access"]);
 }
 const terminalCandidates = [
   process.env.SUPERCODE_TERMINAL_DIR,
@@ -37,7 +37,7 @@ const terminalSource = terminalCandidates.find((candidate) =>
   existsSync(join(candidate, "package.json"))
 );
 if (terminalSource) {
-  packages.push([terminalSource, "@volter-ai-dev/supercode-terminal"]);
+  packages.push([terminalSource, "@volter/supercode-terminal"]);
 }
 const lucarneSource = resolve(process.env.LUCARNE_DIR ?? join(root, "../lucarne"));
 const syncLocalSurfaces =

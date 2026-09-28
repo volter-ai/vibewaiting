@@ -8,8 +8,8 @@ import { EventEmitter } from "node:events";
 import type {
   DiscoverableSessionDescriptor,
   HarnessClientAdapter,
-} from "@volter-ai-dev/supercode-client";
-import type { StructuredLaunch } from "@volter-ai-dev/supercode-harness-sdk";
+} from "@volter/supercode-client";
+import type { StructuredLaunch } from "@volter/supercode-harness-sdk";
 import type {
   HarnessAuthenticationEnvironment,
   HarnessAuthenticationPlan,
@@ -32,7 +32,7 @@ import type {
   SessionLocator,
   SessionMessageResult,
   SessionWatchEvent,
-} from "@volter-ai-dev/supercode-harness-sdk";
+} from "@volter/supercode-harness-sdk";
 import type { WidgetBridge } from "../src/daemon.js";
 
 const ALL_CAPABILITIES = {
@@ -297,14 +297,10 @@ export class FakeHarnessClient implements HarnessClientAdapter {
     this.messages.push({ locator, text });
     return {
       delivered_to_bus: true,
-      target: {
-        session_id: locator.session_id,
-        name: "fake-live-peer",
-        pid: 4242,
-        cwd: "/home/dev/projects/atlas",
-        status: "busy",
-      },
-      courier: { model: "haiku", report: "SENT" },
+      message_id: "m-fake",
+      reply_to: "sc:fake:claude-code:fake",
+      target: { harness: locator.harness, session_id: locator.session_id, name: "fake-live-peer" },
+      delivery: { door: "native", how: "queued" },
       inbound_controls: null,
       inbound_controls_error: null,
     };
@@ -459,6 +455,10 @@ export class FakeHarnessClient implements HarnessClientAdapter {
     return { artifact } as never;
   }
 
+  async materializeSession(): Promise<never> {
+    throw new Error("FakeHarnessClient.materializeSession is not part of this test");
+  }
+
   async translateSession(): Promise<never> {
     throw new Error("FakeHarnessClient.translateSession is not part of this test");
   }
@@ -541,6 +541,12 @@ class FakeManagedSession {
       agent_id: null,
       parent_tool_use_id: null,
       lineage: {},
+      trigger: "human",
+      surface: null,
+      profile: null,
+      recurrence: null,
+      cross_surface: null,
+      workspace: { kind: "none" },
       messages: visibleMessages.map((content) => ({ role: "assistant", content, metadata: {} })),
       subagents: [],
       raw_record_count: 1,

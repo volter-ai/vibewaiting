@@ -6,7 +6,7 @@ repository. It deliberately composes smaller projects instead of copying their c
 ## Shared Volter Harness packages
 
 The cross-agent session protocol, normalized messenger model, terminal adapter, remote
-access primitives, and reusable UI are consumed as pinned `@volter-ai-dev/supercode-*`
+access primitives, and reusable UI are consumed as pinned `@volter/supercode-*`
 packages. Every shipped package is source-readable JavaScript, carries an MIT or
 Apache-2.0 license, and is recorded at its exact version in `THIRD_PARTY_NOTICES.md` and
 the release SBOM.

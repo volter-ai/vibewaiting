@@ -1,6 +1,6 @@
 // Deliberately sanitized store-artwork fixture. This mounts the production messenger with a
 // representative bounded inventory; it is not shipped in the extension or exercised in merge CI.
-import type { SupercodeUiState } from "@volter-ai-dev/supercode-ui";
+import type { SupercodeUiState } from "@volter/supercode-ui";
 import { mountMessenger } from "../widget/messenger.js";
 import type { MessengerTransport } from "../widget/transport.js";
 

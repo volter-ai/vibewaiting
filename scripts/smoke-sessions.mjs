@@ -10,8 +10,8 @@
 // It NEVER sends input to a discovered session — mirroring is a read, and this script stays one.
 // Run it with `npm run build && node scripts/smoke-sessions.mjs [--harness claude-code]` — it renders
 // through the SHIPPED projection (`dist/sessions.js`), so what it prints is what the panel would show.
-import { SupercodeHarnessClient } from "@volter-ai-dev/supercode-harness-sdk";
-import { SupercodeController } from "@volter-ai-dev/supercode-client";
+import { SupercodeHarnessClient } from "@volter/supercode-harness-sdk";
+import { SupercodeController } from "@volter/supercode-client";
 import { projectSessions, sessionKey } from "../dist/sessions.js";
 
 const harnessArg = process.argv.includes("--harness")

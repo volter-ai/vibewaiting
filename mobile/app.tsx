@@ -1,5 +1,5 @@
 import { mountMessenger } from "../widget/messenger.js";
-import { TerminalViewer } from "@volter-ai-dev/supercode-terminal/ui";
+import { TerminalViewer } from "@volter/supercode-terminal/ui";
 import type { JSX } from "preact";
 import { useRef } from "preact/hooks";
 import type { MessengerTransport } from "../widget/transport.js";

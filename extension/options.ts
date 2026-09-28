@@ -14,7 +14,7 @@ import {
   activeRemotePairingUrl,
   parseRemoteDeviceSnapshot,
   parseRemotePairingHandoff,
-} from "@volter-ai-dev/supercode-remote-access/client";
+} from "@volter/supercode-remote-access/client";
 
 const SETTINGS_KEY = "vibewaiting:settings";
 const form = document.querySelector<HTMLFormElement>("form");

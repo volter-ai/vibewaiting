@@ -140,7 +140,7 @@ as a bug, not a convenience.
 
 Vibewaiting is a deliberately thin product composition:
 
-- [Volter Harness packages](https://www.npmjs.com/package/@volter-ai-dev/supercode-client) own coding-agent session
+- [Volter Harness packages](https://www.npmjs.com/package/@volter/supercode-client) own coding-agent session
   discovery, capabilities, continuation semantics, UI components, and terminal grants.
 - [Widget Shell](https://github.com/volter-ai/widget-shell) owns the isolated overlay,
   responsive geometry, and visual lifecycle.
