@@ -39,7 +39,7 @@ CLI tarball.
 | `@volter/supercode-remote-access` | 0.2.3 | MIT OR Apache-2.0 |
 | `@volter/supercode-terminal` | 0.2.30 | MIT OR Apache-2.0 |
 | `@volter/supercode-ui` | 0.1.95 | MIT OR Apache-2.0 |
-| `@volter-ai-dev/widget-shell` | 0.4.1 | MIT |
+| `@volter/widget-shell` | 0.6.1 | MIT |
 | `@volter/tunnel` | 2.0.5 | Apache-2.0 |
 | `@volter/tunnel-core` | 0.1.3 | Apache-2.0 |
 | `argparse` | 2.0.1 | Python-2.0 |

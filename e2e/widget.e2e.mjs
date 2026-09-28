@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { test, expect } from "@playwright/test";
-import { createLucarneInjector } from "@volter-ai-dev/widget-shell/lucarne";
+import { createLucarneInjector } from "../dist/lucarne-injector.js";
 import { hostElementId, iframeGlobal, intentQueueGlobal } from "lucarne/widget";
 
 const NS = "vibewaiting";

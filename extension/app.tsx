@@ -1,4 +1,4 @@
-import { connectOverlayApp } from "@volter-ai-dev/widget-shell/frame";
+import { connectOverlayApp } from "@volter/widget-shell/frame";
 import { TerminalViewer } from "@volter/supercode-terminal/ui";
 import type { JSX } from "preact";
 import {

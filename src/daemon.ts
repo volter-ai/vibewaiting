@@ -48,7 +48,7 @@ import {
   createNativeMessengerState,
   normalizeNativeMessengerState,
 } from "@volter/supercode-ui/host";
-import { createLucarneInjector } from "@volter-ai-dev/widget-shell/lucarne";
+import { createLucarneInjector } from "./lucarne-injector.js";
 import { WidgetHost } from "lucarne/widget/host";
 import {
   DEFAULT_MAX_ENTRIES,

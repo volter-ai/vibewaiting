@@ -1,6 +1,6 @@
 import type {
   OverlayPresentation,
-} from "@volter-ai-dev/widget-shell";
+} from "@volter/widget-shell";
 
 export const VIBEWAITING_PRESENTATION = Object.freeze({
   messenger: "messenger",

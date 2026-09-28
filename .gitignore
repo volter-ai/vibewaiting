@@ -8,3 +8,4 @@ test-results/
 test/fixtures/grok-conformance/*.jsonl
 experiments/browser-agent/rhai-wasm/target/
 experiments/browser-agent/codex-wasm/target/
+src/lucarne-runtime.generated.ts

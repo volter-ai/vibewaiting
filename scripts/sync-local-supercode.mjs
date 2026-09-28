@@ -48,7 +48,7 @@ if (syncLocalSurfaces && existsSync(join(lucarneSource, "packages/lucarne/packag
 }
 const widgetShellSource = resolve(process.env.WIDGET_SHELL_DIR ?? join(root, "../widget-shell"));
 if (syncLocalSurfaces && existsSync(join(widgetShellSource, "package.json"))) {
-  packages.push([widgetShellSource, "@volter-ai-dev/widget-shell"]);
+  packages.push([widgetShellSource, "@volter/widget-shell"]);
 }
 const termfleetRoot = resolve(process.env.TERMFLEET_DIR ?? join(root, "../termfleet"));
 const termfleetTerminalSource = join(termfleetRoot, "packages/terminal");
@@ -126,7 +126,7 @@ if (terminalSource) {
 if (packages.some(([, name]) => name === "lucarne")) {
   run("npm", ["run", "build"], { cwd: join(lucarneSource, "packages/lucarne") });
 }
-if (packages.some(([, name]) => name === "@volter-ai-dev/widget-shell")) {
+if (packages.some(([, name]) => name === "@volter/widget-shell")) {
   if (existsSync(join(widgetShellSource, "node_modules/.bin/tsup"))) {
     run("npm", ["run", "build"], { cwd: widgetShellSource });
   } else if (existsSync(join(widgetShellSource, "dist/index.js"))) {

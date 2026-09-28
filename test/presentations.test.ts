@@ -1,4 +1,4 @@
-import { resolvePresentationSnapshot } from "@volter-ai-dev/widget-shell/core";
+import { resolvePresentationSnapshot } from "@volter/widget-shell/core";
 import { describe, expect, it } from "vitest";
 import {
   VIBEWAITING_PRESENTATION,

@@ -3,7 +3,7 @@ import {
   createExtensionGeometryPersistence,
   createExtensionIframeContent,
   createOverlay,
-} from "@volter-ai-dev/widget-shell";
+} from "@volter/widget-shell";
 import {
   VIBEWAITING_PRESENTATION,
   VIBEWAITING_PRESENTATIONS,
