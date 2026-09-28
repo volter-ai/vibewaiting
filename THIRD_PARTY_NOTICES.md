@@ -45,7 +45,7 @@ CLI tarball.
 | `argparse` | 2.0.1 | Python-2.0 |
 | `entities` | 4.5.0 | BSD-2-Clause |
 | `linkify-it` | 5.0.2 | MIT |
-| `lucarne` | 1.7.5 | MIT |
+| `@volter/lucarne` | 2.0.2 | MIT |
 | `markdown-it` | 14.3.0 | MIT |
 | `mdurl` | 2.1.0 | MIT |
 | `playwright-core` | 1.63.0 | Apache-2.0 |

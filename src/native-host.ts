@@ -457,7 +457,6 @@ export async function runNativeHost(
     let nextDaemon: Daemon | null = null;
     try {
       nextDaemon = await startDaemon({
-        sessionId: "web-extension",
         html: "",
         workspace: settings.workspace,
         ...(settings.harness ? { harness: settings.harness } : {}),
@@ -466,7 +465,6 @@ export async function runNativeHost(
         discoveryClient,
         persistence: new FileMessengerPersistence(),
         attachHost: async () => nextBridge,
-        intentPollMs: 0,
         log: (message) => process.stderr.write(`[vibewaiting] ${message}\n`),
         terminalService,
       });

@@ -1,4 +1,4 @@
-// The bridge: one lucarne widget on one browser session ⟷ the coding sessions on this machine.
+// The bridge: one widget in the pages behind one CDP endpoint ⟷ the coding sessions on this machine.
 //
 // Three directions, and only three:
 //   controller revision → debounced `project(snapshot)` → `host.push(patch)`
@@ -48,8 +48,8 @@ import {
   createNativeMessengerState,
   normalizeNativeMessengerState,
 } from "@volter/supercode-ui/host";
-import { createLucarneInjector } from "./lucarne-injector.js";
-import { WidgetHost } from "lucarne/widget/host";
+import type { CdpEndpoint } from "@volter/widget-shell/cdp";
+import { attachWidget } from "./widget-delivery.js";
 import {
   DEFAULT_MAX_ENTRIES,
   projectWithImages,
@@ -72,14 +72,13 @@ import {
 } from "./presentations.js";
 import type { SupercodeTerminalSnapshot as TerminalServiceSnapshot } from "@volter/supercode-terminal";
 
-/** Namespaces every page global / element id / sticky-injection id the widget mints (see `lucarne/widget/ns`). */
+/** Namespaces the overlay the widget mounts in each page. */
 export const WIDGET_NS = "vibewaiting";
 /** The one named intent queue the panel posts to and this daemon drains. */
 export const INTENT_QUEUE = "agent";
 /** Controller revisions arrive in bursts (one per streamed delta); coalesce them into one push. */
 export const DEFAULT_PUSH_DEBOUNCE_MS = 150;
 /** Messenger interactions should reach the daemon in the same perceptual beat as the click. */
-export const DEFAULT_INTENT_POLL_MS = 100;
 /**
  * Legacy state heartbeat. Fresh iframe mounts now announce themselves through the intent queue,
  * so unchanged transcripts never need to cross CDP on a timer. Kept configurable for embedders
@@ -117,18 +116,11 @@ export interface WidgetIntent {
   source?: "local" | "remote";
 }
 
-/** The slice of `WidgetHost` this daemon uses — the seam a test replaces with a recorder. */
+/** The widget as this daemon uses it (src/widget-delivery.ts) — the seam a test replaces with a recorder. */
 export interface WidgetBridge {
   push(patch: unknown): Promise<void>;
   onIntent(name: string, cb: (intent: WidgetIntent) => void | Promise<void>): void;
-  /**
-   * Lucarne's context-aware queue primitive. Newer hosts expose this so a latency-sensitive app
-   * can choose its own drain cadence instead of waiting for the conservative shared 1.2s pump.
-   */
-  drainIntentsWithContext?(name: string): Promise<Array<{
-    items: Array<{ id: string | number; payload: unknown }>;
-  }>>;
-  /** Crash-safe repeating tick (`WidgetHost.every`) — returns a stop function. */
+  /** Crash-safe repeating tick — returns a stop function. */
   every(ms: number, fn: () => unknown): () => void;
   remove(): Promise<void>;
 }
@@ -156,10 +148,9 @@ const DISCOVERY_HARNESSES: readonly HarnessId[] = [
 ];
 
 export interface DaemonOptions {
-  /** The lucarne session whose pages get the widget. */
-  sessionId: string;
-  /** How to reach the lucarne daemon for the one mount call. */
-  engine?: { baseUrl?: string | undefined; token?: string | undefined };
+  /** The browser whose pages get the widget: a Volter Browsers session's published cdpUrl, with its token.
+   *  Required unless `attachHost` mounts the widget some other way. */
+  cdp?: CdpEndpoint;
   /** The built srcdoc bundle (`dist/widget.html`). */
   html: string;
   /** The project directory the coding agent runs in. */
@@ -182,11 +173,9 @@ export interface DaemonOptions {
   discoveryClient?: SessionDiscoveryClient | undefined;
   /** Inject a whole controller, bypassing construction (tests, or a host that already owns one). */
   controller?: AgentController | undefined;
-  /** Replace the widget mount (tests). Default: `WidgetHost.attach`. */
-  attachHost?: (opts: { sessionId: string; ns: string; html: string; engine?: DaemonOptions["engine"] }) => Promise<WidgetBridge>;
+  /** Replace the widget mount (tests). Default: `attachWidget` (src/widget-delivery.ts). */
+  attachHost?: (opts: { cdp: CdpEndpoint; ns: string; html: string }) => Promise<WidgetBridge>;
   pushDebounceMs?: number | undefined;
-  /** Intent queue cadence. Default 100ms; `0` uses Lucarne's stock shared drain pump. */
-  intentPollMs?: number | undefined;
   /** Legacy compatibility heartbeat. Default `0`; the widget's `mounted` intent requests state. */
   repushIntervalMs?: number | undefined;
   /**
@@ -335,55 +324,21 @@ function parseTerminalHostIntent(payload: unknown): TerminalIntent | null {
   return null;
 }
 
-/**
- * Bind one intent queue at messenger latency when the host exposes its safe context-aware drain.
- * The queue is still read-and-cleared by Lucarne; this layer only chooses a faster cadence and
- * preserves the stock host's dedupe-before-handle contract. Older/test hosts fall back unchanged.
- */
+/** Bind one intent queue: each intent runs its handler, then `onSettled`. */
 export function bindIntentQueue(
   host: WidgetBridge,
   name: string,
   handler: (intent: WidgetIntent) => void | Promise<void>,
-  pollMs = DEFAULT_INTENT_POLL_MS,
   onSettled?: (intent: WidgetIntent) => void | Promise<void>,
 ): () => void {
-  const handle = async (intent: WidgetIntent): Promise<void> => {
+  host.onIntent(name, async (intent) => {
     try {
       await handler(intent);
     } finally {
       await onSettled?.(intent);
     }
-  };
-  if (pollMs <= 0 || host.drainIntentsWithContext === undefined) {
-    host.onIntent(name, handle);
-    return (): void => undefined;
-  }
-
-  const seen = new Set<string | number>();
-  const seenOrder: Array<string | number> = [];
-  let draining = false;
-  return host.every(pollMs, async () => {
-    if (draining) return;
-    draining = true;
-    try {
-      const pages = await host.drainIntentsWithContext!(name);
-      for (const page of pages) {
-        for (const intent of page.items) {
-          if (seen.has(intent.id)) continue;
-          seen.add(intent.id);
-          seenOrder.push(intent.id);
-          // Bound the page-lifetime dedupe cache without making a recent intent replayable.
-          if (seenOrder.length > 2_000) {
-            const oldest = seenOrder.shift();
-            if (oldest !== undefined) seen.delete(oldest);
-          }
-          await handle(intent);
-        }
-      }
-    } finally {
-      draining = false;
-    }
   });
+  return (): void => undefined;
 }
 
 export interface Daemon {
@@ -462,24 +417,16 @@ export function activeRef(snapshot: SupercodeClientSnapshot): ActiveSessionRef |
   return { harness: snapshot.activeHarness, sessionId: snapshot.activeSessionId };
 }
 
-async function defaultAttachHost(opts: {
-  sessionId: string;
-  ns: string;
-  html: string;
-  engine?: DaemonOptions["engine"];
-}): Promise<WidgetBridge> {
-  const injector = createLucarneInjector({
+async function defaultAttachHost(opts: { cdp: CdpEndpoint; ns: string; html: string }): Promise<WidgetBridge> {
+  return await attachWidget({
+    cdp: opts.cdp,
+    ns: opts.ns,
+    html: opts.html,
     launcherLabel: "Open agent chats",
     launcherHidden: true,
     presentations: VIBEWAITING_PRESENTATIONS,
     initialPresentation: VIBEWAITING_PRESENTATION.messenger,
     theme: { radius: VIBEWAITING_RADIUS, surface: "transparent" },
-  });
-  return await WidgetHost.attach(opts.sessionId, {
-    ns: opts.ns,
-    html: opts.html,
-    injector,
-    ...(opts.engine ? { engine: { ...(opts.engine.baseUrl ? { baseUrl: opts.engine.baseUrl } : {}), ...(opts.engine.token ? { token: opts.engine.token } : {}) } } : {}),
   });
 }
 
@@ -510,12 +457,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     });
 
   const hostAttachStartedAt = performance.now();
-  const host = await attach({
-    sessionId: options.sessionId,
-    ns: WIDGET_NS,
-    html: options.html,
-    ...(options.engine ? { engine: options.engine } : {}),
-  });
+  if (!options.attachHost && !options.cdp) throw new Error("startDaemon needs a CDP endpoint (cdp) or an attachHost");
+  const host = await attach({ cdp: options.cdp!, ns: WIDGET_NS, html: options.html });
   log(`widget host attached in ${Math.round(performance.now() - hostAttachStartedAt)}ms`);
 
   const persistence = options.persistence === false ? null : options.persistence ?? null;
@@ -1874,11 +1817,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     }
     if (uiIntent?.action === "attach") {
       actionError = null;
-      const task = attachSession(uiIntent.key);
-      // The context-aware Lucarne drain can receive a newer click while this native load is still
-      // running. Keep its pump free; the attach task itself owns failure projection and cleanup.
-      if (host.drainIntentsWithContext !== undefined) void task.catch(() => undefined);
-      else await task;
+      await attachSession(uiIntent.key);
       return;
     }
     if (action === "send" || action === "new" || action === "configureHarness") {
@@ -1888,7 +1827,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       return;
     }
     log(`ignoring unrecognized intent payload: ${JSON.stringify(intent.payload)}`);
-  }, options.intentPollMs ?? DEFAULT_INTENT_POLL_MS, async (intent) => {
+  }, async (intent) => {
     const action = intent.payload && typeof intent.payload === "object"
       ? (intent.payload as { action?: unknown }).action
       : null;

@@ -38,7 +38,7 @@
   ],
   "scripts": {
     "prepare": "git config core.hooksPath .githooks || true",
-    "build": "node scripts/build-brand-colours.mjs && node scripts/build-lucarne-runtime.mjs && tsc -p tsconfig.json && node scripts/build-browser-tools.mjs && node widget/build.mjs && node extension/build.mjs",
+    "build": "node scripts/build-brand-colours.mjs && tsc -p tsconfig.json && node scripts/build-browser-tools.mjs && node widget/build.mjs && node extension/build.mjs",
     "build:widget": "node widget/build.mjs",
     "build:extension": "node extension/build.mjs",
     "dev:almostnode": "vite --config experiments/almostnode/vite.config.ts",
@@ -59,7 +59,7 @@
     "dev:extension:local": "node scripts/sync-local-supercode.mjs && npm run build && node scripts/dev-extension.mjs",
     "sync:local": "node scripts/sync-local-supercode.mjs",
     "sync:local-ui": "npm run sync:local",
-    "typecheck": "node scripts/build-lucarne-runtime.mjs && tsc -p tsconfig.json --noEmit && tsc -p tsconfig.widget.json && tsc -p tsconfig.extension.json && tsc -p tsconfig.test.json && tsc -p experiments/browser-agent/tsconfig.json && npm run typecheck:worker",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.widget.json && tsc -p tsconfig.extension.json && tsc -p tsconfig.test.json && tsc -p experiments/browser-agent/tsconfig.json && npm run typecheck:worker",
     "test": "vitest run",
     "test:widget": "npm run build:widget && playwright test",
     "test:browser-agent-e2e": "npm run build:conformance && playwright test --config playwright.browser-agent.config.mjs",
@@ -73,24 +73,24 @@
   },
   "dependencies": {
     "@termfleet/terminal": "0.1.9",
+    "@volter/lucarne": "^2.0.2",
     "@volter/supercode-client": "0.3.57",
     "@volter/supercode-harness-sdk": "0.3.43",
     "@volter/supercode-remote-access": "0.2.3",
     "@volter/supercode-terminal": "0.2.30",
     "@volter/supercode-ui": "0.1.95",
     "@volter/widget-shell": "0.6.1",
-    "lucarne": "1.7.5",
     "ws": "8.21.3"
   },
   "bundleDependencies": [
     "@termfleet/terminal",
+    "@volter/lucarne",
     "@volter/supercode-client",
     "@volter/supercode-harness-sdk",
     "@volter/supercode-remote-access",
     "@volter/supercode-terminal",
     "@volter/supercode-ui",
     "@volter/widget-shell",
-    "lucarne",
     "ws"
   ],
   "overrides": {

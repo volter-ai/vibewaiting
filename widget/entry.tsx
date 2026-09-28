@@ -1,4 +1,4 @@
-import { createWidgetTransport } from "lucarne/widget/runtime";
 import { mountMessenger } from "./messenger.js";
+import { createOverlayTransport } from "./overlay-transport.js";
 
-mountMessenger(createWidgetTransport({ ns: "vibewaiting" }));
+mountMessenger(createOverlayTransport());

@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 // Bundles `entry.tsx` + the shell/panel CSS into ONE self-contained srcdoc document at
-// `dist/widget.html` — the artifact `WidgetHost.attach({ html })` injects. Run directly
+// `dist/widget.html` — the document src/widget-delivery.ts mounts in Widget Shell's window. Run directly
 // (`node widget/build.mjs`) or call `buildWidget()`; the CLI calls it when `dist/widget.html` is
 // missing, which is why `esbuild` is a real dependency here rather than a devDependency.
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { buildSrcdoc } from "lucarne/widget/build";
+import { buildSrcdoc } from "./srcdoc.mjs";
 import { PANEL_CSS } from "./styles.mjs";
 
 /** `dist/widget.html`, resolved from THIS file — correct from any cwd. */

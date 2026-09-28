@@ -44,7 +44,7 @@ const syncLocalSurfaces =
   process.env.VIBEWAITING_LOCAL_SURFACES === "1" &&
   process.env.VIBEWAITING_SUPERCODE_ONLY !== "1";
 if (syncLocalSurfaces && existsSync(join(lucarneSource, "packages/lucarne/package.json"))) {
-  packages.push([join(lucarneSource, "packages/lucarne"), "lucarne"]);
+  packages.push([join(lucarneSource, "packages/lucarne"), "@volter/lucarne"]);
 }
 const widgetShellSource = resolve(process.env.WIDGET_SHELL_DIR ?? join(root, "../widget-shell"));
 if (syncLocalSurfaces && existsSync(join(widgetShellSource, "package.json"))) {
@@ -123,7 +123,7 @@ run("npm", ["run", "build"], { cwd: join(source, "sdk/ui") });
 if (terminalSource) {
   run("npm", ["run", "build"], { cwd: terminalSource });
 }
-if (packages.some(([, name]) => name === "lucarne")) {
+if (packages.some(([, name]) => name === "@volter/lucarne")) {
   run("npm", ["run", "build"], { cwd: join(lucarneSource, "packages/lucarne") });
 }
 if (packages.some(([, name]) => name === "@volter/widget-shell")) {

@@ -2,9 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_ATTENTION_SETTLE_MS,
   DEFAULT_DISCOVER_INTERVAL_MS,
-  DEFAULT_INTENT_POLL_MS,
   INTENT_QUEUE,
-  bindIntentQueue,
   startDaemon,
   type AgentController,
   type Daemon,
@@ -40,7 +38,6 @@ async function rig(options: { client?: FakeHarnessClient; harness?: string } = {
   const client = options.client ?? new FakeHarnessClient();
   const host = new FakeWidgetHost();
   const daemon = await startDaemon({
-    sessionId: "session-abc",
     html: "<!doctype html><html></html>",
     workspace: "/tmp/project",
     ...(options.harness ? { harness: options.harness } : {}),
@@ -80,7 +77,6 @@ async function sessionRig(
   const client = suppliedClient ?? new FakeHarnessClient({ sessions });
   const host = new FakeWidgetHost();
   const daemon = await startDaemon({
-    sessionId: "session-abc",
     html: "<html></html>",
     workspace: "/tmp/project",
     client,
@@ -235,7 +231,6 @@ async function failingAttachRig(): Promise<Rig> {
   const client = new FakeHarnessClient({ sessions: [OWN, ATLAS, BRIDGE] });
   const host = new FakeWidgetHost();
   const daemon = await startDaemon({
-    sessionId: "session-abc",
     html: "<html></html>",
     workspace: "/tmp/project",
     client,
@@ -307,36 +302,6 @@ describe("bridge invariants", () => {
 
     await host.fireIntent(INTENT_QUEUE, { action: "resolveImage", requestId: "request-2", reference: "guessed" });
     expect(host.pushes).toContainEqual({ imageResolution: { requestId: "request-2", status: "failed", message: "This image is no longer in the visible transcript window." } });
-  });
-
-  it("drains the untrusted page queue at the messenger cadence without replaying an intent", async () => {
-    let tick: (() => unknown) | null = null;
-    let fallbackRegistered = false;
-    let stopped = false;
-    const host: WidgetBridge = {
-      push: async () => undefined,
-      onIntent: () => { fallbackRegistered = true; },
-      every: (ms, fn) => {
-        expect(ms).toBe(DEFAULT_INTENT_POLL_MS);
-        tick = fn;
-        return () => { stopped = true; };
-      },
-      drainIntentsWithContext: async () => [{
-        items: [{ id: "stable-id", payload: { action: "send", text: "hello" } }],
-      }],
-      remove: async () => undefined,
-    };
-    const received: unknown[] = [];
-    const stop = bindIntentQueue(host, INTENT_QUEUE, (intent) => { received.push(intent.payload); });
-
-    await tick!();
-    await tick!();
-    stop();
-    expect({ fallbackRegistered, stopped, received }).toEqual({
-      fallbackRegistered: false,
-      stopped: true,
-      received: [{ action: "send", text: "hello" }],
-    });
   });
 
   it("discovers usable conversations before a failing runtime handshake and retains its real identity", async () => {

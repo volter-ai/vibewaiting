@@ -7,6 +7,10 @@ the complete generated notes and downloadable artifacts for each version.
 
 ### Changed
 
+- The CLI runs on `@volter/lucarne` 2: it mounts the widget through Widget Shell over the session's
+  published CDP endpoint, so the Volter Browsers daemon and vibewaiting both need `LUCARNE_TOKEN`. The
+  window reads state by long-polling the daemon and sends intents through Widget Shell's capabilities.
+
 - Documentation, CLI help and error text name Supercode as Volter Harness and Lucarne
   as Volter Browsers; package names, commands and environment variables are unchanged.
 - An agent drives the shared tab through `vibewaiting mcp`, a stdio MCP server its

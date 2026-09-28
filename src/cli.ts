@@ -9,8 +9,8 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { SupercodeHarnessClient } from "@volter/supercode-harness-sdk";
 import type { HarnessId } from "@volter/supercode-harness-sdk";
-import { LucarneClient } from "lucarne";
-import type { Session } from "lucarne";
+import { LucarneClient } from "@volter/lucarne";
+import type { Session } from "@volter/lucarne";
 import { startDaemon, type Daemon } from "./daemon.js";
 import { runNativeHost } from "./native-host.js";
 import {
@@ -51,10 +51,10 @@ Options
 
 Environment
   LUCARNE_URL         Volter Browsers daemon base URL (default ${DEFAULT_ENGINE_URL})
-  LUCARNE_TOKEN       bearer token, when the daemon requires one
+  LUCARNE_TOKEN       the daemon's token (the same LUCARNE_TOKEN it runs with): it publishes a
+                      session's CDP endpoint only with one, and the widget mounts through it
 
-The widget mounts on every page of the attached browser. Keep using that browser normally; the
-printed remote-view URL is only for headless, remote, or diagnostic access.
+The widget mounts on every page of the attached browser. Keep using that browser normally.
 `;
 
 const NATIVE_INSTALL_USAGE = `Install the Vibewaiting native-messaging host
@@ -281,17 +281,26 @@ async function main(): Promise<void> {
     }
   } catch (e) {
     throw new Error(
-      `cannot reach the Volter Browsers daemon at ${baseUrl} (${(e as Error)?.message ?? e}) — start one with \`npx lucarne serve\``,
+      `cannot reach the Volter Browsers daemon at ${baseUrl} (${(e as Error)?.message ?? e}) — start one with \`LUCARNE_TOKEN=… npx @volter/lucarne serve\``,
     );
   }
+
+  if (!session.cdpUrl || !token) {
+    if (createdSession) await lucarne.destroy(session.id).catch(() => undefined);
+    throw new Error(
+      `the Volter Browsers daemon at ${baseUrl} published no CDP endpoint for session ${session.id}: ` +
+        "run it with LUCARNE_TOKEN set, and set the same LUCARNE_TOKEN here",
+    );
+  }
+  const cdpUrl = session.cdpUrl;
 
   // The browser is already usable once Lucarne has exposed the session. Say that before any agent
   // RPC so a slow or broken harness can never make startup look frozen. A native session's normal
   // window is the product surface; Lucarne's view URL is a secondary remote/diagnostic surface.
   process.stdout.write(
     session.backend === "native"
-      ? `\n  browser: ${createdSession ? "opened" : "attached"} · keep using its normal window\n  remote view (optional) → ${session.viewUrl}\n`
-      : `\n  browser view → ${session.viewUrl}\n`,
+      ? `\n  browser: ${createdSession ? "opened" : "attached"} · keep using its normal window\n${session.viewerUrl ? `  remote view (optional) → ${session.viewerUrl}\n` : ""}`
+      : `\n  browser: attached${session.viewerUrl ? ` · view → ${session.viewerUrl}` : ""}\n`,
   );
   process.stdout.write(
     `  widget: connecting · workspace ${args.workspace} · session ${session.id}` +
@@ -311,8 +320,7 @@ async function main(): Promise<void> {
   let daemon: Daemon;
   try {
     daemon = await startDaemon({
-      sessionId: session.id,
-      engine: { baseUrl, token },
+      cdp: { url: cdpUrl, headers: { authorization: `Bearer ${token}` } },
       html,
       workspace: args.workspace,
       harness: args.harness,
