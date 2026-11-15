@@ -3,7 +3,7 @@
 # Vibewaiting
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-2f3136.svg)](LICENSE)
-[![Node.js 22.12+ LTS](https://img.shields.io/badge/node-22.12%2B%20LTS-2f3136.svg)](package.json)
+[![Node.js 26.8.1+](https://img.shields.io/badge/node-26.8.1%2B-2f3136.svg)](package.json)
 [![Status: alpha](https://img.shields.io/badge/status-alpha-2f3136.svg)](ROADMAP.md)
 
 **Your local Claude Code and Codex sessions, in a messenger on every browser tab—and
@@ -27,7 +27,7 @@ switch the same conversation into a familiar terminal.
   temporary tunnel or a stable relay you configure.
 - **Attach the page in one action.** Send a selection, link, image, GitHub object,
   Hacker News item, or the visible page without copying it by hand.
-- **Let Volter Harness agents use the tab you are already in.** Vibewaiting hosts
+- **Let Supercode Agent use the tab you are already in.** Vibewaiting hosts
   Playwright itself, running inside the extension against the page—without a
   second automation browser. A page that forbids eval, such as GitHub, is driven
   through Chrome's debugger while the agent drives it, and Chrome shows its
@@ -72,7 +72,7 @@ the terminal surface. A local extension click lets the native CLI open its brows
 a paired remote Codex click uses device code instead. Claude Code currently exposes no
 verified browserless flag, so remote Claude sign-in fails clearly rather than pretending
 the local browser flow is portable. Credentials remain owned by Claude Code or Codex and
-never pass through Vibewaiting or Volter Harness.
+never pass through Vibewaiting or Supercode Agent.
 
 Keyboard shortcuts open and focus the composer (`⌥⇧V` / `Alt+Shift+V`), attach the
 current browser context (`⌥⇧A`), and move between conversations (`⌥⇧←` / `⌥⇧→`). All
@@ -115,7 +115,7 @@ messenger and page-context listener from ordinary sites.
 
 Vibewaiting itself is MIT-licensed. Release archives include exact third-party notices,
 a CycloneDX SBOM, checksums, and public provenance. Its shared agent semantics and
-messenger components arrive as versioned, source-readable Volter Harness packages under MIT
+messenger components arrive as versioned, source-readable Supercode Agent packages under MIT
 or Apache-2.0; their upstream repository is not yet public. That means this checkout is
 fully buildable and auditable as shipped, but changes inside those shared packages must
 currently be coordinated upstream. See [Dependency transparency](docs/dependency-transparency.md)
@@ -130,7 +130,7 @@ for the exact boundary rather than assuming every dependency lives in this repos
 | Chrome, Chromium, Brave | Supported through the unpacked extension |
 | macOS, Linux | Supported native-companion platforms |
 | Mobile browser | Supported through authenticated remote access; installable only on a configured stable origin |
-| Gemini, Goose, OpenCode, Pi, Grok | Volter Harness can model them, but Vibewaiting does not yet claim a verified UI lane |
+| Gemini, Goose, OpenCode, Pi, Grok | Supercode Agent can model them, but Vibewaiting does not yet claim a verified UI lane |
 | Firefox, Windows | Not release-supported yet |
 
 Unsupported capabilities stay hidden. A fallback harness identity or action is treated
@@ -140,7 +140,7 @@ as a bug, not a convenience.
 
 Vibewaiting is a deliberately thin product composition:
 
-- [Volter Harness packages](https://www.npmjs.com/package/@volter/supercode-client) own coding-agent session
+- [Supercode Agent packages](https://github.com/volter-ai/supercode-agent) own coding-agent session
   discovery, capabilities, continuation semantics, UI components, and terminal grants.
 - [Widget Shell](https://github.com/volter-ai/widget-shell) owns the isolated overlay,
   responsive geometry, and visual lifecycle.

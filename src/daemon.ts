@@ -20,8 +20,8 @@ import {
   SessionFamilyInspector,
   SupercodeSessionCatalog,
   SupercodeController,
-} from "@volter/supercode-client";
-import { sessionReconnectIdentitySync as sessionKey } from "@volter/supercode-client/node";
+} from "@volter/supercode-agent-client";
+import { sessionReconnectIdentitySync as sessionKey } from "@volter/supercode-agent-client/node";
 import type {
   FrontendHarness,
   HarnessClientAdapter,
@@ -29,11 +29,11 @@ import type {
   SupercodeSessionCatalogSnapshot,
   SupercodeClientAction,
   SupercodeClientSnapshot,
-} from "@volter/supercode-client";
-import { createNativeInteractiveStart } from "@volter/supercode-harness-sdk";
-import type { HarnessId, SessionArtifact, SessionDescriptor, SessionFormat, StructuredLaunch } from "@volter/supercode-harness-sdk";
-import type { ContinuationMode } from "@volter/supercode-ui";
-import { normalizeUiState, parseSupercodeUiIntent } from "@volter/supercode-ui/core";
+} from "@volter/supercode-agent-client";
+import { createNativeInteractiveStart } from "@volter/supercode-agent-sdk";
+import type { HarnessId, SessionArtifact, SessionDescriptor, SessionFormat, StructuredLaunch } from "@volter/supercode-agent-sdk";
+import type { ContinuationMode } from "@volter/supercode-agent-ui";
+import { normalizeUiState, parseSupercodeUiIntent } from "@volter/supercode-agent-ui/core";
 import {
   dispatchControllerIntent,
   matchesSessionRef as matchesActive,
@@ -43,11 +43,11 @@ import {
   projectSubagentTranscript,
   sessionDescriptorRuntimeStatus as sessionRuntimeStatus,
   type ActiveSessionRef,
-} from "@volter/supercode-ui/controller";
+} from "@volter/supercode-agent-ui/controller";
 import {
   createNativeMessengerState,
   normalizeNativeMessengerState,
-} from "@volter/supercode-ui/host";
+} from "@volter/supercode-agent-ui/host";
 import type { CdpEndpoint } from "@volter/widget-shell/cdp";
 import { attachWidget } from "./widget-delivery.js";
 import {
@@ -70,7 +70,7 @@ import {
   VIBEWAITING_PRESENTATION,
   VIBEWAITING_PRESENTATIONS,
 } from "./presentations.js";
-import type { SupercodeTerminalSnapshot as TerminalServiceSnapshot } from "@volter/supercode-terminal";
+import type { SupercodeTerminalSnapshot as TerminalServiceSnapshot } from "@volter/supercode-agent-terminal";
 
 /** Namespaces the overlay the widget mounts in each page. */
 export const WIDGET_NS = "vibewaiting";

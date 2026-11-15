@@ -1,48 +1,72 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const root = resolve(import.meta.dirname, "..");
 // Persist the selected worktree outside node_modules so `npm ci` cannot silently forget it.
-const sourceMarker = join(root, ".vibewaiting/local-supercode-source");
+const sourceMarker = join(root, ".vibewaiting/local-agent-source");
 const remembered = existsSync(sourceMarker) ? readFileSync(sourceMarker, "utf8").trim() : "";
-const requested = (process.argv[2] ?? process.env.SUPERCODE_DIR ?? remembered) || undefined;
+const requested = (process.argv[2] ?? process.env.SUPERCODE_AGENT_DIR ?? remembered) || undefined;
 const candidates = requested
   ? [resolve(requested)]
-  : [resolve(root, "../supercode-live-cc"), resolve(root, "../supercode")];
+  : [resolve(root, "../supercode-agent")];
 const source = candidates.find((candidate) =>
   existsSync(join(candidate, "sdk/ui/package.json"))
   && existsSync(join(candidate, "sdk/client/package.json"))
   && existsSync(join(candidate, "sdk/typescript/package.json")));
 
 if (!source) {
-  throw new Error("Local Volter Harness checkout not found. Pass its root directory or set SUPERCODE_DIR.");
+  throw new Error("Local Supercode Agent checkout not found. Pass its root directory or set SUPERCODE_AGENT_DIR.");
+}
+
+const fleet = process.env.SUPERCODE_FLEET_DIR && resolve(process.env.SUPERCODE_FLEET_DIR);
+if (!fleet || !existsSync(join(fleet, "sdk/typescript/package.json"))) {
+  throw new Error("Set SUPERCODE_FLEET_DIR to the Fleet source checkout used by this Agent build.");
 }
 
 const packages = [
-  [join(source, "sdk/typescript"), "@volter/supercode-harness-sdk"],
-  [join(source, "sdk/client"), "@volter/supercode-client"],
-  [join(source, "sdk/ui"), "@volter/supercode-ui"],
+  [join(source, "sdk/interchange"), "@volter/supercode-agent-runtime"],
+  [join(source, "sdk/typescript"), "@volter/supercode-agent-sdk"],
+  [join(source, "sdk/client"), "@volter/supercode-agent-client"],
+  [join(source, "sdk/frontend"), "@volter/supercode-agent-frontend"],
+  [join(source, "sdk/orchestrator"), "@volter/supercode-agent-orchestrator"],
+  [join(source, "sdk/ui"), "@volter/supercode-agent-ui"],
+  [join(source, "sdk/remote-access"), "@volter/supercode-agent-remote-access"],
+  [join(source, "sdk/terminal"), "@volter/supercode-agent-terminal"],
+  [join(source, "packaging/npm"), "@volter/supercode-agent"],
 ];
-if (existsSync(join(source, "sdk/remote-access/package.json"))) {
-  packages.push([join(source, "sdk/remote-access"), "@volter/supercode-remote-access"]);
+const nativePackages = new Map();
+for (const directory of [
+  ...readdirSync(join(fleet, "sdk"), { withFileTypes: true }).filter(entry => entry.isDirectory()).map(entry => join(fleet, "sdk", entry.name)),
+  join(fleet, "sources/identity/packages/identity"),
+  join(fleet, "sources/ztrack"),
+  join(fleet, "sources/tunnel"),
+  join(fleet, "sources/tunnel/packages/core"),
+]) {
+  const manifest = join(directory, "package.json");
+  if (existsSync(manifest)) nativePackages.set(JSON.parse(readFileSync(manifest, "utf8")).name, directory);
 }
-const terminalCandidates = [
-  process.env.SUPERCODE_TERMINAL_DIR,
-  join(source, "sdk/terminal"),
-  resolve(root, "../supercode-terminal-attachments/sdk/terminal"),
-].filter(Boolean).map((candidate) => resolve(candidate));
-const terminalSource = terminalCandidates.find((candidate) =>
-  existsSync(join(candidate, "package.json"))
-);
-if (terminalSource) {
-  packages.push([terminalSource, "@volter/supercode-terminal"]);
+const selected = new Set(packages.map(([, name]) => name));
+for (let index = 0; index < packages.length; index += 1) {
+  const manifest = JSON.parse(readFileSync(join(packages[index][0], "package.json"), "utf8"));
+  for (const name of Object.keys({ ...manifest.dependencies, ...manifest.optionalDependencies })) {
+    if (selected.has(name)) continue;
+    const directory = nativePackages.get(name);
+    if (!directory) {
+      if (name.startsWith("@volter/supercode") || name === "@volter/teams" || name === "@volter/identity") {
+        throw new Error(`The selected Fleet source does not contain ${name}, required by ${manifest.name}.`);
+      }
+      continue;
+    }
+    packages.push([directory, name]);
+    selected.add(name);
+  }
 }
 const lucarneSource = resolve(process.env.LUCARNE_DIR ?? join(root, "../lucarne"));
 const syncLocalSurfaces =
   process.env.VIBEWAITING_LOCAL_SURFACES === "1" &&
-  process.env.VIBEWAITING_SUPERCODE_ONLY !== "1";
+  process.env.VIBEWAITING_AGENT_ONLY !== "1";
 if (syncLocalSurfaces && existsSync(join(lucarneSource, "packages/lucarne/package.json"))) {
   packages.push([join(lucarneSource, "packages/lucarne"), "@volter/lucarne"]);
 }
@@ -70,59 +94,31 @@ function run(program, args, options) {
   if (result.status !== 0) throw new Error(`${program} exited ${result.status ?? "without a status"}`);
 }
 
-function installPackage(packageRoot, expectedName, scratch) {
+function packPackage(packageRoot, expectedName, scratch) {
   const manifest = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
   if (manifest.name !== expectedName) {
     throw new Error(`${packageRoot} is ${manifest.name ?? "an unnamed package"}, not ${expectedName}`);
   }
-  const pack = spawnSync("npm", ["pack", "--ignore-scripts", "--json", "--pack-destination", scratch], {
-    cwd: packageRoot,
-    encoding: "utf8",
-    env: { ...process.env, npm_config_cache: join(scratch, "npm-cache") },
-  });
-  if (pack.error) throw pack.error;
-  if (pack.status !== 0) {
-    process.stderr.write(pack.stderr);
-    throw new Error(`npm pack for ${expectedName} exited ${pack.status ?? "without a status"}`);
-  }
-  const [{ filename }] = JSON.parse(pack.stdout);
-  const target = join(root, "node_modules", expectedName);
-  rmSync(target, { recursive: true, force: true });
-  mkdirSync(target, { recursive: true });
-  run("tar", ["-xzf", join(scratch, filename), "--strip-components=1", "-C", target]);
-  return manifest.version;
-}
-
-function latestRustInputMtime(sourceRoot) {
-  let latest = Math.max(statSync(join(sourceRoot, "Cargo.toml")).mtimeMs, statSync(join(sourceRoot, "Cargo.lock")).mtimeMs);
-  const pending = [join(sourceRoot, "crates")];
-  while (pending.length) {
-    const directory = pending.pop();
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      const path = join(directory, entry.name);
-      if (entry.isDirectory()) {
-        pending.push(path);
-      } else if (entry.name === "Cargo.toml" || entry.name.endsWith(".rs")) {
-        latest = Math.max(latest, statSync(path).mtimeMs);
-      }
-    }
-  }
-  return latest;
+  run("pnpm", ["pack", "--ignore-scripts", "--pack-destination", scratch], { cwd: packageRoot });
+  const filename = `${manifest.name.replace(/^@/, "").replaceAll("/", "-")}-${manifest.version}.tgz`;
+  return { name: expectedName, version: manifest.version, artifact: join(scratch, filename) };
 }
 
 const startedAt = performance.now();
-const binary = resolve(process.env.SUPERCODE_BINARY ?? join(source, "target/debug/supercode"));
-if (!process.env.SUPERCODE_BINARY && (!existsSync(binary) || statSync(binary).mtimeMs < latestRustInputMtime(source))) {
-  run("cargo", ["build", "-p", "supercode-cli", "--bin", "supercode"], { cwd: source });
-} else if (process.env.SUPERCODE_BINARY && !existsSync(binary)) {
-  throw new Error(`SUPERCODE_BINARY does not exist: ${binary}`);
-} else {
-  process.stdout.write("local Volter Harness binary is current; skipping Rust rebuild\n");
+const binary = resolve(process.env.SUPERCODE_CODING_BIN ?? join(source, "packaging/npm/bin/supercode-agent.js"));
+if (!existsSync(binary)) throw new Error(`Supercode Agent entry does not exist: ${binary}`);
+for (const name of ["@volter/identity", "@volter/ztrack", "@volter/supercode-terminal"]) {
+  if (!selected.has(name)) continue;
+  const directory = nativePackages.get(name);
+  if (name === "@volter/identity") run("pnpm", ["run", "build"], { cwd: directory });
+  if (name === "@volter/ztrack") {
+    run("pnpm", ["run", "build:brand-tokens"], { cwd: directory });
+    run("pnpm", ["run", "build:node-cli"], { cwd: directory });
+  }
+  if (name === "@volter/supercode-terminal") run("pnpm", ["run", "build:substrate"], { cwd: directory });
 }
-run("npm", ["run", "build"], { cwd: join(source, "sdk/ui") });
-if (terminalSource) {
-  run("npm", ["run", "build"], { cwd: terminalSource });
-}
+run("pnpm", ["run", "build"], { cwd: join(source, "sdk/ui") });
+run("pnpm", ["run", "build"], { cwd: join(source, "sdk/terminal") });
 if (packages.some(([, name]) => name === "@volter/lucarne")) {
   run("npm", ["run", "build"], { cwd: join(lucarneSource, "packages/lucarne") });
 }
@@ -139,13 +135,11 @@ if (packages.some(([, name]) => name === "@termfleet/terminal")) {
   run("npm", ["run", "build"], { cwd: termfleetTerminalSource });
 }
 
-const scratch = mkdtempSync(join(tmpdir(), "vibewaiting-supercode-"));
+const scratch = mkdtempSync(join(tmpdir(), "vibewaiting-agent-"));
 try {
-  const installed = packages.map(([packageRoot, name]) => [
-    name,
-    installPackage(packageRoot, name, scratch),
-  ]);
-  const marker = join(root, "node_modules/.cache/vibewaiting/local-supercode-bin");
+  const installed = packages.map(([packageRoot, name]) => packPackage(packageRoot, name, scratch));
+  run("npm", ["install", "--no-save", "--package-lock=false", ...installed.map(pkg => pkg.artifact)], { cwd: root });
+  const marker = join(root, "node_modules/.cache/vibewaiting/local-agent-bin");
   mkdirSync(resolve(marker, ".."), { recursive: true });
   mkdirSync(resolve(sourceMarker, ".."), { recursive: true });
   const writeChanged = (path, value) => {
@@ -154,8 +148,8 @@ try {
   writeChanged(marker, `${binary}\n`);
   writeChanged(sourceMarker, `${source}\n`);
   process.stdout.write(
-    `local Volter Harness stack synced from ${source} in ${Math.round(performance.now() - startedAt)}ms\n`
-      + installed.map(([name, version]) => `  ${name}@${version}`).join("\n") + "\n",
+    `local Supercode Agent stack synced from ${source}, Fleet from ${fleet}, in ${Math.round(performance.now() - startedAt)}ms\n`
+      + installed.map(({ name, version }) => `  ${name}@${version}`).join("\n") + "\n",
   );
 } finally {
   rmSync(scratch, { recursive: true, force: true });

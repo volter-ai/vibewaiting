@@ -1,38 +1,47 @@
 # Architecture
 
 Vibewaiting is composition glue. It owns the browser/native adaptation and product
-workflow; upstream packages own reusable agent semantics, UI, terminals, browser
-attachment, and tunnels.
+workflow; Supercode Agent owns reusable coding semantics, UI, coding terminal composition
+and remote access. Supercode owns native fleet sessions and terminal transport;
+browser attachment and tunnels retain their existing owners. This follows
+[Supercode ADR 0265](https://github.com/volter-ai/supercode/blob/main/docs/adr/0265-supercode-is-the-fleets-harness.md).
+The coding SDK starts `supercode-agent`; `SUPERCODE_CODING_BIN` selects an explicit
+executable. Local development selects one Agent checkout and one Fleet checkout
+(`SUPERCODE_FLEET_DIR`). `sync:local` packs their called public dependency closure
+and installs those artifacts together through npm, without changing the committed
+manifest or lock. Copied Agent packages resolve the selected native Fleet readers
+and transport, including their transitive dependencies. It never binds a coding
+controller to the fleet command or an ambient native package graph.
 
 ```text
 ordinary web page
   └─ content script: launcher + page context + structured browser executor
-       └─ extension-owned iframe: full Volter Harness messenger UI
+       └─ extension-owned iframe: full Supercode Agent messenger UI
             └─ browser native messaging (bounded, chunked protocol)
                  └─ Vibewaiting native host
                       ├─ browser broker for `vibewaiting mcp` (Playwright's tools on the active tab)
-                      ├─ Volter Harness controller: discovery, resume, input, settings
+                      ├─ Supercode Agent controller: discovery, resume, input, settings
                       ├─ local terminal service: opaque short-lived attachment grants
                       ├─ local persistence: drafts, unread state, presentation memory
                       └─ remote messenger: authenticated mobile chat/terminal relay
-                           └─ Volter Harness remote-access provider
+                           └─ Supercode Agent remote-access provider
 ```
 
 ## Ownership boundaries
 
 | Concern | Owner |
 | --- | --- |
-| Session discovery, harness capabilities, continuation semantics | Volter Harness client and harness SDK |
-| Chat components, transcripts, logos, intent schema | Volter Harness UI |
-| Terminal transport and viewer | Volter Harness Terminal |
+| Session discovery, harness capabilities, continuation semantics | Supercode Agent client and SDK |
+| Chat components, transcripts, logos, intent schema | Supercode Agent UI |
+| Terminal transport and viewer | Supercode Agent Terminal over the native fleet terminal |
 | Overlay lifecycle, geometry, iframe isolation | Widget Shell |
 | Optional managed/headless browser attachment | Volter Browsers |
-| Stable or temporary public transport | Volter Harness Remote Access and Volter Tunnel |
+| Stable or temporary public transport | Supercode Agent Remote Access and Volter Tunnel |
 | Browser permissions, context capture, the browser tools' MCP server and approval policy, native messaging, product composition | Vibewaiting |
 | Browser tools and their schemas | Playwright (`playwright-core`'s MCP tool backend) |
 | Playwright in the browser, the in-page CDP surface | AlmostCDP |
 
-If a change is useful to another Volter Harness frontend or overlay application without
+If a change is useful to another Supercode Agent frontend or overlay application without
 Vibewaiting's browser-companion workflow, it likely belongs upstream.
 
 ## Browser isolation

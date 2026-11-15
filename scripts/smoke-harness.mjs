@@ -5,7 +5,7 @@
 //
 // This is the ONE place that proves the transport half of the bridge without a browser; the widget
 // half is proven by `npm test` (projection + daemon, both fake-client driven).
-import { SupercodeHarnessClient } from "@volter/supercode-harness-sdk";
+import { SupercodeHarnessClient } from "@volter/supercode-agent-sdk";
 
 const workspace = process.argv[2] ?? process.cwd();
 const client = new SupercodeHarnessClient({ cwd: workspace });

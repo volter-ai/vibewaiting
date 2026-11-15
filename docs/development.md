@@ -19,24 +19,24 @@ These environment variables customize the loop:
 | `VIBEWAITING_DEV_URL` | Initial ordinary web page |
 | `VIBEWAITING_DEV_WORKSPACE` | Workspace selected on a new profile |
 
-## Develop against local Volter Harness
+## Develop against local Supercode Agent
 
 The default path uses packages pinned by `package-lock.json`. To use an adjacent
-Volter Harness source checkout coherently, run:
+Supercode Agent source checkout coherently, run:
 
 ```sh
 npm run dev:extension:local
 ```
 
-This builds the local Volter Harness binary and syncs its harness SDK, client, UI, and
-terminal packages into this checkout without modifying `package.json` or the lockfile.
+This builds the local Supercode Agent UI and terminal surfaces and packs its coding
+runtime, SDK, client, UI, terminal, remote-access and CLI packages into this checkout without modifying `package.json` or the lockfile.
 The selected source worktree and binary are recorded in ignored local state and reused
 by subsequent `npm run dev:extension` invocations. `npm ci` restores published-package
 parity.
 
-Set `SUPERCODE_DIR` for a non-sibling checkout. An explicitly named
-`SUPERCODE_BINARY=/absolute/path/to/supercode` avoids rebuilding Rust when the selected
-worktree changes UI only. Local Volter Browsers and Widget Shell sources are opt-in through
+Set `SUPERCODE_AGENT_DIR` for a non-sibling checkout. An explicitly named
+`SUPERCODE_CODING_BIN=/absolute/path/to/supercode-agent` selects the coding executable when the selected
+worktree uses a separate executable. Local Volter Browsers and Widget Shell sources are opt-in through
 `VIBEWAITING_LOCAL_SURFACES=1`, with `LUCARNE_DIR` and `WIDGET_SHELL_DIR` available for
 non-sibling checkouts.
 

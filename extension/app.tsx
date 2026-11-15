@@ -1,5 +1,5 @@
 import { connectOverlayApp } from "@volter/widget-shell/frame";
-import { TerminalViewer } from "@volter/supercode-terminal/ui";
+import { TerminalViewer } from "@volter/supercode-agent-terminal/ui";
 import type { JSX } from "preact";
 import {
   parseBrowserContextAttachments,

@@ -4,16 +4,16 @@ import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { SupercodeHarnessClient } from "@volter/supercode-harness-sdk";
-import type { HarnessId } from "@volter/supercode-harness-sdk";
+import { SupercodeHarnessClient } from "@volter/supercode-agent-sdk";
+import type { HarnessId } from "@volter/supercode-agent-sdk";
 import {
   createRemoteAccessController,
   inspectRemoteAccessCapabilities,
   type RemoteAccessController,
   type RemoteAccessCapability,
   type RemoteAccessSnapshot,
-} from "@volter/supercode-remote-access";
-import { SupercodeTerminalController } from "@volter/supercode-terminal";
+} from "@volter/supercode-agent-remote-access";
+import { SupercodeTerminalController } from "@volter/supercode-agent-terminal";
 import { startDaemon, type Daemon, type WidgetBridge } from "./daemon.js";
 import {
   parseNativeHostCommand,
@@ -28,8 +28,8 @@ import {
 } from "./native-messaging.js";
 import { FileMessengerPersistence } from "./persistence.js";
 import { RemoteMessengerServer } from "./remote-messenger.js";
-import type { RemoteDeviceSnapshot } from "@volter/supercode-remote-access/client";
-import { formatWorkspacePath } from "@volter/supercode-ui/controller";
+import type { RemoteDeviceSnapshot } from "@volter/supercode-agent-remote-access/client";
+import { formatWorkspacePath } from "@volter/supercode-agent-ui/controller";
 import { BrowserBroker } from "./browser-broker.js";
 import { browserToolError, type BrowserToolResult } from "./browser-tools.js";
 
@@ -232,11 +232,11 @@ async function validateSettings(settings: ExtensionSettings): Promise<{
   };
 }
 
-async function localSupercodeCommand(): Promise<string | undefined> {
-  if (process.env["SUPERCODE_BIN"]) return process.env["SUPERCODE_BIN"];
+export async function localAgentCommand(): Promise<string> {
+  if (process.env["SUPERCODE_CODING_BIN"]) return process.env["SUPERCODE_CODING_BIN"];
   const marker = fileURLToPath(
     new URL(
-      "../node_modules/.cache/vibewaiting/local-supercode-bin",
+      "../node_modules/.cache/vibewaiting/local-agent-bin",
       import.meta.url,
     ),
   );
@@ -246,21 +246,21 @@ async function localSupercodeCommand(): Promise<string | undefined> {
   if (localCommand) return localCommand;
 
   // The source marker is a deliberate local-development choice. Falling through to whatever
-  // `supercode` happens to be installed on PATH after (for example) `npm ci` deletes node_modules
+  // `supercode-agent` happens to be installed on PATH after (for example) `npm ci` deletes node_modules
   // makes the browser silently exercise old protocol and activity behavior. A missing synced
   // binary is a broken development stack, not permission to change products underneath the user.
   const sourceMarker = fileURLToPath(
-    new URL("../.vibewaiting/local-supercode-source", import.meta.url),
+    new URL("../.vibewaiting/local-agent-source", import.meta.url),
   );
   const configuredSource = await readFile(sourceMarker, "utf8")
     .then((value) => value.trim())
     .catch(() => "");
   if (configuredSource) {
     throw new Error(
-      `Local Volter Harness is configured from ${configuredSource}, but its synced binary marker is missing. Run npm run sync:local before starting Vibewaiting.`,
+      `Local Supercode Agent is configured from ${configuredSource}, but its synced binary marker is missing. Run npm run sync:local before starting Vibewaiting.`,
     );
   }
-  return undefined;
+  return fileURLToPath(import.meta.resolve("@volter/supercode-agent/bin/supercode-agent.js"));
 }
 
 export async function runNativeHost(
@@ -442,16 +442,16 @@ export async function runNativeHost(
       type: "status",
       phase: "starting",
     });
-    const command = await localSupercodeCommand();
+    const command = await localAgentCommand();
     const client = new SupercodeHarnessClient({
       cwd: settings.workspace,
       requestTimeoutMs: 5_000,
-      ...(command ? { command } : {}),
+      command,
     });
     const discoveryClient = new SupercodeHarnessClient({
       cwd: settings.workspace,
       requestTimeoutMs: 5_000,
-      ...(command ? { command } : {}),
+      command,
     });
     const nextBridge = new NativeWidgetBridge(remoteServer, writer);
     let nextDaemon: Daemon | null = null;

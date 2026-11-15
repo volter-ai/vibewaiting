@@ -22,7 +22,7 @@ import {
 import {
   parseRemoteDeviceSnapshot,
   type RemoteDeviceSnapshot,
-} from "@volter/supercode-remote-access/client";
+} from "@volter/supercode-agent-remote-access/client";
 
 const SETTINGS_KEY = "vibewaiting:settings";
 const ATTACH_LINK_MENU = "vibewaiting:attach-link";

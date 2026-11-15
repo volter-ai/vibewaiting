@@ -495,7 +495,7 @@ async function rebuild() {
     if (localSyncPending) {
       localSyncPending = false;
       await command(process.execPath, [join(root, "scripts/sync-local-supercode.mjs")], {
-        env: { ...process.env, VIBEWAITING_SUPERCODE_ONLY: "1" },
+        env: { ...process.env, VIBEWAITING_AGENT_ONLY: "1" },
       });
     }
     await command("npm", ["run", "build"]);
@@ -543,23 +543,22 @@ for (const path of [
 }
 const localSourceMarker = join(
   root,
-  ".vibewaiting/local-supercode-source",
+  ".vibewaiting/local-agent-source",
 );
 const localBinaryMarker = join(
   root,
-  "node_modules/.cache/vibewaiting/local-supercode-bin",
+  "node_modules/.cache/vibewaiting/local-agent-bin",
 );
 let localStackWatchdog = null;
 if (await exists(localSourceMarker)) {
   const localSource = readFileSync(localSourceMarker, "utf8").trim();
   const sourceDirectories = [
-    "crates",
+    "sdk/interchange",
+    "packaging/npm",
     "sdk/ui/src",
   ];
   const sourceFiles = [
-    "Cargo.lock",
-    "crates/cli/Cargo.toml",
-    "crates/harness/Cargo.toml",
+    "pnpm-lock.yaml",
     "sdk/typescript/client.mjs",
     "sdk/typescript/index.d.ts",
     "sdk/typescript/package.json",
@@ -590,16 +589,16 @@ if (await exists(localSourceMarker)) {
   }
   // `npm ci` replaces node_modules atomically and removes the ignored binary marker while this
   // watcher remains alive. Detect that broken invariant directly: waiting for an unrelated source
-  // edit would otherwise let the extension restart against an older global/npm Supercode.
+  // edit would otherwise let the extension restart against an older global/npm Supercode Agent.
   localStackWatchdog = setInterval(async () => {
     if (!(await exists(localBinaryMarker))) scheduleLocalStackRebuild();
   }, 1_000);
   localStackWatchdog.unref?.();
-  process.stdout.write(`local Volter Harness source: ${localSource}\n`);
+  process.stdout.write(`local Supercode Agent source: ${localSource}\n`);
 }
 
 process.stdout.write(
-  `watching extension, messenger, host, and remembered local Volter Harness sources\n` +
+  `watching extension, messenger, host, and remembered local Supercode Agent sources\n` +
     `open ${startUrl}; future successful builds reload automatically\n`,
 );
 

@@ -8,8 +8,8 @@ import { EventEmitter } from "node:events";
 import type {
   DiscoverableSessionDescriptor,
   HarnessClientAdapter,
-} from "@volter/supercode-client";
-import type { StructuredLaunch } from "@volter/supercode-harness-sdk";
+} from "@volter/supercode-agent-client";
+import type { StructuredLaunch } from "@volter/supercode-agent-sdk";
 import type {
   HarnessAuthenticationEnvironment,
   HarnessAuthenticationPlan,
@@ -32,7 +32,7 @@ import type {
   SessionLocator,
   SessionMessageResult,
   SessionWatchEvent,
-} from "@volter/supercode-harness-sdk";
+} from "@volter/supercode-agent-sdk";
 import type { WidgetBridge } from "../src/daemon.js";
 
 const ALL_CAPABILITIES = {

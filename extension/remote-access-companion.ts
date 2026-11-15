@@ -9,7 +9,7 @@ import {
   parseRemoteDeviceSnapshot,
   parseRemotePairingHandoff,
   type RemoteDeviceSnapshot,
-} from "@volter/supercode-remote-access/client";
+} from "@volter/supercode-agent-remote-access/client";
 
 type RemoteAccessStatus =
   | "connected"

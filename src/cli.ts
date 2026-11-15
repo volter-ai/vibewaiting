@@ -7,12 +7,12 @@
 // with `--session` is left running, because the human is probably still browsing in it.
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { SupercodeHarnessClient } from "@volter/supercode-harness-sdk";
-import type { HarnessId } from "@volter/supercode-harness-sdk";
+import { SupercodeHarnessClient } from "@volter/supercode-agent-sdk";
+import type { HarnessId } from "@volter/supercode-agent-sdk";
 import { LucarneClient } from "@volter/lucarne";
 import type { Session } from "@volter/lucarne";
 import { startDaemon, type Daemon } from "./daemon.js";
-import { runNativeHost } from "./native-host.js";
+import { localAgentCommand, runNativeHost } from "./native-host.js";
 import {
   installNativeHost,
   type NativeBrowser,
@@ -256,17 +256,7 @@ async function main(): Promise<void> {
   const baseUrl = process.env["LUCARNE_URL"] ?? DEFAULT_ENGINE_URL;
   const token = process.env["LUCARNE_TOKEN"];
   const lucarne = new LucarneClient({ baseUrl, ...(token ? { token } : {}) });
-  const localCommandMarker = fileURLToPath(
-    new URL(
-      "../node_modules/.cache/vibewaiting/local-supercode-bin",
-      import.meta.url,
-    ),
-  );
-  const command =
-    process.env["SUPERCODE_BIN"] ??
-    (await readFile(localCommandMarker, "utf8")
-      .then((value) => value.trim() || undefined)
-      .catch(() => undefined));
+  const command = await localAgentCommand();
 
   const html = await loadWidgetHtml();
 
@@ -310,12 +300,12 @@ async function main(): Promise<void> {
   const harnessClient = new SupercodeHarnessClient({
     cwd: args.workspace,
     requestTimeoutMs: DEFAULT_WIDGET_REQUEST_TIMEOUT_MS,
-    ...(command ? { command } : {}),
+    command,
   });
   const discoveryClient = new SupercodeHarnessClient({
     cwd: args.workspace,
     requestTimeoutMs: DEFAULT_WIDGET_REQUEST_TIMEOUT_MS,
-    ...(command ? { command } : {}),
+    command,
   });
   let daemon: Daemon;
   try {

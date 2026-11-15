@@ -9,13 +9,13 @@ import {
   type TerminalService,
   type WidgetBridge,
 } from "../src/daemon.js";
-import type { SupercodeTerminalSnapshot as TerminalServiceSnapshot } from "@volter/supercode-terminal";
+import type { SupercodeTerminalSnapshot as TerminalServiceSnapshot } from "@volter/supercode-agent-terminal";
 import { DEFAULT_MAX_ENTRIES, DEFAULT_MAX_ENTRY_CHARS } from "../src/projection.js";
 import type { ExportReceipt, WidgetState } from "../src/projection.js";
 import type { MessengerPersistence, PersistedMessengerState } from "../src/persistence.js";
-import { sessionReconnectIdentitySync as sessionKey } from "@volter/supercode-client/node";
-import { SupercodeController, type SupercodeClientSnapshot } from "@volter/supercode-client";
-import type { SessionArtifact } from "@volter/supercode-harness-sdk";
+import { sessionReconnectIdentitySync as sessionKey } from "@volter/supercode-agent-client/node";
+import { SupercodeController, type SupercodeClientSnapshot } from "@volter/supercode-agent-client";
+import type { SessionArtifact } from "@volter/supercode-agent-sdk";
 import { FakeHarnessClient, FakeWidgetHost, descriptor, localHarness, waitFor } from "./fakes.js";
 
 const running: Daemon[] = [];

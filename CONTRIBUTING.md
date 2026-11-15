@@ -15,7 +15,7 @@ Release and repository-administration work also follows the
 
 Requirements:
 
-- Node.js 22.12 or newer on an LTS release line (22, 24, and later) and npm
+- Node.js 26.8.1 or newer and npm
 - macOS or Linux for native-host development
 - Chrome, Chromium, or Brave for extension validation
 - a locally installed coding harness supported by Volter Harness
@@ -43,19 +43,27 @@ relevant sources, and reloads only after a successful build. See
 [the development guide](docs/development.md) before pointing it at a non-default
 checkout.
 
-Contributors working on Volter Harness and Vibewaiting together can run `npm run sync:local`
-to install a coherent adjacent Volter Harness build into this checkout without modifying the
-lockfile, or use `npm run dev:extension:local` for the initial sync and development launch.
+Contributors working on Supercode Agent and Vibewaiting together select Agent's
+checkout and its native Fleet dependency source:
 
-Vibewaiting consumes published Volter Harness packages in a normal checkout. Contributors
-can build and test this repository without Volter Harness source access; changes to agent
-semantics or shared UI require coordination with the Volter Harness maintainers until that
+```sh
+SUPERCODE_FLEET_DIR=/path/to/supercode npm run sync:local -- /path/to/supercode-agent
+```
+
+The command builds the owning packages and installs their local artifacts and
+transitive dependencies through npm without modifying the manifest or lockfile.
+`SUPERCODE_AGENT_DIR` also selects the Agent checkout. `dev:extension:local` uses
+the same selections for the initial sync and development launch.
+
+Vibewaiting consumes Supercode Agent packages in a normal checkout. Contributors
+can build this repository without Agent source access; changes to agent
+semantics or shared UI require coordination with the Agent maintainers until that
 repository is publicly available.
 
 ## Scope and design rules
 
 - Keep Vibewaiting a thin browser/mobile companion. Harness semantics and reusable chat
-  components belong in Volter Harness packages; generic overlay geometry belongs in Widget
+  components belong in Supercode Agent packages; generic overlay geometry belongs in Widget
   Shell.
 - Preserve the browser/native boundary. Never send locators, filesystem recovery paths,
   tmux handles, credentials, or execution policy into ordinary page content.
