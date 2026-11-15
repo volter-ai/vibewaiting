@@ -466,6 +466,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     : normalizeNativeMessengerState(null);
 
   let stopped = false;
+  let stopping: Promise<void> | null = null;
   let lastPushed: WidgetState | null = null;
   let imageProjection: ReturnType<typeof projectWithImages> | null = null;
   let lastQueuedFingerprint: string | null = null;
@@ -1889,8 +1890,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     flush: pushNow,
     refreshSessions,
     attach: attachSession,
-    async stop(): Promise<void> {
-      if (stopped) return;
+    stop(): Promise<void> {
+      if (stopping) return stopping;
       stopped = true;
       if (timer) clearTimeout(timer);
       timer = null;
@@ -1899,27 +1900,30 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       if (terminalMoveRetryTimer) clearTimeout(terminalMoveRetryTimer);
       terminalMoveRetryTimer = null;
       unsubscribeAuthentication();
-      await authentication?.close().catch((error: unknown) => {
-        log(`native sign-in cleanup failed: ${message(error)}`);
-      });
-      await flushPersistence();
       stopRepush();
       stopDiscovery();
       unsubscribeCatalog();
-      await catalog?.close().catch((error: unknown) => {
-        log(`session catalog cleanup failed (continuing): ${message(error)}`);
-      });
       stopIntentPump();
       unsubscribe();
       unsubscribeControllerPool();
       unsubscribeFamilyInspector();
       familyInspector.dispose();
-      await controllerPool.close();
-      await inFlight.catch(() => undefined);
-      await host.remove().catch((e: unknown) => log(`widget removal failed: ${(e as Error)?.message ?? String(e)}`));
-      // `ownsClient: true` (above) makes this close the harness transport too — the caller that
-      // injected its own controller owns that controller's resources instead.
-      await controller.close().catch((e: unknown) => log(`controller close failed: ${(e as Error)?.message ?? String(e)}`));
+      stopping = (async () => {
+        const results = await Promise.allSettled([
+          Promise.resolve().then(() => controller.close()),
+          Promise.resolve().then(() => controllerPool.close()),
+          Promise.resolve().then(() => authentication?.close()),
+          Promise.resolve().then(() => catalog?.close()),
+          inFlight,
+          flushPersistence(),
+        ]);
+        results.push(...await Promise.allSettled([host.remove()]));
+        const failures = results
+          .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+          .map((result) => result.reason);
+        if (failures.length) throw new AggregateError(failures, "Daemon cleanup is unconfirmed");
+      })();
+      return stopping;
     },
   };
 }

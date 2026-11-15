@@ -88,6 +88,8 @@ Temporary tunnel URLs are browser-only. Manifest and service-worker routes retur
 
 ## State and refresh behavior
 
+The daemon's primary controller owns the coding transport; conversation mirrors share it. Shutdown seals local input, starts the primary controller's close alongside mirror, authentication and catalog cleanup, and joins those operations and pending UI delivery before removing the widget. A shared controller cannot keep its transport owner waiting behind its own pending request. Repeated shutdown calls join the same result, and cleanup failures propagate after every cleanup has been attempted.
+
 Session attachment and sign-in follow their native completion, explicit error or owner cancellation; the host sets no inferred completion deadline. The native host projects revisioned state. Browser transports coalesce equivalent
 inventory refreshes and preserve stable conversation ordering, active selection,
 drafts, unread boundaries, and presentation state. Refreshing native inventory must
