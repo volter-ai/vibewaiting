@@ -220,33 +220,6 @@ function brokenController(reason: string): AgentController {
   };
 }
 
-function hangingController(): AgentController {
-  return {
-    ...brokenController("unused"),
-    initialize: () => new Promise<SupercodeClientSnapshot>(() => undefined),
-  };
-}
-
-async function failingAttachRig(): Promise<Rig> {
-  const client = new FakeHarnessClient({ sessions: [OWN, ATLAS, BRIDGE] });
-  const host = new FakeWidgetHost();
-  const daemon = await startDaemon({
-    html: "<html></html>",
-    workspace: "/tmp/project",
-    client,
-    pushDebounceMs: 5,
-    attachTimeoutMs: 250,
-    home: "/home/dev",
-    now: () => 2_000_000,
-    attachHost: async () => host,
-    createController: ({ workspace }) => workspace === ATLAS.cwd
-      ? hangingController()
-      : new SupercodeController({ client, workspace, ownsClient: false }) as unknown as AgentController,
-  });
-  running.push(daemon);
-  return { daemon, host, client, lastPush: () => daemon.lastPushed() as TestWidgetState };
-}
-
 describe("bridge invariants", () => {
   it("keeps large historical images out of state and resolves only a projected reference on demand", async () => {
     const largeUrl = `data:image/png;base64,${"A".repeat(300_000)}`;
@@ -990,28 +963,6 @@ describe("messenger session state machine", () => {
     const second = await sessionRig([OWN, ATLAS], undefined, store);
     await second.host.fireIntent(INTENT_QUEUE, { action: "attach", key: sessionKey(ATLAS.locator) });
     expect(second.lastPush().savedDraft).toBe("unfinished");
-  });
-
-  it("turns a timed-out attach into row state, then clears it without leaking followers", async () => {
-    const { daemon, client, lastPush } = await failingAttachRig();
-    vi.useFakeTimers();
-    try {
-      const timedOut = daemon.attach(sessionKey(ATLAS.locator));
-      await vi.advanceTimersByTimeAsync(250);
-      await timedOut;
-    } finally {
-      vi.useRealTimers();
-    }
-    expect(lastPush().attachError).toMatchObject({ key: sessionKey(ATLAS.locator) });
-
-    await Promise.all([
-      daemon.attach(sessionKey(ATLAS.locator)),
-      daemon.attach(sessionKey(BRIDGE.locator)),
-    ]);
-    await daemon.flush();
-    expect(lastPush().attachError).toBeNull();
-    expect(lastPush().attached?.key).toBe(sessionKey(BRIDGE.locator));
-    expect(client.activeFollows).toBe(1);
   });
 
   it("persists native unread boundaries without counting preview growth, tools, or replay", async () => {

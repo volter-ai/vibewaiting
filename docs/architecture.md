@@ -78,7 +78,7 @@ tmux session.
 ## Remote access
 
 The remote messenger binds to loopback and is exposed only by a selected tunnel
-provider. A one-scan QR carries a short-lived pairing grant in the URL fragment; page
+provider. The native messaging host owns startup capability probes and the remote-access controller through one lifetime. Native stdin closure or a process signal cancels that lifetime, closes the controller immediately, and joins queued commands and each service cleanup before exit. Tunnel shutdown is awaitable; failed cleanup propagates while the remaining local services still close. A one-scan QR carries a short-lived pairing grant in the URL fragment; page
 JavaScript consumes it once, so the fragment is not sent in the initial HTTP request.
 The fallback flow uses a rate-limited six-digit code. Successful pairing creates an
 HTTP-only, same-site device session that can be revoked from the desktop companion.
@@ -88,7 +88,7 @@ Temporary tunnel URLs are browser-only. Manifest and service-worker routes retur
 
 ## State and refresh behavior
 
-The native host projects revisioned state. Browser transports coalesce equivalent
+Session attachment and sign-in follow their native completion, explicit error or owner cancellation; the host sets no inferred completion deadline. The native host projects revisioned state. Browser transports coalesce equivalent
 inventory refreshes and preserve stable conversation ordering, active selection,
 drafts, unread boundaries, and presentation state. Refreshing native inventory must
 not remount the messenger or replay its opening animation.

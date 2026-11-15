@@ -91,8 +91,6 @@ export const DEFAULT_DISCOVER_INTERVAL_MS = 60_000;
 export const MAX_SESSION_ROWS = 30;
 /** Tool-stream churn is not unread. A no-status peer must be quiet this long before it asks for attention. */
 export const DEFAULT_ATTENTION_SETTLE_MS = 15_000;
-/** A broken harness attach must become a visible row error, never an eternal local spinner. */
-export const DEFAULT_ATTACH_TIMEOUT_MS = 45_000;
 /** Harnesses tried, in order, when the caller named none — first one that can actually start wins. */
 export const HARNESS_PREFERENCE: readonly string[] = [
   "claude-code",
@@ -183,8 +181,6 @@ export interface DaemonOptions {
    * `0` disables the Sessions panel's refresh entirely (tests). Default `DEFAULT_DISCOVER_INTERVAL_MS`.
    */
   discoverIntervalMs?: number | undefined;
-  /** Maximum total time to initialize and observe a foreign session. Default 45 seconds. */
-  attachTimeoutMs?: number | undefined;
   /** Home directory folded to `~` in the session list. Default: the process's own. */
   home?: string | undefined;
   /** Clock for relative ages. Default `Date.now` — injected so a test can pin "3m ago". */
@@ -501,7 +497,6 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   let sessionLimit = MAX_SESSION_ROWS;
   let hasMoreSessions = false;
   const initialTranscriptLimit = options.projection?.maxEntries ?? DEFAULT_MAX_ENTRIES;
-  const attachTimeoutMs = options.attachTimeoutMs ?? DEFAULT_ATTACH_TIMEOUT_MS;
   /** A page action can fail before the controller publishes a structured error. Keep it visible. */
   let actionError: string | null = null;
   let exportReceipt: ExportReceipt | null = null;
@@ -511,7 +506,6 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     ? new HarnessAuthenticationController({
         client: options.client,
         cwd: options.workspace,
-        timeoutMs: 10 * 60_000,
         host: {
           launch: async (plan) => {
             const terminalService = options.terminalService;
@@ -649,7 +643,6 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const controllerPool = new SessionControllerPool<AgentController>({
     primary: controller,
     tailMessages: initialTranscriptLimit,
-    timeoutMs: attachTimeoutMs,
     maxCachedWindows: 12,
     createController: ({ descriptor, tailMessages, mirrorCache }) => options.createController
       ? options.createController({

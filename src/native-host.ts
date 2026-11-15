@@ -42,10 +42,10 @@ const STABLE_RELAY_ENV_KEYS = [
 
 type HostEventWithoutChunk = Exclude<NativeHostEvent, { type: "chunk" }>;
 
-function secureRemoteAccessRuntime(source: NodeJS.ProcessEnv = process.env): {
+async function secureRemoteAccessRuntime(source: NodeJS.ProcessEnv, signal: AbortSignal): Promise<{
   capabilities: readonly RemoteAccessCapability[];
   env: NodeJS.ProcessEnv;
-} {
+}> {
   const env = { ...source };
   const configured = STABLE_RELAY_ENV_KEYS.map((key) =>
     source[key]?.trim(),
@@ -60,7 +60,7 @@ function secureRemoteAccessRuntime(source: NodeJS.ProcessEnv = process.env): {
   }
   if (rejectedStableRelay)
     for (const key of STABLE_RELAY_ENV_KEYS) delete env[key];
-  const capabilities = inspectRemoteAccessCapabilities(env).map((capability) =>
+  const capabilities = (await inspectRemoteAccessCapabilities(env, { signal })).map((capability) =>
     rejectedStableRelay && capability.provider === "stable"
       ? {
           detail: "Stable remote access requires an HTTPS relay URL",
@@ -84,6 +84,7 @@ function isClosedNativeChannel(error: unknown): boolean {
 class NativeMessageWriter {
   private closed = false;
   private failure: unknown;
+  private readonly lifetime = new AbortController();
 
   constructor(private readonly output: typeof process.stdout) {
     // Closing a browser tab tears down the native pipe before every producer has necessarily
@@ -102,6 +103,7 @@ class NativeMessageWriter {
 
   close(): void {
     this.closed = true;
+    this.lifetime.abort();
   }
 
   private async writeFrame(value: unknown): Promise<boolean> {
@@ -110,10 +112,11 @@ class NativeMessageWriter {
       return false;
     try {
       if (!this.output.write(encodeNativeMessage(value)))
-        await once(this.output, "drain");
+        await once(this.output, "drain", { signal: this.lifetime.signal });
       if (this.failure) throw this.failure;
       return !this.closed;
     } catch (error) {
+      if (this.closed) return false;
       if (isClosedNativeChannel(error)) {
         this.closed = true;
         return false;
@@ -270,315 +273,26 @@ export async function runNativeHost(
     throw new Error("native host did not receive its browser extension origin");
   const decoder = new NativeMessageDecoder();
   const writer = new NativeMessageWriter(process.stdout);
-  const terminalService = new SupercodeTerminalController({
-    allowedOrigins: extensionOrigin,
-    formatCwd: (cwd) => formatWorkspacePath(cwd, homedir()) || null,
-  });
-  await terminalService.start();
-  const remoteServer = new RemoteMessengerServer(extensionOrigin);
-  const remoteEndpoint = await remoteServer.start();
-  const remoteRuntime = secureRemoteAccessRuntime();
-  const remoteAccess: RemoteAccessController = createRemoteAccessController({
-    capabilities: remoteRuntime.capabilities,
-    env: remoteRuntime.env,
-    localOrigin: remoteEndpoint.localOrigin,
-    publicPath: "/",
-    tunnelId: await persistentRemoteTunnelId(),
-  });
-  let remoteAccessSnapshot = remoteAccess.snapshot();
-  let remoteDevices: RemoteDeviceSnapshot = remoteServer.deviceSnapshot();
-  let suppressRemoteDeviceEvents = false;
-  const publishRemoteAccess = async (
-    snapshot: RemoteAccessSnapshot,
-    includePairing: boolean,
-  ): Promise<void> => {
-    const pairing =
-      includePairing && snapshot.status === "connected" && snapshot.publicUrl
-        ? remotePairingHandoff(
-            snapshot.publicUrl,
-            remoteServer.createPairingGrant(),
-          )
-        : undefined;
-    await writer.write({
-      protocol: VIBEWAITING_EXTENSION_PROTOCOL,
-      type: "remote-access",
-      devices: remoteDevices,
-      ...(pairing ? { pairing } : {}),
-      passcode: remoteEndpoint.passcode,
-      snapshot,
-    });
-  };
-  remoteAccess.subscribe((snapshot) => {
-    remoteAccessSnapshot = snapshot;
-    remoteServer.setInstallableOrigin(
-      snapshot.status === "connected" &&
-        snapshot.stability === "stable" &&
-        snapshot.publicUrl
-        ? snapshot.publicUrl
-        : null,
-    );
-    void publishRemoteAccess(snapshot, snapshot.status === "connected").catch(
-      (error: unknown) => {
-        process.stderr.write(
-          `[vibewaiting] remote access update failed: ${(error as Error)?.message ?? String(error)}\n`,
-        );
-      },
-    );
-  });
-  remoteServer.setDeviceSnapshotHandler((devices) => {
-    remoteDevices = devices;
-    if (!suppressRemoteDeviceEvents)
-      void publishRemoteAccess(remoteAccessSnapshot, false).catch(
-        (error: unknown) => {
-          process.stderr.write(
-            `[vibewaiting] remote device update failed: ${(error as Error)?.message ?? String(error)}\n`,
-          );
-        },
-      );
-  });
-  let daemon: Daemon | null = null;
-  let bridge: NativeWidgetBridge | null = null;
-  let activeDiscoveryClient: SupercodeHarnessClient | null = null;
-  let fingerprint = "";
+  const lifetime = new AbortController();
+  let remoteAccess: RemoteAccessController | undefined;
   let commandQueue = Promise.resolve();
-  const pendingBrowserOperations = new Map<
-    string,
-    {
-      resolve: (result: BrowserToolResult) => void;
-      pending: ((message: string) => void) | null;
-      timer: ReturnType<typeof setTimeout>;
-    }
-  >();
-  /** Tells the extension an agent's call ended unanswered: an approval it waits on is void. */
-  const cancelBrowserOperation = (id: string): void => {
-    void writer
-      .write({ protocol: VIBEWAITING_EXTENSION_PROTOCOL, type: "browser-operation-cancelled", id })
-      .catch(() => undefined);
+  let handle!: (value: unknown) => Promise<void>;
+  let initializedReady!: () => void;
+  const initialized = new Promise<void>(resolve => { initializedReady = resolve; });
+  const stopped = new Promise<void>(resolve => lifetime.signal.addEventListener("abort", () => resolve(), { once: true }));
+  const stop = (): void => {
+    lifetime.abort(new Error("Native messaging host closed"));
+    writer.close();
+    void remoteAccess?.close().catch(() => undefined);
   };
-  const browserTimeout = (
-    id: string,
-    milliseconds: number,
-    message: string,
-  ): ReturnType<typeof setTimeout> =>
-    setTimeout(() => {
-      const pending = pendingBrowserOperations.get(id);
-      if (!pending) return;
-      pendingBrowserOperations.delete(id);
-      cancelBrowserOperation(id);
-      pending.resolve(browserToolError(message));
-    }, milliseconds);
-  const browserBroker = new BrowserBroker(async (id, call, { pending, signal, task }) => {
-    if (pendingBrowserOperations.has(id))
-      throw new Error(`Duplicate browser operation id: ${id}`);
-    return await new Promise<BrowserToolResult>((resolve) => {
-      const timer = browserTimeout(
-        id,
-        35_000,
-        "The Vibewaiting extension did not answer in 35 seconds.",
-      );
-      pendingBrowserOperations.set(id, { resolve, pending, timer });
-      signal.addEventListener("abort", () => {
-        const current = pendingBrowserOperations.get(id);
-        if (!current) return;
-        pendingBrowserOperations.delete(id);
-        clearTimeout(current.timer);
-        cancelBrowserOperation(id);
-        current.resolve(browserToolError("The caller stopped waiting."));
-      }, { once: true });
-      void writer
-        .write({
-          protocol: VIBEWAITING_EXTENSION_PROTOCOL,
-          type: "browser-operation-request",
-          id,
-          call,
-          acceptsPending: pending !== null,
-          task,
-        })
-        .catch((error: unknown) => {
-          const pending = pendingBrowserOperations.get(id);
-          if (!pending) return;
-          pendingBrowserOperations.delete(id);
-          clearTimeout(pending.timer);
-          pending.resolve(browserToolError(error instanceof Error ? error.message : String(error)));
-        });
-    });
-  });
-
-  const stopBrowserBroker = async (): Promise<void> => {
-    for (const pending of pendingBrowserOperations.values()) {
-      clearTimeout(pending.timer);
-      pending.resolve(browserToolError("The Vibewaiting browser broker stopped."));
-    }
-    pendingBrowserOperations.clear();
-    await browserBroker.stop();
-  };
-
-  const stopDaemon = async (): Promise<void> => {
-    const active = daemon;
-    daemon = null;
-    bridge = null;
-    fingerprint = "";
-    await stopBrowserBroker();
-    await active?.stop();
-    await activeDiscoveryClient?.close().catch(() => undefined);
-    activeDiscoveryClient = null;
-  };
-
-  const start = async (requested: ExtensionSettings): Promise<void> => {
-    const settings = await validateSettings(requested);
-    const nextFingerprint = JSON.stringify(settings);
-    if (daemon && nextFingerprint === fingerprint) {
-      await daemon.flush();
-      await writer.write({
-        protocol: VIBEWAITING_EXTENSION_PROTOCOL,
-        type: "status",
-        phase: "ready",
-      });
-      return;
-    }
-    await stopDaemon();
-    await writer.write({
-      protocol: VIBEWAITING_EXTENSION_PROTOCOL,
-      type: "status",
-      phase: "starting",
-    });
-    const command = await localAgentCommand();
-    const client = new SupercodeHarnessClient({
-      cwd: settings.workspace,
-      requestTimeoutMs: 5_000,
-      command,
-    });
-    const discoveryClient = new SupercodeHarnessClient({
-      cwd: settings.workspace,
-      requestTimeoutMs: 5_000,
-      command,
-    });
-    const nextBridge = new NativeWidgetBridge(remoteServer, writer);
-    let nextDaemon: Daemon | null = null;
-    try {
-      nextDaemon = await startDaemon({
-        html: "",
-        workspace: settings.workspace,
-        ...(settings.harness ? { harness: settings.harness } : {}),
-        ...(settings.policy ? { policy: settings.policy } : {}),
-        client,
-        discoveryClient,
-        persistence: new FileMessengerPersistence(),
-        attachHost: async () => nextBridge,
-        log: (message) => process.stderr.write(`[vibewaiting] ${message}\n`),
-        terminalService,
-      });
-      await browserBroker.start(settings.workspace);
-      bridge = nextBridge;
-      daemon = nextDaemon;
-      activeDiscoveryClient = discoveryClient;
-      fingerprint = nextFingerprint;
-      await writer.write({
-        protocol: VIBEWAITING_EXTENSION_PROTOCOL,
-        type: "status",
-        phase: "ready",
-      });
-      if (requested.remoteAccess) {
-        void remoteAccess
-          .configure(requested.remoteAccess)
-          .catch((error: unknown) => {
-            process.stderr.write(
-              `[vibewaiting] remote access failed: ${(error as Error)?.message ?? String(error)}\n`,
-            );
-          });
-      }
-    } catch (error) {
-      if (daemon === nextDaemon) await stopDaemon();
-      else {
-        await stopBrowserBroker();
-        await nextDaemon?.stop().catch(() => undefined);
-      }
-      await client.close().catch(() => undefined);
-      await discoveryClient.close().catch(() => undefined);
-      await nextBridge.remove();
-      throw error;
-    }
-  };
-
-  const handle = async (value: unknown): Promise<void> => {
-    const command = parseNativeHostCommand(value);
-    if (!command) throw new Error("Invalid native host command");
-    if (command.type === "start") {
-      await start(command.settings);
-      return;
-    }
-    if (command.type === "remote-access") {
-      if (!command.configuration.enabled) {
-        suppressRemoteDeviceEvents = true;
-        remoteServer.revokeRemoteSessions();
-        try {
-          await remoteAccess.configure(command.configuration);
-        } catch (error) {
-          process.stderr.write(
-            `[vibewaiting] remote access failed: ${(error as Error)?.message ?? String(error)}\n`,
-          );
-        } finally {
-          suppressRemoteDeviceEvents = false;
-          await publishRemoteAccess(remoteAccessSnapshot, false);
-        }
-        return;
-      }
-      await remoteAccess
-        .configure(command.configuration)
-        .catch((error: unknown) => {
-          process.stderr.write(
-            `[vibewaiting] remote access failed: ${(error as Error)?.message ?? String(error)}\n`,
-          );
-        });
-      return;
-    }
-    if (command.type === "remote-access-pairing") {
-      await publishRemoteAccess(remoteAccessSnapshot, true);
-      return;
-    }
-    if (command.type === "remote-access-revoke") {
-      suppressRemoteDeviceEvents = true;
-      try {
-        remoteServer.revokeRemoteSessions();
-      } finally {
-        suppressRemoteDeviceEvents = false;
-      }
-      await publishRemoteAccess(
-        remoteAccessSnapshot,
-        remoteAccessSnapshot.status === "connected",
-      );
-      return;
-    }
-    if (command.type === "browser-operation-pending") {
-      // The extension asked the person to approve this call; it answers
-      // within its 90 s decision window.
-      const pending = pendingBrowserOperations.get(command.id);
-      if (!pending) return;
-      clearTimeout(pending.timer);
-      pending.timer = browserTimeout(
-        command.id,
-        110_000,
-        "The Vibewaiting extension did not answer after asking the person.",
-      );
-      pending.pending?.(command.message);
-      return;
-    }
-    if (command.type === "browser-operation-response") {
-      const pending = pendingBrowserOperations.get(command.id);
-      if (!pending) return;
-      pendingBrowserOperations.delete(command.id);
-      clearTimeout(pending.timer);
-      pending.resolve(command.result);
-      return;
-    }
-    bridge?.receive(command.id, command.payload, "local");
-  };
-
-  process.stdin.on("data", (chunk: Buffer) => {
+  const stopWithError = (error: Error): void => { failure = error; lifetime.abort(error); writer.close(); void remoteAccess?.close().catch(() => undefined); };
+  const cleanups: Array<() => Promise<void>> = [];
+  let failure: unknown;
+  const receive = (chunk: Buffer): void => {
     try {
       for (const value of decoder.push(chunk)) {
         commandQueue = commandQueue
-          .then(() => handle(value))
+          .then(async () => { await initialized; if (!lifetime.signal.aborted) await handle(value); })
           .catch(async (error: unknown) => {
             await writer.write({
               protocol: VIBEWAITING_EXTENSION_PROTOCOL,
@@ -598,18 +312,349 @@ export async function runNativeHost(
         });
       });
     }
-  });
-
+  };
+  process.stdin.on("data", receive);
+  process.stdin.once("end", stop);
+  process.stdin.once("error", stopWithError);
+  process.on("SIGTERM", stop);
+  process.on("SIGINT", stop);
   try {
-    await once(process.stdin, "end");
+    const terminalService = new SupercodeTerminalController({
+      allowedOrigins: extensionOrigin,
+      formatCwd: (cwd) => formatWorkspacePath(cwd, homedir()) || null,
+    });
+    cleanups.push(() => terminalService.stop());
+    await terminalService.start();
+    lifetime.signal.throwIfAborted();
+    const remoteServer = new RemoteMessengerServer(extensionOrigin);
+    cleanups.push(() => remoteServer.stop());
+    const remoteEndpoint = await remoteServer.start();
+    const remoteRuntime = await secureRemoteAccessRuntime(process.env, lifetime.signal);
+    lifetime.signal.throwIfAborted();
+    const controller = createRemoteAccessController({
+      capabilities: remoteRuntime.capabilities,
+      env: remoteRuntime.env,
+      localOrigin: remoteEndpoint.localOrigin,
+      publicPath: "/",
+      tunnelId: await persistentRemoteTunnelId(),
+    });
+    remoteAccess = controller;
+    cleanups.push(() => controller.close());
+    let remoteAccessSnapshot = controller.snapshot();
+    let remoteDevices: RemoteDeviceSnapshot = remoteServer.deviceSnapshot();
+    let suppressRemoteDeviceEvents = false;
+    const publishRemoteAccess = async (
+      snapshot: RemoteAccessSnapshot,
+      includePairing: boolean,
+    ): Promise<void> => {
+      const pairing =
+        includePairing && snapshot.status === "connected" && snapshot.publicUrl
+          ? remotePairingHandoff(
+              snapshot.publicUrl,
+              remoteServer.createPairingGrant(),
+            )
+          : undefined;
+      await writer.write({
+        protocol: VIBEWAITING_EXTENSION_PROTOCOL,
+        type: "remote-access",
+        devices: remoteDevices,
+        ...(pairing ? { pairing } : {}),
+        passcode: remoteEndpoint.passcode,
+        snapshot,
+      });
+    };
+    controller.subscribe((snapshot) => {
+      remoteAccessSnapshot = snapshot;
+      remoteServer.setInstallableOrigin(
+        snapshot.status === "connected" &&
+          snapshot.stability === "stable" &&
+          snapshot.publicUrl
+          ? snapshot.publicUrl
+          : null,
+      );
+      void publishRemoteAccess(snapshot, snapshot.status === "connected").catch(
+        (error: unknown) => {
+          process.stderr.write(
+            `[vibewaiting] remote access update failed: ${(error as Error)?.message ?? String(error)}\n`,
+          );
+        },
+      );
+    });
+    remoteServer.setDeviceSnapshotHandler((devices) => {
+      remoteDevices = devices;
+      if (!suppressRemoteDeviceEvents)
+        void publishRemoteAccess(remoteAccessSnapshot, false).catch(
+          (error: unknown) => {
+            process.stderr.write(
+              `[vibewaiting] remote device update failed: ${(error as Error)?.message ?? String(error)}\n`,
+            );
+          },
+        );
+    });
+    let daemon: Daemon | null = null;
+    let bridge: NativeWidgetBridge | null = null;
+    let activeDiscoveryClient: SupercodeHarnessClient | null = null;
+    let fingerprint = "";
+    const pendingBrowserOperations = new Map<
+      string,
+      {
+        resolve: (result: BrowserToolResult) => void;
+        pending: ((message: string) => void) | null;
+        timer: ReturnType<typeof setTimeout>;
+      }
+    >();
+    /** Tells the extension an agent's call ended unanswered: an approval it waits on is void. */
+    const cancelBrowserOperation = (id: string): void => {
+      void writer
+        .write({ protocol: VIBEWAITING_EXTENSION_PROTOCOL, type: "browser-operation-cancelled", id })
+        .catch(() => undefined);
+    };
+    const browserTimeout = (
+      id: string,
+      milliseconds: number,
+      message: string,
+    ): ReturnType<typeof setTimeout> =>
+      setTimeout(() => {
+        const pending = pendingBrowserOperations.get(id);
+        if (!pending) return;
+        pendingBrowserOperations.delete(id);
+        cancelBrowserOperation(id);
+        pending.resolve(browserToolError(message));
+      }, milliseconds);
+    const browserBroker = new BrowserBroker(async (id, call, { pending, signal, task }) => {
+      if (pendingBrowserOperations.has(id))
+        throw new Error(`Duplicate browser operation id: ${id}`);
+      return await new Promise<BrowserToolResult>((resolve) => {
+        const timer = browserTimeout(
+          id,
+          35_000,
+          "The Vibewaiting extension did not answer in 35 seconds.",
+        );
+        pendingBrowserOperations.set(id, { resolve, pending, timer });
+        signal.addEventListener("abort", () => {
+          const current = pendingBrowserOperations.get(id);
+          if (!current) return;
+          pendingBrowserOperations.delete(id);
+          clearTimeout(current.timer);
+          cancelBrowserOperation(id);
+          current.resolve(browserToolError("The caller stopped waiting."));
+        }, { once: true });
+        void writer
+          .write({
+            protocol: VIBEWAITING_EXTENSION_PROTOCOL,
+            type: "browser-operation-request",
+            id,
+            call,
+            acceptsPending: pending !== null,
+            task,
+          })
+          .catch((error: unknown) => {
+            const pending = pendingBrowserOperations.get(id);
+            if (!pending) return;
+            pendingBrowserOperations.delete(id);
+            clearTimeout(pending.timer);
+            pending.resolve(browserToolError(error instanceof Error ? error.message : String(error)));
+          });
+      });
+    });
+
+    const stopBrowserBroker = async (): Promise<void> => {
+      for (const pending of pendingBrowserOperations.values()) {
+        clearTimeout(pending.timer);
+        pending.resolve(browserToolError("The Vibewaiting browser broker stopped."));
+      }
+      pendingBrowserOperations.clear();
+      await browserBroker.stop();
+    };
+
+    const stopDaemon = async (): Promise<void> => {
+      const active = daemon;
+      daemon = null;
+      bridge = null;
+      fingerprint = "";
+      const discovery = activeDiscoveryClient;
+      activeDiscoveryClient = null;
+      const failures: unknown[] = [];
+      for (const close of [() => stopBrowserBroker(), () => active?.stop(), () => discovery?.close()]) {
+        try { await close(); } catch (error) { failures.push(error); }
+      }
+      if (failures.length) throw new AggregateError(failures, "Native daemon cleanup failed");
+    };
+
+    cleanups.push(stopDaemon);
+
+    const start = async (requested: ExtensionSettings): Promise<void> => {
+      const settings = await validateSettings(requested);
+      const nextFingerprint = JSON.stringify(settings);
+      if (daemon && nextFingerprint === fingerprint) {
+        await daemon.flush();
+        await writer.write({
+          protocol: VIBEWAITING_EXTENSION_PROTOCOL,
+          type: "status",
+          phase: "ready",
+        });
+        return;
+      }
+      await stopDaemon();
+      await writer.write({
+        protocol: VIBEWAITING_EXTENSION_PROTOCOL,
+        type: "status",
+        phase: "starting",
+      });
+      const command = await localAgentCommand();
+      const client = new SupercodeHarnessClient({
+        cwd: settings.workspace,
+        requestTimeoutMs: 5_000,
+        command,
+      });
+      const discoveryClient = new SupercodeHarnessClient({
+        cwd: settings.workspace,
+        requestTimeoutMs: 5_000,
+        command,
+      });
+      const nextBridge = new NativeWidgetBridge(remoteServer, writer);
+      let nextDaemon: Daemon | null = null;
+      try {
+        nextDaemon = await startDaemon({
+          html: "",
+          workspace: settings.workspace,
+          ...(settings.harness ? { harness: settings.harness } : {}),
+          ...(settings.policy ? { policy: settings.policy } : {}),
+          client,
+          discoveryClient,
+          persistence: new FileMessengerPersistence(),
+          attachHost: async () => nextBridge,
+          log: (message) => process.stderr.write(`[vibewaiting] ${message}\n`),
+          terminalService,
+        });
+        await browserBroker.start(settings.workspace);
+        bridge = nextBridge;
+        daemon = nextDaemon;
+        activeDiscoveryClient = discoveryClient;
+        fingerprint = nextFingerprint;
+        await writer.write({
+          protocol: VIBEWAITING_EXTENSION_PROTOCOL,
+          type: "status",
+          phase: "ready",
+        });
+        if (requested.remoteAccess) {
+          void controller
+            .configure(requested.remoteAccess)
+            .catch((error: unknown) => {
+              process.stderr.write(
+                `[vibewaiting] remote access failed: ${(error as Error)?.message ?? String(error)}\n`,
+              );
+            });
+        }
+      } catch (error) {
+        if (daemon === nextDaemon) await stopDaemon();
+        else {
+          await stopBrowserBroker();
+          await nextDaemon?.stop().catch(() => undefined);
+        }
+        await client.close().catch(() => undefined);
+        await discoveryClient.close().catch(() => undefined);
+        await nextBridge.remove();
+        throw error;
+      }
+    };
+
+    handle = async (value: unknown): Promise<void> => {
+      const command = parseNativeHostCommand(value);
+      if (!command) throw new Error("Invalid native host command");
+      if (command.type === "start") {
+        await start(command.settings);
+        return;
+      }
+      if (command.type === "remote-access") {
+        if (!command.configuration.enabled) {
+          suppressRemoteDeviceEvents = true;
+          remoteServer.revokeRemoteSessions();
+          try {
+            await controller.configure(command.configuration);
+          } catch (error) {
+            process.stderr.write(
+              `[vibewaiting] remote access failed: ${(error as Error)?.message ?? String(error)}\n`,
+            );
+          } finally {
+            suppressRemoteDeviceEvents = false;
+            await publishRemoteAccess(remoteAccessSnapshot, false);
+          }
+          return;
+        }
+        await controller
+          .configure(command.configuration)
+          .catch((error: unknown) => {
+            process.stderr.write(
+              `[vibewaiting] remote access failed: ${(error as Error)?.message ?? String(error)}\n`,
+            );
+          });
+        return;
+      }
+      if (command.type === "remote-access-pairing") {
+        await publishRemoteAccess(remoteAccessSnapshot, true);
+        return;
+      }
+      if (command.type === "remote-access-revoke") {
+        suppressRemoteDeviceEvents = true;
+        try {
+          remoteServer.revokeRemoteSessions();
+        } finally {
+          suppressRemoteDeviceEvents = false;
+        }
+        await publishRemoteAccess(
+          remoteAccessSnapshot,
+          remoteAccessSnapshot.status === "connected",
+        );
+        return;
+      }
+      if (command.type === "browser-operation-pending") {
+        // The extension asked the person to approve this call; it answers
+        // within its 90 s decision window.
+        const pending = pendingBrowserOperations.get(command.id);
+        if (!pending) return;
+        clearTimeout(pending.timer);
+        pending.timer = browserTimeout(
+          command.id,
+          110_000,
+          "The Vibewaiting extension did not answer after asking the person.",
+        );
+        pending.pending?.(command.message);
+        return;
+      }
+      if (command.type === "browser-operation-response") {
+        const pending = pendingBrowserOperations.get(command.id);
+        if (!pending) return;
+        pendingBrowserOperations.delete(command.id);
+        clearTimeout(pending.timer);
+        pending.resolve(command.result);
+        return;
+      }
+      bridge?.receive(command.id, command.payload, "local");
+    };
+
+    initializedReady();
+    await stopped;
     await commandQueue;
     decoder.finish();
+  } catch (error) {
+    if (error !== lifetime.signal.reason) failure = error;
   } finally {
+    stop();
+    initializedReady();
+    process.stdin.removeListener("data", receive);
+    process.stdin.pause();
+    process.stdin.removeListener("end", stop);
+    process.stdin.removeListener("error", stopWithError);
+    const failures: unknown[] = failure === undefined ? [] : [failure];
+    try { await commandQueue; } catch (error) { failures.push(error); }
     writer.close();
-    remoteAccess.close();
-    await remoteServer.stop();
-    await stopDaemon();
-    await terminalService.stop();
+    for (const close of cleanups.reverse()) {
+      try { await close(); } catch (error) { failures.push(error); }
+    }
+    process.removeListener("SIGTERM", stop);
+    process.removeListener("SIGINT", stop);
+    if (failures.length) throw new AggregateError(failures, "Native host shutdown failed");
   }
 }
 
