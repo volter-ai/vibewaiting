@@ -74,12 +74,12 @@
   "dependencies": {
     "@termfleet/terminal": "0.1.9",
     "@volter/lucarne": "^2.0.2",
-    "@volter/supercode-agent": "0.1.0",
-    "@volter/supercode-agent-client": "0.3.80",
-    "@volter/supercode-agent-remote-access": "0.2.7",
-    "@volter/supercode-agent-sdk": "0.3.115",
-    "@volter/supercode-agent-terminal": "0.3.18",
-    "@volter/supercode-agent-ui": "0.1.158",
+    "@volter/supercode-agent": "file:/Users/themachine/volter/vo3843-builds/agent-0c59872a-fleet70/volter-supercode-agent-0.1.0.tgz",
+    "@volter/supercode-agent-client": "file:/Users/themachine/volter/vo3843-builds/agent-0c59872a-fleet70/volter-supercode-agent-client-0.3.80.tgz",
+    "@volter/supercode-agent-remote-access": "file:/Users/themachine/volter/vo3843-builds/agent-0c59872a-fleet70/volter-supercode-agent-remote-access-0.2.7.tgz",
+    "@volter/supercode-agent-sdk": "file:/Users/themachine/volter/vo3843-builds/agent-0c59872a-fleet70/volter-supercode-agent-sdk-0.3.115.tgz",
+    "@volter/supercode-agent-terminal": "file:/Users/themachine/volter/vo3843-builds/agent-0c59872a-fleet70/volter-supercode-agent-terminal-0.3.18.tgz",
+    "@volter/supercode-agent-ui": "file:/Users/themachine/volter/vo3843-builds/agent-0c59872a-fleet70/volter-supercode-agent-ui-0.1.158.tgz",
     "@volter/widget-shell": "0.6.1",
     "ws": "8.21.3"
   },
@@ -98,7 +98,26 @@
   "overrides": {
     "vite-plugin-top-level-await": {
       "uuid": "11.1.1"
-    }
+    },
+    "@volter/identity@0.4.3-main.70e6800a": "$@volter/identity",
+    "@volter/supercode-agent": "$@volter/supercode-agent",
+    "@volter/supercode-agent-client": "$@volter/supercode-agent-client",
+    "@volter/supercode-agent-frontend": "$@volter/supercode-agent-frontend",
+    "@volter/supercode-agent-orchestrator": "$@volter/supercode-agent-orchestrator",
+    "@volter/supercode-agent-remote-access": "$@volter/supercode-agent-remote-access",
+    "@volter/supercode-agent-runtime": "$@volter/supercode-agent-runtime",
+    "@volter/supercode-agent-sdk": "$@volter/supercode-agent-sdk",
+    "@volter/supercode-agent-terminal": "$@volter/supercode-agent-terminal",
+    "@volter/supercode-agent-ui": "$@volter/supercode-agent-ui",
+    "@volter/supercode-calendar@0.1.5-main.70e6800a": "$@volter/supercode-calendar",
+    "@volter/supercode-harness-sdk@0.3.116-main.70e6800a": "$@volter/supercode-harness-sdk",
+    "@volter/supercode-health@0.1.36-main.70e6800a": "$@volter/supercode-health",
+    "@volter/supercode-interchange@0.1.41-main.70e6800a": "$@volter/supercode-interchange",
+    "@volter/supercode-orchestrator@0.5.233-main.70e6800a": "$@volter/supercode-orchestrator",
+    "@volter/supercode-teams@0.3.397-main.70e6800a": "$@volter/supercode-teams",
+    "@volter/supercode-terminal@0.3.19-main.70e6800a": "$@volter/supercode-terminal",
+    "@volter/teams@0.2.116-main.70e6800a": "$@volter/teams",
+    "@volter/ztrack@3.0.2-main.70e6800a": "$@volter/ztrack"
   },
   "devDependencies": {
     "@homebridge/node-pty-prebuilt-multiarch": "0.13.1",
@@ -124,6 +143,19 @@
     "typescript": "^5.7.0",
     "vitest": "^4.1.11",
     "wrangler": "^4.140.0",
-    "yaml": "^2.9.0"
+    "yaml": "^2.9.0",
+    "@volter/identity": "file:/Users/themachine/volter/vo3843-builds/fleet-70e6800a/volter-identity-0.4.3-main.70e6800a.tgz",
+    "@volter/supercode-agent-frontend": "file:/Users/themachine/volter/vo3843-builds/agent-0c59872a-fleet70/volter-supercode-agent-frontend-0.2.14.tgz",
+    "@volter/supercode-agent-orchestrator": "file:/Users/themachine/volter/vo3843-builds/agent-0c59872a-fleet70/volter-supercode-agent-orchestrator-0.5.232.tgz",
+    "@volter/supercode-agent-runtime": "file:/Users/themachine/volter/vo3843-builds/agent-0c59872a-fleet70/volter-supercode-agent-runtime-0.1.40.tgz",
+    "@volter/supercode-calendar": "file:/Users/themachine/volter/vo3843-builds/fleet-70e6800a/volter-supercode-calendar-0.1.5-main.70e6800a.tgz",
+    "@volter/supercode-harness-sdk": "file:/Users/themachine/volter/vo3843-builds/fleet-70e6800a/volter-supercode-harness-sdk-0.3.116-main.70e6800a.tgz",
+    "@volter/supercode-health": "file:/Users/themachine/volter/vo3843-builds/fleet-70e6800a/volter-supercode-health-0.1.36-main.70e6800a.tgz",
+    "@volter/supercode-interchange": "file:/Users/themachine/volter/vo3843-builds/fleet-70e6800a/volter-supercode-interchange-0.1.41-main.70e6800a.tgz",
+    "@volter/supercode-orchestrator": "file:/Users/themachine/volter/vo3843-builds/fleet-70e6800a/volter-supercode-orchestrator-0.5.233-main.70e6800a.tgz",
+    "@volter/supercode-teams": "file:/Users/themachine/volter/vo3843-builds/fleet-70e6800a/volter-supercode-teams-0.3.397-main.70e6800a.tgz",
+    "@volter/supercode-terminal": "file:/Users/themachine/volter/vo3843-builds/fleet-70e6800a/volter-supercode-terminal-0.3.19-main.70e6800a.tgz",
+    "@volter/teams": "file:/Users/themachine/volter/vo3843-builds/fleet-70e6800a/volter-teams-0.2.116-main.70e6800a.tgz",
+    "@volter/ztrack": "file:/Users/themachine/volter/vo3843-builds/fleet-70e6800a/volter-ztrack-3.0.2-main.70e6800a.tgz"
   }
 }

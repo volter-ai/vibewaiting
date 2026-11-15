@@ -8,8 +8,9 @@ browser attachment and tunnels retain their existing owners. This follows
 The coding SDK starts `supercode-agent`; `SUPERCODE_CODING_BIN` selects an explicit
 executable. Local development selects one Agent checkout and one Fleet checkout
 (`SUPERCODE_FLEET_DIR`). `sync:local` packs their called public dependency closure
-and installs those artifacts together through npm, without changing the committed
-manifest or lock. Copied Agent packages resolve the selected native Fleet readers
+and installs those artifacts together through npm. Source-development locks select
+the exact native archives produced from named Agent and Fleet commits. A bundled dependency is validated against its original archive declaration, so root inputs name those same producer artifacts; copying them to different paths would change npm's source identity. Native npm overrides bind the called graph to those same inputs. The producer binds its owned peer declarations to the exact versions it packs. npm validates bundled peers against those original declarations, so the bundle carries a complete valid closure without relying on peer overrides.
+The local refresh leaves that committed manifest and lock unchanged. Copied Agent packages resolve the selected native Fleet readers
 and transport, including their transitive dependencies. It never binds a coding
 controller to the fleet command or an ambient native package graph.
 
